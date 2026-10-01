@@ -1,10 +1,14 @@
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:intl/intl.dart';
+import 'package:image_picker/image_picker.dart';
 import '../domain/models.dart';
 import '../services/ai_service.dart';
 import 'design.dart';
 import 'preferences.dart';
+import 'agent_actions_page.dart';
+import 'agent_action_card.dart';
 
 class ChatPage extends StatefulWidget {
   final String? initialPrompt;
@@ -18,6 +22,39 @@ class _ChatPageState extends State<ChatPage> {
   final input = TextEditingController(), scroll = ScrollController();
   bool started = false;
   int messageCount = -1;
+  String liveSignature = '';
+  AiImage? attachment;
+
+  Future<void> pickImage() async {
+    final ai = AppScope.of(context).ai;
+    if (!ai.supportsImages) {
+      toast(context, '请先在 AI 设置中启用支持图片输入的模型');
+      return;
+    }
+    try {
+      final file = await ImagePicker().pickImage(
+        source: ImageSource.gallery,
+        maxWidth: 1600,
+        maxHeight: 1600,
+        imageQuality: 85,
+      );
+      if (file == null || !mounted) return;
+      if (await file.length() > 5 * 1024 * 1024) {
+        throw const FormatException('请选择 5 MB 以内的图片');
+      }
+      final bytes = await file.readAsBytes();
+      final image = AiImage(
+        bytes,
+        bytes.isNotEmpty && bytes[0] == 137 ? 'image/png' : 'image/jpeg',
+      );
+      if (mounted) setState(() => attachment = image);
+    } catch (e) {
+      if (mounted) {
+        toast(context, e is FormatException ? e.message : '无法读取图片，请重新选择');
+      }
+    }
+  }
+
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
@@ -25,8 +62,16 @@ class _ChatPageState extends State<ChatPage> {
       started = true;
       input.text = widget.initialPrompt!;
     }
+    final ai = AppScope.of(context).ai;
     final length = AppScope.storeOf(context).data.chats.length;
-    if (length != messageCount) {
+    final live = ai.liveMessage;
+    final blocks = live?['blocks'] as List? ?? [];
+    final last = blocks.isEmpty ? null : blocks.last;
+    final signature =
+        '${live?['id']}:${live?['content']?.length}:${blocks.length}:${last?['text']?.length}:${last?['arguments']?.length}:${last?['status']}';
+    final nearBottom = !scroll.hasClients || scroll.position.extentAfter < 160;
+    if (length != messageCount || signature != liveSignature && nearBottom) {
+      liveSignature = signature;
       messageCount = length;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted && scroll.hasClients) {
@@ -49,19 +94,56 @@ class _ChatPageState extends State<ChatPage> {
 
   Future<void> send([String? prompt]) async {
     final ai = AppScope.of(context).ai;
-    final text = prompt ?? input.text.trim();
+    final text =
+        prompt ??
+        (input.text.trim().isEmpty && attachment != null
+            ? '请识别这张截图，先读取已有账户和设置，再准备待确认的账户或账单变更；不确定的信息请询问我。'
+            : input.text.trim());
     if (text.isEmpty || ai.busy) return;
     input.clear();
-    await ai.send(text, analysisRange: widget.analysisRange);
-    if (mounted && ai.error != null) input.text = text;
+    final image = attachment;
+    setState(() => attachment = null);
+    await ai.send(text, analysisRange: widget.analysisRange, image: image);
+    if (mounted && ai.error != null) {
+      setState(() {
+        input.text = text;
+        attachment = image;
+      });
+    }
+  }
+
+  Future<void> retry() async {
+    final ai = AppScope.of(context).ai;
+    final draft = input.text, image = attachment;
+    await ai.retryLast();
+    if (mounted &&
+        ai.error == null &&
+        input.text == draft &&
+        attachment == image) {
+      setState(() {
+        input.clear();
+        attachment = null;
+      });
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     final store = AppScope.storeOf(context), ai = AppScope.of(context).ai;
-    final today = dayKey(DateTime.now());
     final messages = store.data.chats
-        .where((m) => dayKey(localDate(m['timestamp'])) == today)
+        .where((m) => m['id'] != ai.liveMessage?['id'])
+        .toList();
+    if (ai.liveMessage != null) messages.add(ai.liveMessage!);
+    final proposalOwners = <String, String>{
+      for (final m in messages)
+        for (final id in _proposalIds(m)) id: m['id'] as String,
+    };
+    final actions = ai.actions.items.reversed.toList();
+    final unlinked = actions
+        .where(
+          (a) =>
+              a['status'] == 'pending' && !proposalOwners.containsKey(a['id']),
+        )
         .toList();
     return Scaffold(
       appBar: AppBar(
@@ -69,12 +151,21 @@ class _ChatPageState extends State<ChatPage> {
           children: [
             Text(store.data.agent['name'] ?? 'AI 顾问'),
             Text(
-              ai.busy ? store.aiStatus! : ai.config['model'],
+              ai.busy
+                  ? store.aiStatus!
+                  : (ai.config['model'] as String).isEmpty
+                  ? '请配置模型'
+                  : ai.config['model'],
               style: const TextStyle(fontSize: 11, color: muted),
             ),
           ],
         ),
         actions: [
+          IconButton(
+            tooltip: '操作管理',
+            onPressed: () => openPage(context, const AgentActionsPage()),
+            icon: const Icon(Icons.fact_check_outlined),
+          ),
           IconButton(
             tooltip: '历史对话',
             onPressed: () => openPage(context, const ChatHistoryPage()),
@@ -94,10 +185,10 @@ class _ChatPageState extends State<ChatPage> {
               controller: scroll,
               padding: const EdgeInsets.fromLTRB(20, 10, 20, 24),
               children: [
-                if (messages.isEmpty) ...[
+                if (messages.isEmpty && unlinked.isEmpty) ...[
                   EmptyState(
                     '给每一笔钱，一个更好的计划',
-                    '我可以分析真实账单、查看账户、发现支出变化，并记住你明确告诉我的目标。',
+                    '我可以分析真实账单、读取账户设置，并根据文字或截图准备可核对的账户和账单变更。',
                     icon: Icons.auto_awesome_rounded,
                   ),
                   Panel(
@@ -122,7 +213,19 @@ class _ChatPageState extends State<ChatPage> {
                     ),
                   ),
                 ],
-                ...messages.map((m) => _Message(m)),
+                ...messages.map(
+                  (m) => _Message(
+                    m,
+                    actions: actions
+                        .where((a) => proposalOwners[a['id']] == m['id'])
+                        .toList(),
+                  ),
+                ),
+                for (final a in unlinked)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 14),
+                    child: AgentActionCard(key: ValueKey(a['id']), action: a),
+                  ),
                 if (ai.busy)
                   Padding(
                     padding: const EdgeInsets.only(top: 14),
@@ -152,11 +255,14 @@ class _ChatPageState extends State<ChatPage> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text(ai.error!, style: const TextStyle(color: coral)),
+                        SelectableText(
+                          ai.error!,
+                          style: const TextStyle(color: coral),
+                        ),
                         Row(
                           children: [
                             TextButton(
-                              onPressed: ai.busy ? null : ai.retryLast,
+                              onPressed: ai.busy ? null : retry,
                               child: const Text('重试'),
                             ),
                             TextButton(
@@ -194,6 +300,35 @@ class _ChatPageState extends State<ChatPage> {
                 ],
               ),
             ),
+          if (attachment != null)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: Row(
+                children: [
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(8),
+                    child: Image.memory(
+                      attachment!.bytes,
+                      width: 56,
+                      height: 56,
+                      fit: BoxFit.cover,
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  const Expanded(
+                    child: Text(
+                      '发送时将图片交给所配置的 AI 服务；图片不保存到聊天历史。',
+                      style: TextStyle(fontSize: 12),
+                    ),
+                  ),
+                  IconButton(
+                    tooltip: '移除截图',
+                    onPressed: () => setState(() => attachment = null),
+                    icon: const Icon(Icons.close),
+                  ),
+                ],
+              ),
+            ),
           SafeArea(
             top: false,
             child: Padding(
@@ -201,6 +336,11 @@ class _ChatPageState extends State<ChatPage> {
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
+                  IconButton(
+                    tooltip: '添加截图',
+                    onPressed: ai.busy ? null : pickImage,
+                    icon: const Icon(Icons.add_photo_alternate_outlined),
+                  ),
                   Expanded(
                     child: TextField(
                       controller: input,
@@ -209,7 +349,7 @@ class _ChatPageState extends State<ChatPage> {
                       maxLength: 3000,
                       textInputAction: TextInputAction.newline,
                       decoration: const InputDecoration(
-                        hintText: '聊聊你的收支与目标…',
+                        hintText: '分析账单，或描述想调整的账户…',
                         counterText: '',
                       ),
                     ),
@@ -232,7 +372,8 @@ class _ChatPageState extends State<ChatPage> {
 
 class _Message extends StatelessWidget {
   final Json message;
-  const _Message(this.message);
+  final List<Json>? actions;
+  const _Message(this.message, {this.actions});
   @override
   Widget build(BuildContext context) {
     final user = message['role'] == 'user';
@@ -264,35 +405,268 @@ class _Message extends StatelessWidget {
               borderRadius: BorderRadius.circular(18),
             ),
             child: user
-                ? SelectableText(message['content'])
-                : MarkdownBody(
-                    data: message['content'],
-                    selectable: true,
-                    styleSheet: MarkdownStyleSheet(
-                      p: TextStyle(
-                        color: Theme.of(context).colorScheme.onSurface,
-                        fontSize: 14,
-                        height: 1.65,
+                ? SelectableText(
+                    '${message['content']}${message['hasImage'] == true ? '\n📎 附有截图（图片未保存）' : ''}',
+                  )
+                : _AssistantContent(message, actions: actions),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+Set<String> _proposalIds(Json message) {
+  final ids = <String>{};
+  if (message['role'] == 'assistant' && message['actionId'] is String) {
+    ids.add(message['actionId'] as String);
+  }
+  for (final block in message['blocks'] as List? ?? []) {
+    if (block['type'] != 'tool' || !'${block['name']}'.startsWith('propose_')) {
+      continue;
+    }
+    try {
+      final raw = block['result'];
+      final result = raw is String ? jsonDecode(raw) : raw;
+      if (result is Map && result['proposalId'] is String) {
+        ids.add(result['proposalId'] as String);
+      }
+    } catch (_) {
+      // Partial streamed arguments/results do not yet identify a proposal.
+    }
+  }
+  return ids;
+}
+
+class _AssistantContent extends StatelessWidget {
+  final Json message;
+  final List<Json>? actions;
+  const _AssistantContent(this.message, {this.actions});
+
+  @override
+  Widget build(BuildContext context) {
+    final blocks = message['blocks'] as List? ?? [];
+    final proposals =
+        actions ??
+        AppScope.of(context).ai.actions.items
+            .where((a) => _proposalIds(message).contains(a['id']))
+            .toList();
+    final hasTrace =
+        blocks.any((b) => b['type'] == 'tool' || b['type'] == 'reasoning') ||
+        message['usage'] is List ||
+        message['error'] != null;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (hasTrace) _ProcessingTrace(message),
+        if (blocks.isEmpty && '${message['content'] ?? ''}'.isNotEmpty)
+          MarkdownBody(data: '${message['content']}', selectable: true),
+        for (final block in blocks)
+          if (block['type'] == 'text')
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 6),
+              child: MarkdownBody(data: '${block['text']}', selectable: true),
+            ),
+        for (final a in proposals)
+          Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: AgentActionCard(key: ValueKey(a['id']), action: a),
+          ),
+        if (message['status'] == 'cancelled')
+          const Text(
+            '已停止 · 已保留收到的内容',
+            style: TextStyle(color: muted, fontSize: 12),
+          ),
+        if (message['status'] == 'streaming' && blocks.isEmpty)
+          const Text('等待模型输出…', style: TextStyle(color: muted)),
+      ],
+    );
+  }
+}
+
+class _ProcessingTrace extends StatelessWidget {
+  final Json message;
+  const _ProcessingTrace(this.message);
+
+  String pretty(dynamic value) {
+    try {
+      return const JsonEncoder.withIndent(
+        '  ',
+      ).convert(value is String ? jsonDecode(value) : value);
+    } catch (_) {
+      return '${value ?? ''}';
+    }
+  }
+
+  String status(Json block) => switch (block['status']) {
+    'complete' => '已完成',
+    'error' => '失败',
+    'running' => '执行中',
+    _ => ['cancelled', 'error'].contains(message['status']) ? '未执行' : '接收参数',
+  };
+
+  void details(BuildContext context) {
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      showDragHandle: true,
+      builder: (context) {
+        AppScope.storeOf(context);
+        final blocks = message['blocks'] as List? ?? [];
+        return FractionallySizedBox(
+          heightFactor: .8,
+          child: ListView(
+            padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
+            children: [
+              Text('处理记录', style: Theme.of(context).textTheme.titleMedium),
+              const SizedBox(height: 8),
+              for (var i = 0; i < blocks.length; i++)
+                if (blocks[i]['type'] == 'reasoning')
+                  ExpansionTile(
+                    key: ValueKey('${message['id']}:reasoning:$i'),
+                    tilePadding: EdgeInsets.zero,
+                    title: const Text(
+                      '思考 / 摘要',
+                      style: TextStyle(fontSize: 13),
+                    ),
+                    children: [
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: MarkdownBody(
+                          data: '${blocks[i]['text']}',
+                          selectable: true,
+                        ),
                       ),
-                      h1: const TextStyle(
-                        fontSize: 20,
-                        fontWeight: FontWeight.w700,
-                      ),
-                      h2: const TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.w700,
-                      ),
-                      h3: const TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.w700,
-                      ),
-                      blockquoteDecoration: BoxDecoration(
-                        color: primary.withValues(alpha: .1),
-                        borderRadius: BorderRadius.circular(8),
+                    ],
+                  )
+                else if (blocks[i]['type'] == 'tool')
+                  ExpansionTile(
+                    key: ValueKey('${message['id']}:tool:$i'),
+                    tilePadding: EdgeInsets.zero,
+                    title: Text(
+                      '${toolLabels[blocks[i]['name']] ?? blocks[i]['name'] ?? '工具调用'}'
+                          .replaceAll('…', ''),
+                      style: const TextStyle(fontSize: 13),
+                    ),
+                    subtitle: Text(
+                      status(Json.from(blocks[i])),
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: blocks[i]['status'] == 'error' ? coral : muted,
                       ),
                     ),
+                    children: [
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text(
+                              '调用参数',
+                              style: TextStyle(fontWeight: FontWeight.w600),
+                            ),
+                            SelectableText(
+                              pretty(blocks[i]['arguments']),
+                              style: const TextStyle(fontSize: 12),
+                            ),
+                            if (blocks[i]['result'] != null) ...[
+                              const SizedBox(height: 8),
+                              const Text(
+                                '工具结果',
+                                style: TextStyle(fontWeight: FontWeight.w600),
+                              ),
+                              SelectableText(
+                                pretty(blocks[i]['result']),
+                                style: const TextStyle(fontSize: 12),
+                              ),
+                            ],
+                          ],
+                        ),
+                      ),
+                    ],
                   ),
+              if (message['error'] != null)
+                SelectableText(
+                  '${message['error']}',
+                  style: const TextStyle(color: coral, fontSize: 12),
+                ),
+              if (message['usage'] is List)
+                ExpansionTile(
+                  tilePadding: EdgeInsets.zero,
+                  title: const Text('用量与响应信息', style: TextStyle(fontSize: 13)),
+                  children: [
+                    SelectableText(
+                      pretty({
+                        'model': message['model'],
+                        'responseId': message['responseId'],
+                        'usage': message['usage'],
+                      }),
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                  ],
+                ),
+            ],
           ),
+        );
+      },
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final blocks = message['blocks'] as List? ?? [];
+    final tools = blocks.where((b) => b['type'] == 'tool').toList();
+    final errors = tools.where((b) => b['status'] == 'error').length;
+    final running = tools
+        .where((b) => b['status'] == 'running' || b['status'] == 'pending')
+        .lastOrNull;
+    final active = message['status'] == 'streaming';
+    final label = message['error'] != null
+        ? '请求失败 · 查看记录'
+        : active && running != null
+        ? '${toolLabels[running['name']] ?? '调用工具…'} · ${tools.length} 次调用'
+        : tools.isNotEmpty
+        ? '${tools.length} 次工具调用${errors > 0
+              ? ' · $errors 次失败'
+              : message['status'] == 'cancelled'
+              ? ' · 已停止'
+              : ''}'
+        : active
+        ? '思考中…'
+        : '处理记录';
+    return TextButton(
+      key: ValueKey('${message['id']}:processing'),
+      style: TextButton.styleFrom(
+        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+        minimumSize: const Size(0, 36),
+        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        foregroundColor: errors > 0 || message['error'] != null ? coral : muted,
+      ),
+      onPressed: () => details(context),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            errors > 0 || message['error'] != null
+                ? Icons.error_outline
+                : active || message['status'] == 'cancelled'
+                ? Icons.more_horiz
+                : Icons.check_circle_outline,
+            size: 14,
+          ),
+          const SizedBox(width: 6),
+          Flexible(
+            child: Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontSize: 12),
+            ),
+          ),
+          const SizedBox(width: 2),
+          const Icon(Icons.chevron_right, size: 14),
         ],
       ),
     );
@@ -349,7 +723,7 @@ class ChatHistoryPage extends StatelessWidget {
                     '${messages.length} 条',
                     style: const TextStyle(color: muted),
                   ),
-                  onTap: () => openPage(context, _HistoryDetail(day, messages)),
+                  onTap: () => openPage(context, _HistoryDetail(day)),
                 ),
               ),
             );
@@ -362,13 +736,42 @@ class ChatHistoryPage extends StatelessWidget {
 
 class _HistoryDetail extends StatelessWidget {
   final String date;
-  final List<Json> messages;
-  const _HistoryDetail(this.date, this.messages);
+  const _HistoryDetail(this.date);
   @override
-  Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(title: Text(date)),
-    body: PageList(children: messages.map((m) => _Message(m)).toList()),
-  );
+  Widget build(BuildContext context) {
+    final store = AppScope.storeOf(context);
+    final messages = store.data.chats
+        .where((m) => dayKey(localDate(m['timestamp'])) == date)
+        .toList();
+    final actions = AppScope.of(context).ai.actions.items.reversed.toList();
+    final owners = <String, String>{
+      for (final m in messages)
+        for (final id in _proposalIds(m)) id: m['id'] as String,
+    };
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(date),
+        actions: [
+          TextButton(
+            onPressed: () => openPage(context, const ChatPage()),
+            child: const Text('继续对话'),
+          ),
+        ],
+      ),
+      body: PageList(
+        children: messages
+            .map(
+              (m) => _Message(
+                m,
+                actions: actions
+                    .where((a) => owners[a['id']] == m['id'])
+                    .toList(),
+              ),
+            )
+            .toList(),
+      ),
+    );
+  }
 }
 
 class AgentStatePage extends StatelessWidget {

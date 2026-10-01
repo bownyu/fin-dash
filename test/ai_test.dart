@@ -20,7 +20,7 @@ void main() {
   test(
     'tool calls use real account state and cognition is persisted before acknowledgement',
     () async {
-      final store = await emptyStore();
+      final store = await configuredAiStore();
       await store.saveAccount(bank);
       var round = 0;
       final ai = AiService(
@@ -76,7 +76,7 @@ void main() {
   test(
     'network error retains user message and retry does not duplicate it',
     () async {
-      final store = await emptyStore();
+      final store = await configuredAiStore();
       var fail = true;
       final ai = AiService(
         store,
@@ -87,7 +87,8 @@ void main() {
       );
       await ai.send('你好');
       expect(ai.error, contains('密钥'));
-      expect(store.data.chats.length, 1);
+      expect(store.data.chats.length, 2);
+      expect(store.data.chats.last['status'], 'error');
       fail = false;
       await ai.retryLast();
       expect(store.data.chats.length, 2);
@@ -97,7 +98,7 @@ void main() {
   test(
     'retry after missing key sends the failed prompt rather than a previous conversation',
     () async {
-      final store = await emptyStore(), vault = TestVault();
+      final store = await configuredAiStore(), vault = TestVault();
       final ai = AiService(
         store,
         vault,
@@ -117,7 +118,7 @@ void main() {
   test(
     'cancelled response cannot overwrite a newer request or append stale assistant text',
     () async {
-      final store = await emptyStore();
+      final store = await configuredAiStore();
       final first = Completer<http.Response>(),
           second = Completer<http.Response>();
       var index = 0;
@@ -151,7 +152,7 @@ void main() {
     },
   );
   test('historical analysis cache changes when ledger changes', () async {
-    final store = await emptyStore();
+    final store = await configuredAiStore();
     await store.saveAccount(bank);
     var requests = 0;
     final ai = AiService(
@@ -173,7 +174,7 @@ void main() {
   test(
     'query date boundaries are explicit and transfer is excluded from income and expense',
     () async {
-      final store = await emptyStore();
+      final store = await configuredAiStore();
       await store.saveAccount(bank);
       await store.saveAccount(cash);
       await store.saveTx(tx(date: DateTime(2026, 10, 1)));

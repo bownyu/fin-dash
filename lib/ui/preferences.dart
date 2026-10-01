@@ -1210,8 +1210,16 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
   final keyInput = TextEditingController(),
       url = TextEditingController(),
       model = TextEditingController();
-  String provider = 'zhipu';
+  String provider = 'custom',
+      protocol = chatProtocol,
+      reasoningEffort = 'default';
   bool initialized = false, saving = false, hidden = true, loading = true;
+  String? connectionResult;
+  bool connectionFailed = false;
+  bool supportsImages = false,
+      streaming = true,
+      toolsEnabled = true,
+      reasoningSummary = false;
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
@@ -1224,12 +1232,15 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
   Future<void> load(String value) async {
     setState(() => loading = true);
     final scope = AppScope.of(context);
-    final c = {
-      ...providerDefaults[value]!,
-      ...Json.from(scope.notifier!.data.providerConfigs[value] ?? {}),
-    };
+    final c = scope.ai.config;
     url.text = c['baseURL'];
     model.text = c['model'];
+    supportsImages = c['supportsImages'] == true;
+    protocol = c['protocol'] ?? chatProtocol;
+    streaming = c['stream'] != false;
+    toolsEnabled = c['toolsEnabled'] != false;
+    reasoningEffort = c['reasoningEffort'] ?? 'default';
+    reasoningSummary = c['reasoningSummary'] == true;
     try {
       final key = await scope.ai.vault.read(value);
       if (mounted && provider == value) keyInput.text = key ?? '';
@@ -1247,29 +1258,67 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
       return;
     }
     try {
-      endpoint(url.text);
+      endpoint(url.text, protocol: protocol);
       if (model.text.trim().isEmpty) throw const FormatException('请填写模型名称');
     } on FormatException catch (e) {
       toast(context, e.message);
       return;
     }
     setState(() => saving = true);
-    final ok = await perform(context, () async {
-      await scope.ai.vault.write(provider, keyInput.text.trim());
-      await scope.notifier!.change((d) {
-        d.settings['provider'] = provider;
-        d.providerConfigs[provider] = {
-          'baseURL': url.text.trim(),
-          'model': model.text.trim(),
-        };
-        d.extras.remove('analysisCache');
-      });
-    }, success: 'AI 设置已保存');
+    final snapshot = formConfiguration;
+    final enteredKey = keyInput.text.trim();
+    final ok = await perform(
+      context,
+      () => scope.ai.saveConfiguration(snapshot, enteredKey),
+      success: 'AI 设置已保存',
+    );
     if (!mounted) return;
+    if (ok) provider = 'custom';
     if (ok && close) {
       Navigator.pop(context);
     } else {
       setState(() => saving = false);
+    }
+  }
+
+  Json get formConfiguration => {
+    'baseURL': url.text.trim(),
+    'model': model.text.trim(),
+    'supportsImages': supportsImages,
+    'protocol': protocol,
+    'stream': streaming,
+    'toolsEnabled': toolsEnabled,
+    'reasoningEffort': reasoningEffort,
+    'reasoningSummary': reasoningSummary,
+  };
+
+  Future<void> testConnection() async {
+    if (saving || loading) return;
+    final ai = AppScope.of(context).ai;
+    final snapshot = formConfiguration, enteredKey = keyInput.text.trim();
+    setState(() {
+      saving = true;
+      connectionResult = null;
+    });
+    try {
+      final result = await ai.testConnection(snapshot, enteredKey);
+      if (mounted) {
+        setState(() {
+          connectionResult = result;
+          connectionFailed = false;
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          connectionResult = e is FormatException
+              ? e.message.toString()
+              : e.toString();
+          connectionFailed = true;
+        });
+      }
+    } finally {
+      if (mounted) setState(() => saving = false);
     }
   }
 
@@ -1298,7 +1347,7 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
               ),
               const SizedBox(height: 8),
               const Text(
-                '支持智谱、NVIDIA NIM 和 OpenAI 兼容服务。密钥单独保存，不包含在账本备份中。',
+                '自定义 OpenAI 兼容接口，支持 Responses 和 Chat Completions。密钥单独保存，不包含在账本备份中。',
                 style: TextStyle(color: muted, fontSize: 13),
               ),
             ],
@@ -1306,27 +1355,26 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
         ),
         const SizedBox(height: 22),
         DropdownButtonFormField<String>(
-          initialValue: provider,
-          decoration: const InputDecoration(labelText: '模型服务'),
-          items: providerDefaults.entries
-              .map(
-                (p) => DropdownMenuItem(
-                  value: p.key,
-                  child: Text(p.value['name']),
-                ),
-              )
-              .toList(),
+          initialValue: protocol,
+          isExpanded: true,
+          decoration: const InputDecoration(labelText: '接口协议'),
+          items: const [
+            DropdownMenuItem(
+              value: responsesProtocol,
+              child: Text('Responses'),
+            ),
+            DropdownMenuItem(
+              value: chatProtocol,
+              child: Text('Chat Completions'),
+            ),
+          ],
           onChanged: saving || loading
               ? null
-              : (v) async {
-                  await save(close: false);
-                  if (!mounted) return;
-                  setState(() => provider = v!);
-                  await load(provider);
-                },
+              : (v) => setState(() => protocol = v!),
         ),
         const SizedBox(height: 18),
         TextField(
+          enabled: !saving && !loading,
           controller: keyInput,
           obscureText: hidden,
           enableSuggestions: false,
@@ -1346,16 +1394,72 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
         ),
         const SizedBox(height: 18),
         TextField(
+          enabled: !saving && !loading,
           controller: url,
           decoration: const InputDecoration(
             labelText: 'Base URL',
-            helperText: '填写 API 基础地址，如 https://…/v1',
+            helperText: '填写基础地址或完整 /responses、/chat/completions 地址',
+            helperMaxLines: 2,
           ),
         ),
         const SizedBox(height: 18),
         TextField(
+          enabled: !saving && !loading,
           controller: model,
           decoration: const InputDecoration(labelText: '模型名称'),
+        ),
+        SwitchListTile(
+          contentPadding: EdgeInsets.zero,
+          title: const Text('流式输出'),
+          subtitle: const Text('逐段显示回答、服务返回的思考与工具过程；不支持流式的服务可关闭。'),
+          value: streaming,
+          onChanged: saving || loading
+              ? null
+              : (v) => setState(() => streaming = v),
+        ),
+        SwitchListTile(
+          contentPadding: EdgeInsets.zero,
+          title: const Text('启用工具调用'),
+          subtitle: const Text('读取账本、管理记忆并准备待确认操作。模型需要支持 function calling。'),
+          value: toolsEnabled,
+          onChanged: saving || loading
+              ? null
+              : (v) => setState(() => toolsEnabled = v),
+        ),
+        DropdownButtonFormField<String>(
+          initialValue: reasoningEffort,
+          isExpanded: true,
+          decoration: const InputDecoration(labelText: '思考强度'),
+          items: const [
+            DropdownMenuItem(value: 'default', child: Text('服务默认（不传参数）')),
+            DropdownMenuItem(value: 'low', child: Text('低')),
+            DropdownMenuItem(value: 'medium', child: Text('中')),
+            DropdownMenuItem(value: 'high', child: Text('高')),
+          ],
+          onChanged: saving || loading
+              ? null
+              : (v) => setState(() => reasoningEffort = v!),
+        ),
+        if (protocol == responsesProtocol)
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            title: const Text('请求思考摘要'),
+            subtitle: const Text(
+              '仅适用于支持 reasoning.summary 的模型。未返回思考时不会生成或展示虚构内容。',
+            ),
+            value: reasoningSummary,
+            onChanged: saving || loading
+                ? null
+                : (v) => setState(() => reasoningSummary = v),
+          ),
+        SwitchListTile(
+          contentPadding: EdgeInsets.zero,
+          title: const Text('启用图片输入'),
+          subtitle: const Text('所选模型需同时支持图片与工具调用。截图仅在你点击发送时上传到此服务。'),
+          value: supportsImages,
+          onChanged: saving || loading
+              ? null
+              : (v) => setState(() => supportsImages = v),
         ),
         const SizedBox(height: 24),
         FilledButton(
@@ -1368,6 +1472,26 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
                 : '保存设置',
           ),
         ),
+        const SizedBox(height: 12),
+        OutlinedButton(
+          onPressed: saving || loading ? null : testConnection,
+          child: const Text('测试连接'),
+        ),
+        const Text(
+          '测试仅发送简短探测，不读取账本；测试成功不代表模型支持所有工具或图片。',
+          style: TextStyle(fontSize: 12, color: muted),
+        ),
+        if (connectionResult != null)
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 12),
+            child: SelectableText(
+              connectionResult!,
+              style: TextStyle(
+                color: connectionFailed ? coral : primary,
+                fontSize: 12,
+              ),
+            ),
+          ),
         const SizedBox(height: 14),
         TextButton(
           onPressed: saving || loading

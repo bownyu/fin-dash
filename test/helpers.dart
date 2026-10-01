@@ -20,6 +20,18 @@ Future<WalletStore> emptyStore([MemoryStorage? storage]) async {
   return store;
 }
 
+Future<WalletStore> configuredAiStore() async {
+  final store = await emptyStore();
+  await store.change(
+    (d) => d.providerConfigs['custom'] = {
+      'baseURL': 'https://example.com/v1',
+      'model': 'test-model',
+      'protocol': chatProtocol,
+    },
+  );
+  return store;
+}
+
 const bank = WalletAccount(
   id: 'bank',
   name: '银行卡',
