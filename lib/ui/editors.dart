@@ -10,6 +10,8 @@ class TransactionEditor extends StatefulWidget {
   final bool saveAsQuick;
   final TxType initialType;
   final String? initialAccount;
+  final Future<void> Function(LedgerTx)? onSave;
+  final String? pageTitle, reviewNote;
   const TransactionEditor({
     super.key,
     this.initial,
@@ -17,6 +19,9 @@ class TransactionEditor extends StatefulWidget {
     this.saveAsQuick = false,
     this.initialType = TxType.expense,
     this.initialAccount,
+    this.onSave,
+    this.pageTitle,
+    this.reviewNote,
   });
   @override
   State<TransactionEditor> createState() => _TransactionEditorState();
@@ -51,7 +56,12 @@ class _TransactionEditorState extends State<TransactionEditor> {
     final ids = store.activeAccounts.map((a) => a.id).toList();
     String? valid(String? id) => ids.contains(id) ? id : null;
     accountId =
-        valid(tx?.accountId ?? q?.accountId ?? widget.initialAccount) ??
+        valid(
+          tx?.accountId ??
+              q?.accountId ??
+              widget.initialAccount ??
+              store.data.settings['quickEntryAccountId'],
+        ) ??
         (widget.saveAsQuick || tx != null || q != null
             ? null
             : ids.firstOrNull);
@@ -132,23 +142,22 @@ class _TransactionEditorState extends State<TransactionEditor> {
           ),
         );
       } else {
-        await store.saveTx(
-          LedgerTx(
-            id: widget.initial?.id ?? newId(),
-            title: name,
-            amount: cents!,
-            date: changedDate || widget.initial != null ? date : DateTime.now(),
-            type: type,
-            category: type == TxType.transfer ? '转账' : category ?? '其他',
-            icon: type == TxType.transfer
-                ? 'swap_horiz'
-                : cat?.icon ?? 'receipt_long',
-            note: note.text.trim(),
-            accountId: type == TxType.transfer ? null : accountId,
-            fromId: type == TxType.transfer ? fromId : null,
-            toId: type == TxType.transfer ? toId : null,
-          ),
+        final transaction = LedgerTx(
+          id: widget.initial?.id ?? newId(),
+          title: name,
+          amount: cents!,
+          date: changedDate || widget.initial != null ? date : DateTime.now(),
+          type: type,
+          category: type == TxType.transfer ? '转账' : category ?? '其他',
+          icon: type == TxType.transfer
+              ? 'swap_horiz'
+              : cat?.icon ?? 'receipt_long',
+          note: note.text.trim(),
+          accountId: type == TxType.transfer ? null : accountId,
+          fromId: type == TxType.transfer ? fromId : null,
+          toId: type == TxType.transfer ? toId : null,
         );
+        await (widget.onSave ?? store.saveTx)(transaction);
       }
     });
     if (!mounted) return;
@@ -217,13 +226,14 @@ class _TransactionEditorState extends State<TransactionEditor> {
     return Scaffold(
       appBar: AppBar(
         title: Text(
-          widget.saveAsQuick
-              ? widget.quick == null
-                    ? '添加快捷交易'
-                    : '编辑快捷交易'
-              : widget.initial == null
-              ? '记一笔'
-              : '编辑账单',
+          widget.pageTitle ??
+              (widget.saveAsQuick
+                  ? widget.quick == null
+                        ? '添加快捷交易'
+                        : '编辑快捷交易'
+                  : widget.initial == null
+                  ? '记一笔'
+                  : '编辑账单'),
         ),
         leading: IconButton(
           tooltip: '关闭',
@@ -235,6 +245,10 @@ class _TransactionEditorState extends State<TransactionEditor> {
         key: form,
         child: PageList(
           children: [
+            if (widget.reviewNote != null) ...[
+              Panel(child: Text(widget.reviewNote!)),
+              const SizedBox(height: 16),
+            ],
             SegmentedButton<TxType>(
               segments: TxType.values
                   .map((t) => ButtonSegment(value: t, label: Text(t.label)))
@@ -250,8 +264,9 @@ class _TransactionEditorState extends State<TransactionEditor> {
                           ?.name;
                     }),
             ),
-            const SizedBox(height: 20),
+            const SizedBox(height: 12),
             Panel(
+              padding: const EdgeInsets.all(14),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -263,9 +278,7 @@ class _TransactionEditorState extends State<TransactionEditor> {
                   TextFormField(
                     key: const Key('amount-input'),
                     controller: amount,
-                    keyboardType: const TextInputType.numberWithOptions(
-                      decimal: true,
-                    ),
+                    keyboardType: TextInputType.none,
                     inputFormatters: [
                       FilteringTextInputFormatter.allow(RegExp(r'[0-9.]')),
                     ],
@@ -291,7 +304,15 @@ class _TransactionEditorState extends State<TransactionEditor> {
                 ],
               ),
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: 12),
+            if (type != TxType.transfer)
+              accountField('使用账户', accountId, (v) => accountId = v)
+            else ...[
+              accountField('转出账户', fromId, (v) => fromId = v),
+              const SizedBox(height: 10),
+              accountField('转入账户', toId, (v) => toId = v),
+            ],
+            const SizedBox(height: 12),
             TextFormField(
               controller: title,
               maxLength: 40,
@@ -302,64 +323,24 @@ class _TransactionEditorState extends State<TransactionEditor> {
             ),
             if (type != TxType.transfer) ...[
               const SizedBox(height: 8),
-              Text('选择分类', style: Theme.of(context).textTheme.titleMedium),
-              const SizedBox(height: 10),
-              LayoutBuilder(
-                builder: (context, box) => Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: categories
-                      .map(
-                        (c) => SizedBox(
-                          width: (box.maxWidth - 24) / 4,
-                          child: Material(
-                            color: category == c.name
-                                ? colorOf(c.color).withValues(alpha: .16)
-                                : Theme.of(context).colorScheme.surface,
-                            borderRadius: BorderRadius.circular(14),
-                            child: InkWell(
-                              borderRadius: BorderRadius.circular(14),
-                              onTap: () => setState(() => category = c.name),
-                              child: Padding(
-                                padding: const EdgeInsets.symmetric(
-                                  vertical: 14,
-                                ),
-                                child: Column(
-                                  children: [
-                                    Icon(
-                                      iconOf(c.icon),
-                                      color: category == c.name
-                                          ? colorOf(c.color)
-                                          : muted,
-                                    ),
-                                    const SizedBox(height: 6),
-                                    Text(
-                                      c.name,
-                                      style: TextStyle(
-                                        fontSize: 12,
-                                        color: category == c.name
-                                            ? colorOf(c.color)
-                                            : null,
-                                      ),
-                                      overflow: TextOverflow.ellipsis,
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                      )
-                      .toList(),
-                ),
+              DropdownButtonFormField<String>(
+                key: ValueKey('transaction-category:$type:$category'),
+                initialValue: categories.any((c) => c.name == category)
+                    ? category
+                    : null,
+                isExpanded: true,
+                decoration: const InputDecoration(labelText: '选择分类'),
+                items: categories
+                    .map(
+                      (c) =>
+                          DropdownMenuItem(value: c.name, child: Text(c.name)),
+                    )
+                    .toList(),
+                onChanged: saving
+                    ? null
+                    : (value) => setState(() => category = value),
               ),
-              const SizedBox(height: 20),
-              accountField('使用账户', accountId, (v) => accountId = v),
             ] else ...[
-              const SizedBox(height: 8),
-              accountField('转出账户', fromId, (v) => fromId = v),
-              const SizedBox(height: 14),
-              accountField('转入账户', toId, (v) => toId = v),
               const SizedBox(height: 12),
               const Text(
                 '账户之间的转账不计入收入或支出。还信用卡也可使用转账。',
@@ -367,123 +348,152 @@ class _TransactionEditorState extends State<TransactionEditor> {
               ),
             ],
             if (!widget.saveAsQuick) ...[
-              const SizedBox(height: 18),
-              Row(
+              ExpansionTile(
+                tilePadding: EdgeInsets.zero,
+                title: const Text('日期和备注（可选）', style: TextStyle(fontSize: 14)),
                 children: [
-                  Expanded(
-                    child: OutlinedButton.icon(
-                      icon: const Icon(Icons.calendar_month_rounded, size: 18),
-                      label: Text(DateFormat('yyyy/MM/dd').format(date)),
-                      onPressed: () async {
-                        final picked = await showDatePicker(
-                          context: context,
-                          initialDate: date,
-                          firstDate: DateTime(2000),
-                          lastDate: DateTime(2100),
-                        );
-                        if (picked != null) {
-                          setState(() {
-                            changedDate = true;
-                            date = DateTime(
-                              picked.year,
-                              picked.month,
-                              picked.day,
-                              date.hour,
-                              date.minute,
-                              date.second,
+                  Row(
+                    children: [
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          icon: const Icon(
+                            Icons.calendar_month_rounded,
+                            size: 18,
+                          ),
+                          label: Text(DateFormat('yyyy/MM/dd').format(date)),
+                          onPressed: () async {
+                            final picked = await showDatePicker(
+                              context: context,
+                              initialDate: date,
+                              firstDate: DateTime(2000),
+                              lastDate: DateTime(2100),
                             );
-                          });
-                        }
-                      },
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  OutlinedButton(
-                    onPressed: () async {
-                      final picked = await showTimePicker(
-                        context: context,
-                        initialTime: TimeOfDay.fromDateTime(date),
-                      );
-                      if (picked != null) {
-                        setState(() {
-                          changedDate = true;
-                          date = DateTime(
-                            date.year,
-                            date.month,
-                            date.day,
-                            picked.hour,
-                            picked.minute,
+                            if (picked != null) {
+                              setState(() {
+                                changedDate = true;
+                                date = DateTime(
+                                  picked.year,
+                                  picked.month,
+                                  picked.day,
+                                  date.hour,
+                                  date.minute,
+                                  date.second,
+                                );
+                              });
+                            }
+                          },
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      OutlinedButton(
+                        onPressed: () async {
+                          final picked = await showTimePicker(
+                            context: context,
+                            initialTime: TimeOfDay.fromDateTime(date),
                           );
-                        });
-                      }
-                    },
-                    child: Text(DateFormat('HH:mm').format(date)),
+                          if (picked != null) {
+                            setState(() {
+                              changedDate = true;
+                              date = DateTime(
+                                date.year,
+                                date.month,
+                                date.day,
+                                picked.hour,
+                                picked.minute,
+                              );
+                            });
+                          }
+                        },
+                        child: Text(DateFormat('HH:mm').format(date)),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 16),
+                  TextFormField(
+                    controller: note,
+                    maxLines: 2,
+                    maxLength: 300,
+                    decoration: const InputDecoration(labelText: '备注（可选）'),
                   ),
                 ],
               ),
-              const SizedBox(height: 16),
-              TextFormField(
-                controller: note,
-                maxLines: 2,
-                maxLength: 300,
-                decoration: const InputDecoration(labelText: '备注（可选）'),
-              ),
             ],
-            if (MediaQuery.viewInsetsOf(context).bottom == 0)
-              Padding(
-                padding: const EdgeInsets.only(top: 10),
-                child: GridView.count(
-                  crossAxisCount: 3,
-                  childAspectRatio: 2.8,
-                  shrinkWrap: true,
-                  physics: const NeverScrollableScrollPhysics(),
-                  mainAxisSpacing: 6,
-                  crossAxisSpacing: 6,
-                  children:
-                      [
-                            '1',
-                            '2',
-                            '3',
-                            '4',
-                            '5',
-                            '6',
-                            '7',
-                            '8',
-                            '9',
-                            '.',
-                            '0',
-                            '⌫',
-                          ]
-                          .map(
-                            (s) => TextButton(
-                              onPressed: saving ? null : () => key(s),
-                              style: TextButton.styleFrom(
-                                backgroundColor: Theme.of(
-                                  context,
-                                ).colorScheme.surface,
-                              ),
-                              child: Text(
-                                s,
-                                style: const TextStyle(fontSize: 22),
-                              ),
-                            ),
-                          )
-                          .toList(),
-                ),
-              ),
-            const SizedBox(height: 16),
-            FilledButton.icon(
-              key: const Key('save-transaction'),
-              onPressed: saving ? null : save,
-              icon: saving
-                  ? const SizedBox.square(
-                      dimension: 18,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : const Icon(Icons.check_rounded),
-              label: Text(widget.saveAsQuick ? '保存快捷交易' : '保存账单'),
-            ),
           ],
+        ),
+      ),
+      bottomNavigationBar: Padding(
+        padding: EdgeInsets.only(
+          bottom: MediaQuery.viewInsetsOf(context).bottom,
+        ),
+        child: SafeArea(
+          top: false,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (MediaQuery.viewInsetsOf(context).bottom == 0)
+                  LayoutBuilder(
+                    builder: (context, box) => SizedBox(
+                      height: 194,
+                      child: GridView.count(
+                        crossAxisCount: 3,
+                        childAspectRatio: (box.maxWidth - 12) / 3 / 44,
+                        physics: const NeverScrollableScrollPhysics(),
+                        mainAxisSpacing: 6,
+                        crossAxisSpacing: 6,
+                        children:
+                            [
+                                  '1',
+                                  '2',
+                                  '3',
+                                  '4',
+                                  '5',
+                                  '6',
+                                  '7',
+                                  '8',
+                                  '9',
+                                  '.',
+                                  '0',
+                                  '⌫',
+                                ]
+                                .map(
+                                  (s) => TextButton(
+                                    onPressed: saving ? null : () => key(s),
+                                    style: TextButton.styleFrom(
+                                      padding: EdgeInsets.zero,
+                                      backgroundColor: Theme.of(
+                                        context,
+                                      ).colorScheme.surface,
+                                    ),
+                                    child: Text(
+                                      s,
+                                      style: const TextStyle(fontSize: 22),
+                                    ),
+                                  ),
+                                )
+                                .toList(),
+                      ),
+                    ),
+                  ),
+                const SizedBox(height: 8),
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton.icon(
+                    key: const Key('save-transaction'),
+                    onPressed: saving ? null : save,
+                    icon: saving
+                        ? const SizedBox.square(
+                            dimension: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.check_rounded),
+                    label: Text(widget.saveAsQuick ? '保存快捷交易' : '保存账单'),
+                  ),
+                ),
+              ],
+            ),
+          ),
         ),
       ),
     );

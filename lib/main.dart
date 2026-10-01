@@ -8,21 +8,35 @@ import 'ui/design.dart';
 import 'ui/editors.dart';
 import 'ui/finance_pages.dart';
 import 'ui/preferences.dart';
+import 'services/voice_widget_runtime.dart';
 
-Future<void> main() async {
+Future<void> main(List<String> args) async {
   WidgetsFlutterBinding.ensureInitialized();
-  SystemChrome.setSystemUIOverlayStyle(
-    const SystemUiOverlayStyle(
-      statusBarColor: Colors.transparent,
-      statusBarIconBrightness: Brightness.dark,
-      systemNavigationBarColor: Color(0xFFF3F5FA),
-    ),
-  );
   const demo = bool.fromEnvironment('DEMO');
   final store = WalletStore(demo ? MemoryStorage() : LocalWalletStorage());
   final ai = AiService(store, SecureKeyVault());
-  runApp(FinDashApp(store: store, ai: ai, demo: demo));
+  bool shown = false;
+  void showApp() {
+    if (shown) return;
+    shown = true;
+    SystemChrome.setSystemUIOverlayStyle(
+      const SystemUiOverlayStyle(
+        statusBarColor: Colors.transparent,
+        statusBarIconBrightness: Brightness.dark,
+        systemNavigationBarColor: Color(0xFFF3F5FA),
+      ),
+    );
+    runApp(FinDashApp(store: store, ai: ai, demo: demo));
+  }
+
+  VoiceWidgetRuntime.install(store, ai, showApp);
+  if (!args.contains('widget')) showApp();
   await store.initialize(demo: demo);
+  try {
+    await VoiceWidgetRuntime.channel.invokeMethod<void>('ready');
+  } on MissingPluginException {
+    /* Other platforms do not host Android widgets. */
+  }
 }
 
 class FinDashApp extends StatefulWidget {

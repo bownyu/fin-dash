@@ -11,6 +11,7 @@ import 'charts.dart';
 import 'design.dart';
 import 'editors.dart';
 import 'preferences.dart';
+import 'voice_entry_page.dart';
 
 class HomePage extends StatefulWidget {
   final VoidCallback onBills, onStats;
@@ -41,6 +42,16 @@ class _HomePageState extends State<HomePage> {
     );
     return PageList(
       children: [
+        FilledButton.icon(
+          key: const Key('home-voice-entry'),
+          style: FilledButton.styleFrom(
+            padding: const EdgeInsets.symmetric(vertical: 16),
+          ),
+          onPressed: () => openVoiceEntry(context),
+          icon: const Icon(Icons.mic_rounded),
+          label: const Text('语音快速记账'),
+        ),
+        const SizedBox(height: 16),
         OverviewGrid(
           hero: HeroPanel(
             child: Column(

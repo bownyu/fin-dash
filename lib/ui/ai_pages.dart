@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:intl/intl.dart';
@@ -13,7 +14,13 @@ import 'agent_action_card.dart';
 class ChatPage extends StatefulWidget {
   final String? initialPrompt;
   final DateRange? analysisRange;
-  const ChatPage({super.key, this.initialPrompt, this.analysisRange});
+  final Future<AiImage?> Function()? imagePicker;
+  const ChatPage({
+    super.key,
+    this.initialPrompt,
+    this.analysisRange,
+    this.imagePicker,
+  });
   @override
   State<ChatPage> createState() => _ChatPageState();
 }
@@ -32,6 +39,11 @@ class _ChatPageState extends State<ChatPage> {
       return;
     }
     try {
+      if (widget.imagePicker != null) {
+        final image = await widget.imagePicker!();
+        if (mounted && image != null) setState(() => attachment = image);
+        return;
+      }
       final file = await ImagePicker().pickImage(
         source: ImageSource.gallery,
         maxWidth: 1600,
@@ -63,7 +75,9 @@ class _ChatPageState extends State<ChatPage> {
       input.text = widget.initialPrompt!;
     }
     final ai = AppScope.of(context).ai;
-    final length = AppScope.storeOf(context).data.chats.length;
+    final length = AppScope.storeOf(context).data.chats
+        .where((m) => AiService.sessionOf(m) == ai.activeSessionId)
+        .length;
     final live = ai.liveMessage;
     final blocks = live?['blocks'] as List? ?? [];
     final last = blocks.isEmpty ? null : blocks.last;
@@ -104,7 +118,11 @@ class _ChatPageState extends State<ChatPage> {
     final image = attachment;
     setState(() => attachment = null);
     await ai.send(text, analysisRange: widget.analysisRange, image: image);
-    if (mounted && ai.error != null) {
+    if (mounted &&
+        ai.error != null &&
+        !ai.lastPromptStored &&
+        input.text.isEmpty &&
+        attachment == null) {
       setState(() {
         input.text = text;
         attachment = image;
@@ -115,9 +133,12 @@ class _ChatPageState extends State<ChatPage> {
   Future<void> retry() async {
     final ai = AppScope.of(context).ai;
     final draft = input.text, image = attachment;
+    final wasStored = ai.lastPromptStored;
     await ai.retryLast();
     if (mounted &&
+        !wasStored &&
         ai.error == null &&
+        ai.lastPromptStored &&
         input.text == draft &&
         attachment == image) {
       setState(() {
@@ -127,18 +148,39 @@ class _ChatPageState extends State<ChatPage> {
     }
   }
 
+  Future<void> newConversation() async {
+    final ai = AppScope.of(context).ai;
+    if (await perform(context, ai.newConversation) && mounted) {
+      input.clear();
+      setState(() {
+        attachment = null;
+        messageCount = -1;
+        liveSignature = '';
+      });
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final store = AppScope.storeOf(context), ai = AppScope.of(context).ai;
     final messages = store.data.chats
-        .where((m) => m['id'] != ai.liveMessage?['id'])
+        .where(
+          (m) =>
+              m['id'] != ai.liveMessage?['id'] &&
+              AiService.sessionOf(m) == ai.activeSessionId,
+        )
         .toList();
-    if (ai.liveMessage != null) messages.add(ai.liveMessage!);
+    if (ai.liveMessage != null &&
+        AiService.sessionOf(ai.liveMessage!) == ai.activeSessionId) {
+      messages.add(ai.liveMessage!);
+    }
     final proposalOwners = <String, String>{
       for (final m in messages)
         for (final id in _proposalIds(m)) id: m['id'] as String,
     };
-    final actions = ai.actions.items.reversed.toList();
+    final actions = ai.actions.items.reversed
+        .where((a) => (a['sessionId'] ?? 'legacy') == ai.activeSessionId)
+        .toList();
     final unlinked = actions
         .where(
           (a) =>
@@ -162,19 +204,27 @@ class _ChatPageState extends State<ChatPage> {
         ),
         actions: [
           IconButton(
-            tooltip: '操作管理',
-            onPressed: () => openPage(context, const AgentActionsPage()),
-            icon: const Icon(Icons.fact_check_outlined),
+            tooltip: '新建对话',
+            onPressed: ai.busy ? null : newConversation,
+            icon: const Icon(Icons.add_comment_outlined),
           ),
           IconButton(
             tooltip: '历史对话',
             onPressed: () => openPage(context, const ChatHistoryPage()),
             icon: const Icon(Icons.history_rounded),
           ),
-          IconButton(
-            tooltip: '顾问记忆',
-            onPressed: () => openPage(context, const AgentStatePage()),
-            icon: const Icon(Icons.psychology_outlined),
+          PopupMenuButton<String>(
+            tooltip: '更多',
+            itemBuilder: (_) => const [
+              PopupMenuItem(value: 'actions', child: Text('操作管理')),
+              PopupMenuItem(value: 'memory', child: Text('顾问记忆')),
+            ],
+            onSelected: (value) => openPage(
+              context,
+              value == 'actions'
+                  ? const AgentActionsPage()
+                  : const AgentStatePage(),
+            ),
           ),
         ],
       ),
@@ -317,7 +367,7 @@ class _ChatPageState extends State<ChatPage> {
                   const SizedBox(width: 10),
                   const Expanded(
                     child: Text(
-                      '发送时将图片交给所配置的 AI 服务；图片不保存到聊天历史。',
+                      '发送时上传至所配置的 AI 服务，图片保存在本机。',
                       style: TextStyle(fontSize: 12),
                     ),
                   ),
@@ -405,8 +455,20 @@ class _Message extends StatelessWidget {
               borderRadius: BorderRadius.circular(18),
             ),
             child: user
-                ? SelectableText(
-                    '${message['content']}${message['hasImage'] == true ? '\n📎 附有截图（图片未保存）' : ''}',
+                ? Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (message['imageId'] is String) ...[
+                        _ChatImage(message['imageId']),
+                        const SizedBox(height: 8),
+                      ] else if (message['hasImage'] == true)
+                        const Text(
+                          '旧消息的图片未保存',
+                          style: TextStyle(color: muted, fontSize: 12),
+                        ),
+                      SelectableText('${message['content']}'),
+                    ],
                   )
                 : _AssistantContent(message, actions: actions),
           ),
@@ -414,6 +476,87 @@ class _Message extends StatelessWidget {
       ),
     );
   }
+}
+
+class _ChatImage extends StatefulWidget {
+  final String id;
+  const _ChatImage(this.id);
+  @override
+  State<_ChatImage> createState() => _ChatImageState();
+}
+
+class _ChatImageState extends State<_ChatImage> {
+  Future<Uint8List?>? image;
+  String? loaded;
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (loaded != widget.id) {
+      loaded = widget.id;
+      image = AppScope.of(context).ai.images.read(widget.id);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => FutureBuilder<Uint8List?>(
+    future: image,
+    builder: (context, snapshot) {
+      if (snapshot.connectionState != ConnectionState.done) {
+        return const SizedBox(
+          height: 100,
+          child: Center(child: CircularProgressIndicator()),
+        );
+      }
+      final bytes = snapshot.data;
+      if (bytes == null) {
+        return const Text(
+          '图片不在本机，无法预览',
+          style: TextStyle(color: muted, fontSize: 12),
+        );
+      }
+      return Semantics(
+        label: '已发送的图片，点击放大',
+        button: true,
+        child: InkWell(
+          key: ValueKey('chat-image:${widget.id}'),
+          onTap: () => showDialog<void>(
+            context: context,
+            builder: (context) => Dialog(
+              child: Stack(
+                children: [
+                  InteractiveViewer(
+                    child: Image.memory(bytes, fit: BoxFit.contain),
+                  ),
+                  Positioned(
+                    top: 0,
+                    right: 0,
+                    child: IconButton(
+                      tooltip: '关闭图片',
+                      onPressed: () => Navigator.pop(context),
+                      icon: const Icon(Icons.close),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(12),
+            child: Image.memory(
+              bytes,
+              width: 240,
+              height: 180,
+              fit: BoxFit.contain,
+              errorBuilder: (_, error, stack) => const SizedBox(
+                height: 80,
+                child: Center(child: Text('无法解码这张图片')),
+              ),
+            ),
+          ),
+        ),
+      );
+    },
+  );
 }
 
 Set<String> _proposalIds(Json message) {
@@ -480,6 +623,16 @@ class _AssistantContent extends StatelessWidget {
           ),
         if (message['status'] == 'streaming' && blocks.isEmpty)
           const Text('等待模型输出…', style: TextStyle(color: muted)),
+        if (['error', 'cancelled'].contains(message['status']))
+          TextButton(
+            onPressed: AppScope.of(context).ai.busy
+                ? null
+                : () => perform(
+                    context,
+                    () => AppScope.of(context).ai.retryMessage(message['id']),
+                  ),
+            child: const Text('重试这条消息'),
+          ),
       ],
     );
   }
@@ -677,98 +830,59 @@ class ChatHistoryPage extends StatelessWidget {
   const ChatHistoryPage({super.key});
   @override
   Widget build(BuildContext context) {
-    final groups = <String, List<Json>>{};
-    for (final m in AppScope.storeOf(context).data.chats) {
-      groups.putIfAbsent(dayKey(localDate(m['timestamp'])), () => []).add(m);
-    }
-    final days = groups.keys.toList()..sort((a, b) => b.compareTo(a));
+    final ai = AppScope.of(context).ai;
+    final sessions = ai.sessions;
     return Scaffold(
       appBar: AppBar(title: const Text('历史对话')),
       body: PageList(
         children: [
           const Text(
-            '按日期保存对话，保留最近 365 天。',
+            '每个对话单独保存上下文，切换后可以继续交流。',
             style: TextStyle(color: muted, fontSize: 12),
           ),
           const SizedBox(height: 16),
-          if (days.isEmpty)
+          if (sessions.isEmpty)
             const EmptyState(
               '还没有历史对话',
-              '与顾问聊过的内容会按日期保存。',
+              '点击对话页右上角的新建按钮开始。',
               icon: Icons.history_rounded,
             ),
-          ...days.map((day) {
-            final messages = groups[day]!,
-                topic =
-                    messages
-                        .where((m) => m['role'] == 'user')
-                        .firstOrNull?['content'] ??
-                    '顾问分析';
-            return Padding(
+          for (final session in sessions)
+            Padding(
               padding: const EdgeInsets.only(bottom: 12),
               child: Panel(
                 padding: EdgeInsets.zero,
                 child: ListTile(
-                  contentPadding: const EdgeInsets.all(18),
                   title: Text(
-                    day,
-                    style: const TextStyle(fontWeight: FontWeight.w600),
-                  ),
-                  subtitle: Text(
-                    '$topic',
+                    '${session['title']}',
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
                   ),
-                  trailing: Text(
-                    '${messages.length} 条',
-                    style: const TextStyle(color: muted),
+                  subtitle: Text(
+                    DateFormat('yyyy/MM/dd HH:mm').format(
+                      localDate(session['updatedAt'] ?? session['createdAt']),
+                    ),
                   ),
-                  onTap: () => openPage(context, _HistoryDetail(day)),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: ai.busy
+                      ? null
+                      : () async {
+                          if (await perform(
+                                context,
+                                () => ai.switchConversation(session['id']),
+                              ) &&
+                              context.mounted) {
+                            Navigator.of(context).pushReplacement(
+                              MaterialPageRoute(
+                                builder: (_) => const ChatPage(),
+                              ),
+                            );
+                          }
+                        },
                 ),
               ),
-            );
-          }),
+            ),
         ],
-      ),
-    );
-  }
-}
-
-class _HistoryDetail extends StatelessWidget {
-  final String date;
-  const _HistoryDetail(this.date);
-  @override
-  Widget build(BuildContext context) {
-    final store = AppScope.storeOf(context);
-    final messages = store.data.chats
-        .where((m) => dayKey(localDate(m['timestamp'])) == date)
-        .toList();
-    final actions = AppScope.of(context).ai.actions.items.reversed.toList();
-    final owners = <String, String>{
-      for (final m in messages)
-        for (final id in _proposalIds(m)) id: m['id'] as String,
-    };
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(date),
-        actions: [
-          TextButton(
-            onPressed: () => openPage(context, const ChatPage()),
-            child: const Text('继续对话'),
-          ),
-        ],
-      ),
-      body: PageList(
-        children: messages
-            .map(
-              (m) => _Message(
-                m,
-                actions: actions
-                    .where((a) => owners[a['id']] == m['id'])
-                    .toList(),
-              ),
-            )
-            .toList(),
       ),
     );
   }

@@ -21,7 +21,7 @@
 - Responses 使用 `store: false`，随输入重放 output items 与 function_call_output；保留推理条目的 encrypted_content 供同一接口与模型续接。工具 ID 使用 call_id，工具定义使用 Responses 的扁平格式并显式关闭 strict，保留原有可选工具参数。
 - Chat Completions 保留 assistant/tool 消息配对，支持 reasoning_content / reasoning。工具收到完整响应后才执行；流中断时不会执行尚未完成的工具调用。
 - 取消关闭连接、拒绝过期输出，保留已收到的内容；已经开始的本地原子写入会先完成，再允许下一轮对话。账本变更仍通过原有待确认提案机制执行。
-- 对话跨日期连续使用。上下文按完整用户轮次截取，最多 15 轮、约 60,000 字符（最近一轮完整保留）；更多历史通过 get_chat_history 查询。历史查询不返回内部协议记录，避免重复嵌套。聊天按原有规则保留 365 天，长期记忆独立保存。
+- 对话支持新建和切换独立会话，旧消息归入兼容会话。模型上下文及历史工具查询仅使用当前会话；上下文按完整用户轮次截取，最多 15 轮、约 60,000 字符（最近一轮完整保留）。历史查询不返回内部协议记录，避免重复嵌套。聊天保留 365 天，长期记忆独立保存。
 - 错误展示 HTTP 状态、服务 message/type/code/param、端点、模型、协议与可获得的 request ID。网络、超时、非 JSON 响应、截断和 Responses incomplete/failed 均展示具体原因并保留部分输出；错误文本隐藏当前密钥。
 
 架构参考 [pi agent-core](https://github.com/badlogic/pi-mono/tree/main/packages/agent) 的事件驱动工具循环与 UI 消息 / 模型消息分离思想，在 Dart 内实现，未引入 Node 运行时。
@@ -41,10 +41,18 @@
 
 ## 验证边界
 
-测试覆盖两种协议、UTF-8 与参数分片、推理条目续接、断流、超时、重试续接、错误脱敏、图片不持久化、旧配置迁移、配置失败回滚、记忆兼容及 320px 大字体界面。检查日志位于 build/agent-responses-analyze.log 和 build/agent-responses-tests.log。
+测试覆盖两种协议、UTF-8 与参数分片、推理条目续接、断流、超时、重试续接、错误脱敏、图片本地保存及消息重试、旧配置迁移、配置失败回滚、记忆兼容及 320px 大字体界面。原有检查日志位于 build/agent-responses-analyze.log 和 build/agent-responses-tests.log。
 
 本轮完整 Flutter 回归为 98 项通过，静态检查无问题。最终生命周期调整另外复测协议与 Agent 回归；日志为 build/agent-responses-lifecycle-tests.log。ARM64 release 构建日志为 build/agent-responses-apk.log，APK 位于 build/app/outputs/flutter-apk/app-release.apk（约 22.3 MB，沿用工程现有开发签名）。
 
 对话内确认与工具记录精简调整后，执行 `flutter test --no-pub`，105 项通过；`flutter analyze --no-pub` 无问题。新增覆盖点击后的持久化反馈、拒绝与撤销、失败重试、重复提案去重，以及 320px 大字体下 12 次工具调用只占一行。
 
 尚未使用用户实际网关与密钥联调，也未替代真机图片、工具与网络环境验收。请先在设置页测试连接，再进行真实多轮对话；服务特有的不兼容参数会显示在错误详情中。
+
+## 语音记账与桌面小部件（2026-10-02）
+
+- 采用安卓系统 SpeechRecognizer，未内置大型识别模型。主应用与桌面小部件复用 SpeechCapture、VoiceBookkeeping 和同一个 WalletStore；只有信息完整且通过账本校验的新增账单才自动保存。缺失信息会询问补充，保存失败可重试，相同请求 ID 不重复记账，撤销会检查账单是否后来修改。
+- 小部件通过麦克风前台服务收音，在桌面直接显示识别文字、处理中状态、保存结果、重试与撤销。首次麦克风授权由独立透明权限 Activity 承载；不启动 MainActivity 或切换到主应用。FinDashEngine 共享一个 Dart 运行时与账本写入队列，主应用未打开时也能处理；主应用主动打开时才显示界面。
+- 首页新增语音快速记账。传统编辑页的数字键盘与保存按钮固定在底部，账户选择位于金额下方；系统键盘出现时收起数字键盘，保存按钮保持在系统键盘上方，日期和备注按需展开。
+- 已发送图片以哈希引用保存在应用本地目录，消息内可预览和放大；请求失败不恢复为草稿。重试使用对应消息的图片，不覆盖下一条草稿，也不重复用户消息。历史图片不会自动上传；账本 JSON 备份不包含图片文件，跨设备恢复后需重新附图。
+- 系统识别能力及网络需求由手机的识别服务决定。安卓麦克风前台服务实现依据 [Android 官方限制说明](https://developer.android.com/develop/background-work/services/fgs/restrictions-bg-start)，允许由用户的小部件操作发起。

@@ -51,6 +51,7 @@ class AgentActions {
         'status': 'pending',
         'createdAt': DateTime.now().toIso8601String(),
         'summary': args['reason'] is String ? args['reason'] : '请核对以下变更',
+        'sessionId': d.extras['activeChatSessionId'] ?? 'legacy',
       };
       action['displaySummary'] = agentActionSummary(
         action,
@@ -159,8 +160,22 @@ class AgentActions {
         'actionId': action['id'],
         'actionStatus': action['status'],
         'isActionFeedback': true,
+        'sessionId': action['sessionId'] ?? 'legacy',
       });
     }
+  }
+
+  static LedgerTx prepareTransaction(
+    WalletData data,
+    Json input, {
+    String? id,
+  }) {
+    if (input.containsKey('id')) throw const FormatException('语音入口只能新增账单');
+    final desired = _desired(data, 'transaction', id ?? newId(), input);
+    final trial = data.clone();
+    _write(trial, 'transaction', desired['id'], desired);
+    validateWallet(trial);
+    return LedgerTx.fromJson(desired);
   }
 
   static Json _find(List<Json> items, String id) => items.firstWhere(

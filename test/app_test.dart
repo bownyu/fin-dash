@@ -82,7 +82,8 @@ void main() {
     await tester.tap(find.byKey(const Key('save-transaction')));
     await tester.pumpAndSettle();
     expect(store.balance(store.account('bank')!), before - 150);
-    expect(store.query().first.amount, 150);
+    // Demo entries at noon can be later than a transaction saved this morning.
+    expect(store.data.transactions.last.amount, 150);
     expect(tester.takeException(), null);
   });
   testWidgets(

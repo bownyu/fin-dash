@@ -184,6 +184,7 @@ class WalletStore extends ChangeNotifier {
     } else {
       d.transactions[index] = tx;
     }
+    if (tx.accountId != null) d.settings['quickEntryAccountId'] = tx.accountId;
   });
   Future<void> deleteTxs(Set<String> ids) =>
       change((d) => d.transactions.removeWhere((t) => ids.contains(t.id)));

@@ -1,0 +1,21 @@
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent" android:layout_height="match_parent"
+    android:orientation="vertical" android:padding="12dp"
+    android:background="@drawable/voice_widget_background">
+    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:gravity="center_vertical">
+        <TextView android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1"
+            android:text="@string/voice_widget_title" android:textColor="#17243D" android:textSize="14sp" android:textStyle="bold" android:maxLines="1" />
+        <ImageButton android:id="@+id/voice_widget_button" android:layout_width="44dp" android:layout_height="44dp"
+            android:background="@android:color/transparent" android:src="@drawable/ic_voice_widget" android:contentDescription="开始或结束语音记账" />
+    </LinearLayout>
+    <TextView android:id="@+id/voice_widget_status" android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:text="@string/voice_widget_hint" android:textColor="#3478F6" android:textSize="13sp" android:maxLines="3" />
+    <TextView android:id="@+id/voice_widget_text" android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1"
+        android:layout_marginTop="4dp" android:textColor="#748195" android:textSize="12sp" android:maxLines="3" />
+    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content">
+        <Button android:id="@+id/voice_widget_retry" android:layout_width="wrap_content" android:layout_height="40dp"
+            android:text="重试记账" android:textSize="12sp" android:visibility="gone" />
+        <Button android:id="@+id/voice_widget_undo" android:layout_width="wrap_content" android:layout_height="40dp"
+            android:text="撤销" android:textSize="12sp" android:visibility="gone" />
+    </LinearLayout>
+</LinearLayout>
