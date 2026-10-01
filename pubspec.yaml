@@ -1,0 +1,28 @@
+name: fin_dash
+description: 本地优先的个人记账与资产管理应用
+publish_to: none
+version: 1.1.0+2
+environment:
+  sdk: ^3.11.0
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_localizations:
+    sdk: flutter
+  intl: ^0.20.2
+  path_provider: ^2.1.5
+  shared_preferences: ^2.5.4
+  flutter_secure_storage: ^10.0.0
+  file_picker: ^10.3.10
+  image_picker: ^1.2.1
+  http: ^1.6.0
+  crypto: ^3.0.7
+  flutter_markdown: ^0.7.7+1
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/brand.png
