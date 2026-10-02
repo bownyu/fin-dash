@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="database" path="payment_inbox.db" />
+        <exclude domain="database" path="payment_inbox.db-journal" />
+        <exclude domain="sharedpref" path="payment_capture.xml" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="database" path="payment_inbox.db" />
+        <exclude domain="database" path="payment_inbox.db-journal" />
+        <exclude domain="sharedpref" path="payment_capture.xml" />
+    </device-transfer>
+</data-extraction-rules>

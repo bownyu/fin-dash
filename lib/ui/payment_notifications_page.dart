@@ -1,0 +1,344 @@
+import 'package:flutter/material.dart';
+import 'package:intl/intl.dart';
+import '../domain/models.dart';
+import '../services/payment_notifications.dart';
+import 'design.dart';
+import 'payment_review_page.dart';
+
+class PaymentNotificationsPage extends StatefulWidget {
+  final PaymentNotifications? notifications;
+  const PaymentNotificationsPage({super.key, this.notifications});
+  @override
+  State<PaymentNotificationsPage> createState() =>
+      _PaymentNotificationsPageState();
+}
+
+class _PaymentNotificationsPageState extends State<PaymentNotificationsPage>
+    with WidgetsBindingObserver {
+  PaymentNotifications? service;
+  Json status = {};
+  String? error;
+  bool busy = false, history = false, reconnecting = false;
+  String? connectionMessage;
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (service == null) {
+      service =
+          widget.notifications ??
+          PaymentNotifications(AppScope.storeOf(context));
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) refresh();
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) refresh();
+  }
+
+  Future<void> refresh() async {
+    if (busy || !mounted) return;
+    setState(() {
+      busy = true;
+      error = null;
+      connectionMessage = null;
+    });
+    try {
+      await service!.sync();
+    } catch (e) {
+      if (mounted) {
+        setState(
+          () => error = e is FormatException ? e.message : '读取通知失败，原始队列仍保留，请重试',
+        );
+      }
+    }
+    // Queue or ledger failures must not hide permission and capacity diagnostics.
+    try {
+      final next = await service!.status();
+      if (mounted) setState(() => status = next);
+    } catch (_) {
+      if (mounted) setState(() => error ??= '无法读取采集状态，请重试');
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
+  }
+
+  Future<void> review(Json record) async {
+    await reviewPaymentNotification(context, service!, record);
+    if (mounted) refresh();
+  }
+
+  Future<void> reconnect() async {
+    if (busy) return;
+    setState(() {
+      busy = true;
+      reconnecting = true;
+      error = null;
+      connectionMessage = null;
+    });
+    try {
+      await service!.reconnect();
+      for (var attempt = 0; attempt < 6; attempt++) {
+        final next = await service!.status();
+        if (!mounted) return;
+        setState(() => status = next);
+        if (next['connected'] == true ||
+            next['granted'] != true ||
+            next['enabled'] != true) {
+          break;
+        }
+        if (attempt < 5) {
+          await Future<void>.delayed(const Duration(milliseconds: 600));
+        }
+        if (!mounted) return;
+      }
+      if (mounted) {
+        setState(() {
+          connectionMessage = status['enabled'] != true
+              ? '请先开启采集支付通知'
+              : status['granted'] != true
+              ? '请在系统设置中授予通知使用权'
+              : status['connected'] == true
+              ? '监听已连接，可以接收新的支付通知'
+              : '系统暂未连接。可稍后刷新；若仍未连接，请打开系统设置，将 FinDash 通知使用权关闭后重新开启。';
+        });
+      }
+    } catch (_) {
+      if (mounted) setState(() => error = '重新连接失败，请重试或打开系统通知使用权设置');
+    } finally {
+      if (mounted) {
+        setState(() {
+          busy = false;
+          reconnecting = false;
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    AppScope.storeOf(context);
+    final supported = service?.supported == true;
+    final records =
+        service?.records
+            .where(
+              (r) =>
+                  history ? r['status'] != 'pending' : r['status'] == 'pending',
+            )
+            .toList() ??
+        <Json>[];
+    final last = status['lastReceived'] as int? ?? 0;
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('支付通知识别'),
+        actions: [
+          IconButton(
+            tooltip: '刷新通知',
+            onPressed: busy ? null : refresh,
+            icon: const Icon(Icons.refresh),
+          ),
+        ],
+      ),
+      body: PageList(
+        children: [
+          Panel(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('仅保存微信、支付宝的支付相关通知，先生成待确认账单。通知在本机处理，不会自动发送给 AI。'),
+                const SizedBox(height: 10),
+                if (!supported) const Text('通知采集仅支持 Android。'),
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('采集支付通知'),
+                  value: status['enabled'] == true,
+                  onChanged: !supported || busy
+                      ? null
+                      : (v) async {
+                          await perform(context, () => service!.setEnabled(v));
+                          await refresh();
+                        },
+                ),
+                Text(
+                  '通知使用权：${status['granted'] == true ? '已授权' : '未授权'} · 监听：${status['connected'] == true ? '已连接' : '未连接'}',
+                ),
+                if (supported) ...[
+                  const SizedBox(height: 10),
+                  FilledButton.icon(
+                    key: const Key('payment-reconnect'),
+                    onPressed:
+                        busy ||
+                            status['enabled'] != true ||
+                            status['granted'] != true ||
+                            status['connected'] == true
+                        ? null
+                        : reconnect,
+                    icon: const Icon(Icons.sync_rounded),
+                    label: Text(
+                      reconnecting
+                          ? '正在连接…'
+                          : status['connected'] == true
+                          ? '监听已连接'
+                          : '重新连接监听',
+                    ),
+                  ),
+                  if (connectionMessage != null)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 8),
+                      child: Text(
+                        connectionMessage!,
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ),
+                ],
+                Text(
+                  '上次收到：${last == 0 ? '暂无记录' : DateFormat('MM-dd HH:mm').format(DateTime.fromMillisecondsSinceEpoch(last))}',
+                ),
+                Text('原生收件箱：${status['queued'] ?? 0} 条'),
+                if ((status['overflow'] as int? ?? 0) > 0)
+                  Text(
+                    '队列曾满，${status['overflow']} 次通知未能保存，请及时处理。',
+                    style: const TextStyle(color: coral),
+                  ),
+                if (status['storageError'] == true)
+                  const Text(
+                    '原生存储发生错误，可能有通知未保存。',
+                    style: TextStyle(color: coral),
+                  ),
+                if (supported)
+                  TextButton(
+                    onPressed: busy
+                        ? null
+                        : () => perform(context, service!.openSettings),
+                    child: const Text('打开系统通知使用权设置'),
+                  ),
+                const Text(
+                  '进入 App 时会自动尝试恢复已开启且已授权的监听。省电限制或强行停止仍可能中断连接；重连只能接收后续通知，无法补回断开期间的消费。',
+                  style: TextStyle(fontSize: 12, color: muted),
+                ),
+              ],
+            ),
+          ),
+          if (error != null)
+            Padding(
+              padding: const EdgeInsets.all(12),
+              child: Text(error!, style: const TextStyle(color: coral)),
+            ),
+          if (busy) const LinearProgressIndicator(),
+          const SizedBox(height: 18),
+          SegmentedButton<bool>(
+            segments: const [
+              ButtonSegment(value: false, label: Text('待确认')),
+              ButtonSegment(value: true, label: Text('已处理')),
+            ],
+            selected: {history},
+            onSelectionChanged: (v) => setState(() => history = v.first),
+          ),
+          const SizedBox(height: 14),
+          if (!history && records.isNotEmpty)
+            FilledButton.icon(
+              onPressed: busy
+                  ? null
+                  : () => openPage(
+                      context,
+                      PaymentReviewPage(notifications: service),
+                    ),
+              icon: const Icon(Icons.fact_check_outlined),
+              label: Text('集中核对 ${records.length} 条记录'),
+            ),
+          if (records.isEmpty)
+            const EmptyState(
+              '暂无记录',
+              '启用并授予通知使用权后，实际收到的支付通知会显示在这里。',
+              icon: Icons.notifications_none,
+            ),
+          for (final r in records) ...[
+            Panel(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '${r['sourcePackage'] == 'com.tencent.mm' ? '微信' : '支付宝'} · ${r['amountCents'] == null ? '金额待补全' : money(r['amountCents'])}',
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    DateFormat('yyyy-MM-dd HH:mm').format(
+                      DateTime.fromMillisecondsSinceEpoch(r['postedAt']),
+                    ),
+                  ),
+                  if (r['status'] == 'pending') ...[
+                    Text(r['reviewReason']),
+                    if (r['possibleDuplicate'] == true)
+                      const Text(
+                        '与另一条通知金额、时间接近，请核对重复。',
+                        style: TextStyle(color: coral),
+                      ),
+                    ExpansionTile(
+                      tilePadding: EdgeInsets.zero,
+                      title: const Text('查看通知原文'),
+                      children: [SelectableText('${r['title']}\n${r['text']}')],
+                    ),
+                    Wrap(
+                      spacing: 12,
+                      children: [
+                        if (r['kind'] != 'refund')
+                          FilledButton(
+                            onPressed: busy ? null : () => review(r),
+                            child: const Text('核对并记账'),
+                          ),
+                        TextButton(
+                          onPressed: busy
+                              ? null
+                              : () => perform(
+                                  context,
+                                  () => service!.dismiss(r['eventId']),
+                                ),
+                          child: const Text('忽略'),
+                        ),
+                      ],
+                    ),
+                  ] else
+                    Text(r['status'] == 'applied' ? '已入账，可在账单页修改或删除' : '已忽略'),
+                ],
+              ),
+            ),
+            const SizedBox(height: 12),
+          ],
+          if (!history)
+            TextButton(
+              onPressed: busy
+                  ? null
+                  : () async {
+                      if (await confirm(
+                        context,
+                        '清除待处理通知？',
+                        '暂停采集并清除尚未入账的通知内容，已入账账单保留。',
+                        action: '清除',
+                      )) {
+                        if (!context.mounted) return;
+                        await perform(context, service!.clearPending);
+                        await refresh();
+                      }
+                    },
+              child: const Text('暂停采集并清除待处理通知'),
+            ),
+        ],
+      ),
+    );
+  }
+}

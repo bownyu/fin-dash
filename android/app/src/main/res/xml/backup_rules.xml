@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<full-backup-content>
+    <exclude domain="database" path="payment_inbox.db" />
+    <exclude domain="database" path="payment_inbox.db-journal" />
+    <exclude domain="sharedpref" path="payment_capture.xml" />
+</full-backup-content>

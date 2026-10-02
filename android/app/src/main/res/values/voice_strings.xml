@@ -1,0 +1,5 @@
+<resources>
+    <string name="voice_widget_title">FinDash 语音记账</string>
+    <string name="voice_widget_hint">点一下开始 · 说完再点一下</string>
+    <string name="voice_widget_description">紧凑语音记账：说话、核对、确认保存</string>
+</resources>

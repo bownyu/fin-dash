@@ -1,0 +1,375 @@
+import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
+import '../data/wallet_store.dart';
+import '../domain/models.dart';
+
+class PaymentAcceptance {
+  final String eventId;
+  final LedgerTx transaction;
+  const PaymentAcceptance(this.eventId, this.transaction);
+}
+
+abstract class NotificationBridge {
+  bool get supported;
+  Future<dynamic> call(String method, [Json? arguments]);
+}
+
+class AndroidNotificationBridge implements NotificationBridge {
+  static const _channel = MethodChannel('findash/payment_notifications');
+  @override
+  bool get supported =>
+      !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
+  @override
+  Future<dynamic> call(String method, [Json? arguments]) => _channel
+      .invokeMethod(method, arguments)
+      .timeout(const Duration(seconds: 15));
+}
+
+class PaymentNotifications {
+  // The app lifecycle and review page use separate service instances.
+  // Serialize their native peek / save / ACK and clear operations per ledger.
+  static final _tails = Expando<Future<void>>();
+  final WalletStore store;
+  final NotificationBridge bridge;
+  WalletData? _pendingIndexData, _ledgerIndexData;
+  int _indexedTransactionCount = -1;
+  Set<String> _duplicatePendingIds = {};
+  Map<String, List<LedgerTx>> _ledgerBuckets = {};
+  PaymentNotifications(this.store, {NotificationBridge? bridge})
+    : bridge = bridge ?? AndroidNotificationBridge();
+  bool get supported => bridge.supported;
+  List<Json> get records => _records(store.data).reversed.toList();
+  List<Json> get pending =>
+      records.where((r) => r['status'] == 'pending').toList();
+  static int pendingCount(WalletData data) =>
+      _records(data).where((r) => r['status'] == 'pending').length;
+  static List<Json> _records(WalletData d) =>
+      (d.extras['paymentNotifications'] as List? ?? [])
+          .map((e) => Json.from(e as Map))
+          .toList();
+
+  Future<Json> status() async => supported
+      ? Json.from(await bridge.call('status') as Map)
+      : {'supported': false};
+  Future<void> _serial(Future<void> Function() action) {
+    final work = (_tails[store] ?? Future<void>.value()).then((_) => action());
+    _tails[store] = work.catchError((Object _) {});
+    return work;
+  }
+
+  Future<void> setEnabled(bool enabled) => _serial(() async {
+    await bridge.call('setEnabled', {'enabled': enabled});
+  });
+
+  Future<void> openSettings() async {
+    await bridge.call('openSettings');
+  }
+
+  Future<void> reconnect() async {
+    if (!supported) return;
+    await bridge.call('reconnect');
+  }
+
+  Future<void> sync() => _serial(() async {
+    if (!supported || store.loading || store.startupError != null) {
+      return;
+    }
+    for (var page = 0; page < 10; page++) {
+      final batch = (await bridge.call('peek') as List)
+          .map((e) => Json.from(e as Map))
+          .toList();
+      if (batch.isEmpty) return;
+      await ingest(batch);
+      // A crash before ACK safely replays the same IDs on the next launch.
+      await bridge.call('ack', {
+        'ids': batch.map((e) => e['eventId']).toList(),
+      });
+    }
+  });
+
+  Future<void> ingest(List<Json> events, {bool ignore = false}) =>
+      store.change((d) {
+        final records = _records(d);
+        final ids = records.map((e) => e['eventId']).toSet();
+        for (final e in events) {
+          if (e['eventId'] is! String ||
+              !RegExp(r'^[a-f0-9]{64}$').hasMatch(e['eventId']) ||
+              ![
+                'com.tencent.mm',
+                'com.eg.android.AlipayGphone',
+              ].contains(e['sourcePackage']) ||
+              e['postedAt'] is! int ||
+              e['postedAt'] <= 0 ||
+              e['postedAt'] > 8640000000000000 ||
+              e['text'] is! String ||
+              (e['text'] as String).length > 4096 ||
+              e['title'] is! String ||
+              (e['title'] as String).length > 200 ||
+              ![
+                'expense',
+                'income',
+                'transfer',
+                'repayment',
+                'refund',
+                'unknown',
+              ].contains(e['kind']) ||
+              (e['amountCents'] != null &&
+                  (e['amountCents'] is! int ||
+                      e['amountCents'] <= 0 ||
+                      e['amountCents'] > 999999999999))) {
+            throw const FormatException('通知数据不完整，已保留原生收件箱供重试');
+          }
+          if (!ids.add(e['eventId'])) continue;
+          if (!ignore &&
+              records.where((r) => r['status'] == 'pending').length >= 2000) {
+            throw const FormatException('待确认通知已达 2000 条，请先处理');
+          }
+          final possibleDuplicate =
+              e['amountCents'] != null &&
+              records.any(
+                (r) =>
+                    r['sourcePackage'] == e['sourcePackage'] &&
+                    r['amountCents'] == e['amountCents'] &&
+                    ((r['postedAt'] as int) - (e['postedAt'] as int)).abs() <=
+                        120000,
+              );
+          records.add({
+            'eventId': e['eventId'],
+            'sourcePackage': e['sourcePackage'],
+            'notificationKey': e['notificationKey'],
+            'postedAt': e['postedAt'],
+            'title': ignore ? '' : e['title'],
+            'text': ignore ? '' : e['text'],
+            'amountCents': e['amountCents'],
+            'kind': e['kind'],
+            'merchant': e['merchant'] is String ? e['merchant'] : '',
+            'reviewReason': e['reviewReason'] is String
+                ? e['reviewReason']
+                : '请核对交易信息',
+            'ruleVersion': e['ruleVersion'],
+            'status': ignore ? 'ignored' : 'pending',
+            'possibleDuplicate': possibleDuplicate,
+          });
+        }
+        d.extras['paymentNotifications'] = records;
+      });
+
+  Future<void> accept(
+    String eventId,
+    LedgerTx tx, {
+    bool duplicateReviewed = false,
+  }) => store.change((d) {
+    final records = _records(d);
+    _apply(d, records, eventId, tx, duplicateReviewed: duplicateReviewed);
+    d.extras['paymentNotifications'] = records;
+  });
+
+  /// Batch confirmation is one durable ledger write, revalidated at commit time.
+  Future<int> acceptMany(List<PaymentAcceptance> items) async {
+    if (items.isEmpty) throw const FormatException('请先选择待确认记录');
+    if (items.map((i) => i.eventId).toSet().length != items.length) {
+      throw const FormatException('同一条通知不能重复选择');
+    }
+    var count = 0;
+    await store.change((d) {
+      final records = _records(d);
+      final checked = <PaymentAcceptance>[];
+      for (final item in items) {
+        final record = records
+            .where((r) => r['eventId'] == item.eventId)
+            .firstOrNull;
+        if (record == null) throw const FormatException('通知记录不存在，请刷新后重试');
+        if (record['status'] == 'applied') continue;
+        final problem = batchProblem(record, data: d);
+        if (problem != null) throw FormatException('$problem，请逐笔核对');
+        if (item.transaction.amount != record['amountCents'] ||
+            item.transaction.type.name != record['kind'] ||
+            item.transaction.date.millisecondsSinceEpoch !=
+                record['postedAt'] ||
+            item.transaction.title.trim() !=
+                (record['merchant'] as String).trim()) {
+          throw const FormatException('批量账单与原通知不一致，请逐笔核对');
+        }
+        checked.add(item);
+      }
+      // Every candidate is checked before any transaction in this batch is added.
+      for (final item in checked) {
+        _apply(
+          d,
+          records,
+          item.eventId,
+          item.transaction,
+          duplicateReviewed: true,
+        );
+        count++;
+      }
+      d.extras['paymentNotifications'] = records;
+    });
+    return count;
+  }
+
+  bool needsDuplicateReview(
+    Json record, {
+    LedgerTx? transaction,
+    WalletData? data,
+  }) {
+    final ledger = data ?? store.data;
+    final amount = transaction?.amount ?? record['amountCents'];
+    final date =
+        transaction?.date ??
+        DateTime.fromMillisecondsSinceEpoch(record['postedAt']);
+    if (!identical(_pendingIndexData, ledger)) {
+      _pendingIndexData = ledger;
+      _duplicatePendingIds = {};
+      final groups = <int, List<Json>>{};
+      for (final r in _records(ledger).where((r) => r['status'] == 'pending')) {
+        if (r['possibleDuplicate'] == true) {
+          _duplicatePendingIds.add(r['eventId']);
+        }
+        if (r['amountCents'] is int) (groups[r['amountCents']] ??= []).add(r);
+      }
+      for (final group in groups.values) {
+        group.sort((a, b) => (a['postedAt'] as int).compareTo(b['postedAt']));
+        for (var i = 1; i < group.length; i++) {
+          if ((group[i]['postedAt'] as int) -
+                  (group[i - 1]['postedAt'] as int) <=
+              120000) {
+            _duplicatePendingIds.addAll([
+              group[i]['eventId'],
+              group[i - 1]['eventId'],
+            ]);
+          }
+        }
+      }
+    }
+    if (!identical(_ledgerIndexData, ledger) ||
+        _indexedTransactionCount != ledger.transactions.length) {
+      _ledgerIndexData = ledger;
+      _indexedTransactionCount = ledger.transactions.length;
+      _ledgerBuckets = {};
+      for (final tx in ledger.transactions) {
+        final key = '${tx.amount}|${tx.date.millisecondsSinceEpoch ~/ 120000}';
+        (_ledgerBuckets[key] ??= []).add(tx);
+      }
+    }
+    if (_duplicatePendingIds.contains(record['eventId'])) return true;
+    final time = date.millisecondsSinceEpoch ~/ 120000;
+    for (var i = time - 1; i <= time + 1; i++) {
+      if ((_ledgerBuckets['$amount|$i'] ?? const <LedgerTx>[]).any(
+        (t) => t.date.difference(date).inMilliseconds.abs() <= 120000,
+      )) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  String? batchProblem(Json record, {WalletData? data}) {
+    if (record['status'] != 'pending') return '这条通知已处理';
+    if (!['expense', 'income'].contains(record['kind'])) {
+      return record['kind'] == 'refund' ? '退款需要核对原账单' : '交易类型需要核对';
+    }
+    if (record['amountCents'] is! int || record['amountCents'] <= 0) {
+      return '金额需要补全';
+    }
+    if (record['merchant'] is! String ||
+        (record['merchant'] as String).trim().isEmpty) {
+      return '用途需要补全';
+    }
+    if (needsDuplicateReview(record, data: data)) return '可能存在重复记录';
+    return null;
+  }
+
+  void _apply(
+    WalletData d,
+    List<Json> records,
+    String eventId,
+    LedgerTx tx, {
+    bool duplicateReviewed = false,
+  }) {
+    if (d.settings['locked'] == true) throw const FormatException('账本已锁定，请先解锁');
+    final record = records.firstWhere(
+      (r) => r['eventId'] == eventId,
+      orElse: () => throw const FormatException('通知记录不存在'),
+    );
+    if (record['status'] == 'applied') return;
+    if (record['status'] != 'pending') throw const FormatException('通知已处理');
+    if (record['kind'] == 'refund') {
+      throw const FormatException('退款请先核对原交易，暂不直接计入收支');
+    }
+    if (!duplicateReviewed &&
+        needsDuplicateReview(record, transaction: tx, data: d)) {
+      throw const FormatException('存在金额和时间相近的记录，请确认不是重复账单');
+    }
+    if (d.transactions.any((t) => t.id == tx.id)) {
+      throw const FormatException('账单 ID 已存在');
+    }
+    if (tx.type == TxType.transfer && tx.fromId == tx.toId) {
+      throw const FormatException('转入转出账户不能相同');
+    }
+    for (final id
+        in tx.type == TxType.transfer ? [tx.fromId, tx.toId] : [tx.accountId]) {
+      if (!d.accounts.any((a) => a.id == id && !a.archived)) {
+        throw const FormatException('请选择有效账户');
+      }
+    }
+    d.transactions.add(tx);
+    record['status'] = 'applied';
+    record['transactionId'] = tx.id;
+    record['processedAt'] = DateTime.now().toIso8601String();
+    d.extras.remove('analysisCache');
+  }
+
+  Set<String> get reminderSeen =>
+      ((store.data.extras['paymentReminderSeen'] as List?) ?? [])
+          .whereType<String>()
+          .toSet();
+  Future<void> markReminderSeen(Set<String> ids) => store.change((d) {
+    final pendingIds = _records(
+      d,
+    ).where((r) => r['status'] == 'pending').map((r) => r['eventId']).toSet();
+    final previous = ((d.extras['paymentReminderSeen'] as List?) ?? [])
+        .whereType<String>();
+    d.extras['paymentReminderSeen'] = {
+      ...previous,
+      ...ids,
+    }.where(pendingIds.contains).toList();
+  });
+
+  Future<void> dismiss(String eventId) => store.change((d) {
+    final records = _records(d);
+    final record = records.firstWhere((r) => r['eventId'] == eventId);
+    if (record['status'] != 'pending') return;
+    record['status'] = 'ignored';
+    record['text'] = '';
+    record['title'] = '';
+    d.extras['paymentNotifications'] = records;
+  });
+
+  Future<void> clearPending() => _serial(() async {
+    if (supported) {
+      await bridge.call('setEnabled', {'enabled': false});
+      // Clearing also works when the review queue is full. Preserve IDs before ACK.
+      for (var page = 0; page < 10; page++) {
+        final batch = (await bridge.call('peek') as List)
+            .map((e) => Json.from(e as Map))
+            .toList();
+        if (batch.isEmpty) break;
+        await ingest(batch, ignore: true);
+        await bridge.call('ack', {
+          'ids': batch.map((e) => e['eventId']).toList(),
+        });
+      }
+      await bridge.call('clear');
+    }
+    await store.change((d) {
+      final records = _records(d);
+      for (final r in records.where((r) => r['status'] == 'pending')) {
+        r['status'] = 'ignored';
+        r['text'] = '';
+        r['title'] = '';
+      }
+      d.extras['paymentNotifications'] = records;
+    });
+  });
+}
