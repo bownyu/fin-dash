@@ -43,13 +43,13 @@ jobs:
           flutter test --no-pub
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ./scripts/prepare-offline-voice.ps1
-          ./android/gradlew.bat -p android :app:testDebugUnitTest --console=plain --no-daemon
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build signed update
         shell: pwsh
         run: |
           $manifestUrl = "https://github.com/$env:GITHUB_REPOSITORY/releases/latest/download/ota-manifest.json"
           flutter build apk --release --target-platform android-arm64 --no-pub "--dart-define=OTA_MANIFEST_URL=$manifestUrl"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./android/gradlew.bat -p android :app:testDebugUnitTest --console=plain --no-daemon
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ./scripts/prepare-github-release.ps1 -Repository $env:GITHUB_REPOSITORY
       - name: Publish verified assets
