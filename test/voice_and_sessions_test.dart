@@ -150,21 +150,20 @@ void main() {
           final body = jsonDecode(request.body);
           expect(body.containsKey('tools'), false);
           expect(jsonEncode(body), isNot(contains('其他对话内容')));
-          expect(body['messages'].last['content'], '用银行卡吃午餐花了二十八元');
+          expect(body['messages'].last['content'], '上周五用银行卡吃午餐花了二十八元');
           return answer(jsonEncode(expense()));
         }),
       );
       final voice = VoiceBookkeeping(store, ai);
-      final recorded = await voice.record(
-        '用银行卡吃午餐花了二十八元',
+      final draft = await voice.preview(
+        '上周五用银行卡吃午餐花了二十八元',
         entryId: 'voice-1',
         accountId: 'bank',
       );
-      await voice.record(
-        '用银行卡吃午餐花了二十八元',
-        entryId: 'voice-1',
-        accountId: 'bank',
-      );
+      expect(store.data.transactions, isEmpty);
+      expect(store.balance(bank), 100000);
+      final recorded = await voice.confirm(draft);
+      await voice.confirm(draft);
       expect(calls, 1);
       expect(store.data.transactions.length, 1);
       expect(store.balance(bank), 97200);
@@ -189,22 +188,24 @@ void main() {
             MockClient((_) async => answer(jsonEncode(result))),
       );
       final voice = VoiceBookkeeping(store, ai);
-      await expectLater(
-        voice.record('午餐二十八元', entryId: 'voice'),
-        throwsA(isA<VoiceClarification>()),
-      );
+      final incomplete = await voice.preview('午餐二十八元', entryId: 'voice');
+      expect(incomplete.fields['amountCents'], null);
+      expect(incomplete.problem(store.data), isNotNull);
+      await expectLater(voice.confirm(incomplete), throwsFormatException);
       for (final invalid in [
         expense(amount: -1),
         expense(account: 'missing'),
-        {...expense(), 'id': 'existing'},
         {...expense(), 'date': '2026-02-31'},
       ]) {
         result = invalid;
-        await expectLater(
-          voice.record('午餐二十八元', entryId: 'voice'),
-          throwsFormatException,
-        );
+        final draft = await voice.preview('午餐二十八元', entryId: 'voice');
+        await expectLater(voice.confirm(draft), throwsFormatException);
       }
+      result = {...expense(), 'id': 'existing'};
+      await expectLater(
+        voice.preview('午餐二十八元', entryId: 'voice'),
+        throwsFormatException,
+      );
       expect(store.data.transactions, isEmpty);
       expect(store.balance(bank), 100000);
     },
@@ -230,14 +231,12 @@ void main() {
             MockClient((_) async => answer(jsonEncode(expense()))),
       );
       final voice = VoiceBookkeeping(store, ai);
+      final draft = await voice.preview('午餐28元', entryId: 'voice');
       storage.failWrites = true;
-      await expectLater(
-        voice.record('午餐28元', entryId: 'voice'),
-        throwsStateError,
-      );
+      await expectLater(voice.confirm(draft), throwsStateError);
       expect(store.data.transactions, isEmpty);
       storage.failWrites = false;
-      final recorded = await voice.record('午餐28元', entryId: 'voice');
+      final recorded = await voice.confirm(draft);
       await store.change(
         (d) => d.transactions[0] = LedgerTx.fromJson({
           ...recorded.toJson(),
@@ -463,7 +462,11 @@ void main() {
         find.byKey(const Key('voice-transcript')),
         '银行卡午餐28元',
       );
-      await tester.tap(find.text('记录这句话'));
+      await tester.pump();
+      await tester.tap(find.text('生成账单'));
+      await tester.pumpAndSettle();
+      expect(store.data.transactions, isEmpty);
+      await tester.tap(find.text('确认保存'));
       await tester.pumpAndSettle();
       expect(store.data.transactions.single.amount, 2800);
       await tester.ensureVisible(find.text('撤销这笔账单'));

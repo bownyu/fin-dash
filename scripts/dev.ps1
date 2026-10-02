@@ -1,5 +1,5 @@
 ﻿param(
-  [ValidateSet('doctor', 'deps', 'analyze', 'test', 'build-apk', 'run', 'preview', 'studio')]
+  [ValidateSet('doctor', 'deps', 'analyze', 'test', 'test-native', 'voice-assets', 'build-apk', 'run', 'preview', 'studio')]
   [string]$Action = 'doctor',
   [string]$Device = '',
   [switch]$Demo
@@ -9,11 +9,16 @@ Push-Location $taskProject
 try {
   $taskDemoArgs = @()
   if ($Demo) { $taskDemoArgs = @('--dart-define=DEMO=true') }
+  if ($Action -in @('voice-assets', 'test-native', 'build-apk', 'run', 'studio')) {
+    & "$PSScriptRoot\prepare-offline-voice.ps1"
+  }
   switch ($Action) {
     'doctor' { & flutter doctor -v; & flutter devices }
     'deps' { & flutter pub get }
+    'voice-assets' { return }
     'analyze' { & flutter analyze }
     'test' { & flutter test }
+    'test-native' { & .\android\gradlew.bat -p android :app:testDebugUnitTest --console=plain --no-daemon }
     'build-apk' { & flutter build apk --release --target-platform android-arm64 @taskDemoArgs }
     'preview' { & flutter run -d chrome @taskDemoArgs }
     'run' {
@@ -29,5 +34,5 @@ try {
       return
     }
   }
-  if ($LASTEXITCODE -ne 0) { throw "Flutter command failed: $LASTEXITCODE" }
+  if ($LASTEXITCODE -ne 0) { throw "Development command failed: $LASTEXITCODE" }
 } finally { Pop-Location }

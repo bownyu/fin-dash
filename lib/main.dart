@@ -1,17 +1,33 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'data/storage.dart';
 import 'data/wallet_store.dart';
 import 'services/ai_service.dart';
+import 'services/payment_notifications.dart';
 import 'ui/design.dart';
 import 'ui/editors.dart';
 import 'ui/finance_pages.dart';
 import 'ui/preferences.dart';
 import 'services/voice_widget_runtime.dart';
+import 'ui/voice_entry_page.dart';
+import 'ui/payment_entry_reminder.dart';
 
 Future<void> main(List<String> args) async {
   WidgetsFlutterBinding.ensureInitialized();
+  LicenseRegistry.addLicense(() async* {
+    for (final item in {
+      'SenseVoiceSmall · FunAudioLLM / Alibaba Group': 'sensevoice-model.txt',
+      'sherpa-onnx · k2-fsa': 'sherpa-onnx.txt',
+      'ONNX Runtime · Microsoft': 'onnxruntime.txt',
+      'Silero VAD · Silero Team': 'silero-vad.txt',
+    }.entries) {
+      yield LicenseEntryWithLineBreaks([
+        item.key,
+      ], await rootBundle.loadString('assets/licenses/${item.value}'));
+    }
+  });
   const demo = bool.fromEnvironment('DEMO');
   final store = WalletStore(demo ? MemoryStorage() : LocalWalletStorage());
   final ai = AiService(store, SecureKeyVault());
@@ -43,11 +59,13 @@ class FinDashApp extends StatefulWidget {
   final WalletStore store;
   final AiService ai;
   final bool demo;
+  final NotificationBridge? notificationBridge;
   const FinDashApp({
     super.key,
     required this.store,
     required this.ai,
     this.demo = false,
+    this.notificationBridge,
   });
   @override
   State<FinDashApp> createState() => _FinDashAppState();
@@ -57,6 +75,7 @@ class _FinDashAppState extends State<FinDashApp> {
   static final _lightTheme = walletTheme(Brightness.light);
   static final _darkTheme = walletTheme(Brightness.dark);
   late (bool, String?, Object?, bool, bool) _configuration;
+  final _paymentRoutes = RouteObserver<ModalRoute<void>>();
 
   (bool, String?, Object?, bool, bool) _readConfiguration() => (
     widget.store.loading,
@@ -102,6 +121,7 @@ class _FinDashAppState extends State<FinDashApp> {
     child: MaterialApp(
       title: 'FinDash',
       debugShowCheckedModeBanner: false,
+      navigatorObservers: [_paymentRoutes],
       locale: const Locale('zh', 'CN'),
       supportedLocales: const [Locale('zh', 'CN')],
       localizationsDelegates: GlobalMaterialLocalizations.delegates,
@@ -145,7 +165,12 @@ class _FinDashAppState extends State<FinDashApp> {
           : widget.store.data.profile['name'] == null ||
                 widget.store.data.settings['locked'] == true
           ? const WelcomePage()
-          : _Shell(demo: widget.demo),
+          : PaymentEntryReminder(
+              routes: _paymentRoutes,
+              bridge: widget.notificationBridge,
+              enabled: !widget.demo,
+              child: _Shell(demo: widget.demo),
+            ),
     ),
   );
 }
@@ -225,6 +250,15 @@ class _ShellState extends State<_Shell> {
       },
       child: Scaffold(
         extendBody: true,
+        floatingActionButton: index == 0
+            ? FloatingActionButton.extended(
+                key: const Key('home-voice-entry'),
+                heroTag: 'voice-entry',
+                onPressed: () => openVoiceEntry(context),
+                icon: const Icon(Icons.mic_rounded),
+                label: const Text('语音记账'),
+              )
+            : null,
         body: SafeArea(
           bottom: false,
           child: Column(

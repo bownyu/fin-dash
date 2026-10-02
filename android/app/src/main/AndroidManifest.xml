@@ -6,13 +6,25 @@
     <application
         android:label="FinDash"
         android:name="${applicationName}"
+        android:allowBackup="false"
+        android:fullBackupContent="@xml/backup_rules"
+        android:dataExtractionRules="@xml/data_extraction_rules"
         android:icon="@mipmap/ic_findash">
-        <service android:name=".WidgetVoiceService" android:exported="false" android:foregroundServiceType="microphone" />
+        <service android:name=".WidgetVoiceService" android:exported="false" android:foregroundServiceType="microphone|shortService" />
         <activity android:name=".WidgetPermissionActivity" android:exported="false" android:excludeFromRecents="true" android:theme="@style/WidgetPermissionTheme" />
         <receiver android:name=".VoiceWidget" android:exported="false" android:label="@string/voice_widget_title">
             <intent-filter><action android:name="android.appwidget.action.APPWIDGET_UPDATE" /></intent-filter>
             <meta-data android:name="android.appwidget.provider" android:resource="@xml/voice_widget_info" />
         </receiver>
+        <service
+            android:name=".PaymentNotificationListener"
+            android:label="FinDash 支付通知识别"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -47,7 +59,6 @@
 
          In particular, this is used by the Flutter engine in io.flutter.plugin.text.ProcessTextPlugin. -->
     <queries>
-        <intent><action android:name="android.speech.RecognitionService" /></intent>
         <intent>
             <action android:name="android.intent.action.PROCESS_TEXT"/>
             <data android:mimeType="text/plain"/>

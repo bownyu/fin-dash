@@ -44,7 +44,8 @@ class VoiceBridge(private val activity: FlutterActivity, messenger: BinaryMessen
         else finish(null, "请允许麦克风权限后重试，也可以直接输入记账内容")
     }
     private fun startRecognition() {
-        speech = SpeechCapture(activity, { finish(it, null) }, { finish(null, it) })
+        speech = SpeechCapture(activity, { finish(it, null) }, { finish(null, it) },
+            { channel.invokeMethod("partial", it) }, { channel.invokeMethod("state", it) })
         speech!!.start()
     }
     private fun finish(text: String?, error: String?) {

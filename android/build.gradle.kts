@@ -1,5 +1,8 @@
 allprojects {
     repositories {
+        // Maven dependencies (including Flutter plugin tests) use mirrors first.
+        maven("https://maven.aliyun.com/repository/central")
+        maven("https://maven.aliyun.com/repository/google")
         google()
         mavenCentral()
     }

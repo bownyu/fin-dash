@@ -2,13 +2,22 @@ import 'package:flutter/services.dart';
 
 class VoiceInput {
   static const channel = MethodChannel('findash/voice');
-  Future<String?> listen() async {
+  Future<String?> listen({
+    void Function(String)? onPartial,
+    void Function(String)? onState,
+  }) async {
+    channel.setMethodCallHandler((call) async {
+      if (call.method == 'partial') onPartial?.call(call.arguments as String);
+      if (call.method == 'state') onState?.call(call.arguments as String);
+    });
     try {
       return await channel.invokeMethod<String>('start');
     } on MissingPluginException {
       throw const FormatException('当前设备不支持语音识别，可以直接输入记账内容');
     } on PlatformException catch (e) {
-      throw FormatException(e.message ?? '语音识别失败，请重试');
+      throw FormatException(e.message ?? '语音识别失败，可以重试或编辑已识别文字');
+    } finally {
+      channel.setMethodCallHandler(null);
     }
   }
 
@@ -16,7 +25,7 @@ class VoiceInput {
     try {
       await channel.invokeMethod<void>('stop');
     } on MissingPluginException {
-      // There is no native recording to stop on this platform.
+      /* No native recording on this platform. */
     } on PlatformException catch (e) {
       throw FormatException(e.message ?? '无法结束语音识别');
     }

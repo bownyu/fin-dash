@@ -11,6 +11,9 @@ import 'ai_pages.dart';
 import 'design.dart';
 import 'editors.dart';
 import 'finance_pages.dart';
+import 'agent_actions_page.dart';
+import 'payment_notifications_page.dart';
+import 'wechat_import_page.dart';
 
 Future<void> showThemePicker(BuildContext context) =>
     showModalBottomSheet<void>(
@@ -351,6 +354,18 @@ class ProfilePage extends StatelessWidget {
                 const AiSettingsPage(),
               ),
               menu(
+                Icons.fact_check_outlined,
+                '待确认操作',
+                '核对顾问提出的变更，查看执行历史',
+                const AgentActionsPage(),
+              ),
+              menu(
+                Icons.notifications_active_outlined,
+                '支付通知识别',
+                'Android 本地采集，核对后记账',
+                const PaymentNotificationsPage(),
+              ),
+              menu(
                 Icons.face_retouching_natural_rounded,
                 '顾问人设',
                 store.data.agent['name'],
@@ -376,6 +391,12 @@ class ProfilePage extends StatelessWidget {
           padding: EdgeInsets.zero,
           child: Column(
             children: [
+              menu(
+                Icons.table_chart_outlined,
+                '导入微信账单',
+                '读取 Excel · 核对账户 · 自动跳过重复记录',
+                const WechatImportPage(),
+              ),
               menu(
                 Icons.backup_outlined,
                 '备份与恢复',
@@ -1200,15 +1221,157 @@ class GoalsPage extends StatelessWidget {
   }
 }
 
-class AiSettingsPage extends StatefulWidget {
+class AiSettingsPage extends StatelessWidget {
   const AiSettingsPage({super.key});
   @override
-  State<AiSettingsPage> createState() => _AiSettingsPageState();
+  Widget build(BuildContext context) {
+    final ai = AppScope.of(context).ai;
+    return Scaffold(
+      appBar: AppBar(title: const Text('AI 设置')),
+      body: PageList(
+        children: [
+          const Text(
+            '供应商配置',
+            style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700),
+          ),
+          const SizedBox(height: 8),
+          const Text(
+            '每份配置独立保存地址、模型和密钥。切换后，AI 顾问与语音记账使用所选配置。',
+            style: TextStyle(color: muted),
+          ),
+          const SizedBox(height: 20),
+          for (final id in ai.configurationIds) ...[
+            Panel(
+              key: ValueKey('provider-card:$id'),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Icon(
+                        id == ai.provider
+                            ? Icons.check_circle_rounded
+                            : Icons.dns_outlined,
+                        color: id == ai.provider ? primary : muted,
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          ai.configurationName(id),
+                          style: const TextStyle(
+                            fontSize: 17,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                      if (id == ai.provider)
+                        const Text('使用中', style: TextStyle(color: primary)),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    '${ai.configuration(id)['model']}'.isEmpty
+                        ? '尚未填写模型'
+                        : '${ai.configuration(id)['model']}',
+                  ),
+                  Text(
+                    '${ai.configuration(id)['baseURL']}',
+                    style: const TextStyle(color: muted, fontSize: 12),
+                  ),
+                  const SizedBox(height: 8),
+                  Wrap(
+                    spacing: 8,
+                    children: [
+                      if (id != ai.provider)
+                        TextButton(
+                          key: ValueKey('use-provider:$id'),
+                          onPressed: ai.busy
+                              ? null
+                              : () => perform(
+                                  context,
+                                  () => ai.switchConfiguration(id),
+                                  success: '已切换到 ${ai.configurationName(id)}',
+                                ),
+                          child: const Text('使用此配置'),
+                        ),
+                      TextButton(
+                        key: ValueKey('edit-provider:$id'),
+                        onPressed: ai.busy
+                            ? null
+                            : () => openPage(
+                                context,
+                                AiConfigurationEditor(providerId: id),
+                              ),
+                        child: const Text('编辑'),
+                      ),
+                      if (AppScope.storeOf(
+                        context,
+                      ).data.providerConfigs.containsKey(id))
+                        TextButton(
+                          onPressed: ai.busy
+                              ? null
+                              : () async {
+                                  if (await confirm(
+                                        context,
+                                        '删除这份配置？',
+                                        '将删除“${ai.configurationName(id)}”及其密钥，账本和聊天记录保留。',
+                                        action: '删除',
+                                      ) &&
+                                      context.mounted) {
+                                    await perform(
+                                      context,
+                                      () => ai.removeConfiguration(id),
+                                    );
+                                  }
+                                },
+                          child: const Text(
+                            '删除',
+                            style: TextStyle(color: coral),
+                          ),
+                        ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 12),
+          ],
+          FilledButton.icon(
+            key: const Key('add-ai-provider'),
+            onPressed: ai.busy
+                ? null
+                : () => openPage(
+                    context,
+                    AiConfigurationEditor(
+                      providerId: 'provider-${newId()}',
+                      isNew: true,
+                    ),
+                  ),
+            icon: const Icon(Icons.add_rounded),
+            label: const Text('添加供应商配置'),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
-class _AiSettingsPageState extends State<AiSettingsPage> {
+class AiConfigurationEditor extends StatefulWidget {
+  final String providerId;
+  final bool isNew;
+  const AiConfigurationEditor({
+    super.key,
+    required this.providerId,
+    this.isNew = false,
+  });
+  @override
+  State<AiConfigurationEditor> createState() => _AiConfigurationEditorState();
+}
+
+class _AiConfigurationEditorState extends State<AiConfigurationEditor> {
   final keyInput = TextEditingController(),
       url = TextEditingController(),
+      name = TextEditingController(),
       model = TextEditingController();
   String provider = 'custom',
       protocol = chatProtocol,
@@ -1225,14 +1388,17 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
     super.didChangeDependencies();
     if (initialized) return;
     initialized = true;
-    provider = AppScope.of(context).ai.provider;
+    provider = widget.providerId;
     load(provider);
   }
 
   Future<void> load(String value) async {
     setState(() => loading = true);
     final scope = AppScope.of(context);
-    final c = scope.ai.config;
+    final c = widget.isNew
+        ? {...customProviderDefaults, 'name': '', 'baseURL': ''}
+        : scope.ai.configuration(value);
+    name.text = c['name'];
     url.text = c['baseURL'];
     model.text = c['model'];
     supportsImages = c['supportsImages'] == true;
@@ -1242,7 +1408,7 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
     reasoningEffort = c['reasoningEffort'] ?? 'default';
     reasoningSummary = c['reasoningSummary'] == true;
     try {
-      final key = await scope.ai.vault.read(value);
+      final key = widget.isNew ? null : await scope.ai.vault.read(value);
       if (mounted && provider == value) keyInput.text = key ?? '';
     } catch (_) {
       if (mounted) toast(context, '无法读取密钥，请重新填写');
@@ -1269,11 +1435,14 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
     final enteredKey = keyInput.text.trim();
     final ok = await perform(
       context,
-      () => scope.ai.saveConfiguration(snapshot, enteredKey),
-      success: 'AI 设置已保存',
+      () => scope.ai.saveConfiguration(
+        snapshot,
+        enteredKey,
+        providerId: provider,
+      ),
+      success: '配置已保存并启用',
     );
     if (!mounted) return;
-    if (ok) provider = 'custom';
     if (ok && close) {
       Navigator.pop(context);
     } else {
@@ -1282,6 +1451,7 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
   }
 
   Json get formConfiguration => {
+    'name': name.text.trim(),
     'baseURL': url.text.trim(),
     'model': model.text.trim(),
     'supportsImages': supportsImages,
@@ -1325,6 +1495,7 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
   @override
   void dispose() {
     keyInput.dispose();
+    name.dispose();
     url.dispose();
     model.dispose();
     super.dispose();
@@ -1332,7 +1503,7 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
 
   @override
   Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(title: const Text('AI 设置')),
+    appBar: AppBar(title: Text(widget.isNew ? '添加供应商配置' : '编辑供应商配置')),
     body: PageList(
       children: [
         Panel(
@@ -1354,6 +1525,16 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
           ),
         ),
         const SizedBox(height: 22),
+        TextField(
+          key: const Key('provider-name'),
+          controller: name,
+          enabled: !saving && !loading,
+          decoration: const InputDecoration(
+            labelText: '配置名称',
+            hintText: '例如：日常记账、备用供应商',
+          ),
+        ),
+        const SizedBox(height: 18),
         DropdownButtonFormField<String>(
           initialValue: protocol,
           isExpanded: true,
@@ -1376,6 +1557,7 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
         TextField(
           enabled: !saving && !loading,
           controller: keyInput,
+          key: const Key('provider-key'),
           obscureText: hidden,
           enableSuggestions: false,
           autocorrect: false,
@@ -1396,6 +1578,7 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
         TextField(
           enabled: !saving && !loading,
           controller: url,
+          key: const Key('provider-url'),
           decoration: const InputDecoration(
             labelText: 'Base URL',
             helperText: '填写基础地址或完整 /responses、/chat/completions 地址',
@@ -1406,6 +1589,7 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
         TextField(
           enabled: !saving && !loading,
           controller: model,
+          key: const Key('provider-model'),
           decoration: const InputDecoration(labelText: '模型名称'),
         ),
         SwitchListTile(
@@ -1463,13 +1647,14 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
         ),
         const SizedBox(height: 24),
         FilledButton(
+          key: const Key('save-ai-provider'),
           onPressed: saving || loading ? null : () => save(),
           child: Text(
             loading
                 ? '读取设置…'
                 : saving
                 ? '保存中…'
-                : '保存设置',
+                : '保存并使用此配置',
           ),
         ),
         const SizedBox(height: 12),
@@ -1785,6 +1970,14 @@ class _BackupPageState extends State<BackupPage> {
             icon: const Icon(Icons.upload_file_rounded),
             label: const Text('选择备份并恢复'),
           ),
+          const SizedBox(height: 14),
+          OutlinedButton.icon(
+            onPressed: busy
+                ? null
+                : () => openPage(context, const WechatImportPage()),
+            icon: const Icon(Icons.table_chart_outlined),
+            label: const Text('导入微信账单（Excel）'),
+          ),
           const SizedBox(height: 22),
           const Text(
             '兼容旧版 wallet 的 JSON 和 Base64 备份。导入时保留当前账户余额，避免历史账单重复扣款。',
@@ -2026,6 +2219,18 @@ class SettingsPage extends StatelessWidget {
             child: Text(
               'FinDash 1.1.0\n本地账本 · 人民币记账\n\n旧版 Kotlin 工程已保留在 legacy_android。',
               style: TextStyle(color: muted, height: 1.9),
+            ),
+          ),
+          ListTile(
+            title: const Text('开源许可'),
+            subtitle: const Text(
+              'SenseVoiceSmall · FunAudioLLM / Alibaba Group',
+            ),
+            trailing: const Icon(Icons.chevron_right_rounded),
+            onTap: () => showLicensePage(
+              context: context,
+              applicationName: 'FinDash',
+              applicationVersion: '1.1.0',
             ),
           ),
         ],

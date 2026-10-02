@@ -29,7 +29,8 @@ class _ChatPageState extends State<ChatPage> {
   final input = TextEditingController(), scroll = ScrollController();
   bool started = false;
   int messageCount = -1;
-  String liveSignature = '';
+  AiService? observedAi;
+  bool scrollQueued = false;
   AiImage? attachment;
 
   Future<void> pickImage() async {
@@ -75,32 +76,38 @@ class _ChatPageState extends State<ChatPage> {
       input.text = widget.initialPrompt!;
     }
     final ai = AppScope.of(context).ai;
+    if (observedAi != ai) {
+      observedAi?.liveUpdates.removeListener(followOutput);
+      observedAi = ai;
+      ai.liveUpdates.addListener(followOutput);
+    }
     final length = AppScope.storeOf(context).data.chats
         .where((m) => AiService.sessionOf(m) == ai.activeSessionId)
         .length;
-    final live = ai.liveMessage;
-    final blocks = live?['blocks'] as List? ?? [];
-    final last = blocks.isEmpty ? null : blocks.last;
-    final signature =
-        '${live?['id']}:${live?['content']?.length}:${blocks.length}:${last?['text']?.length}:${last?['arguments']?.length}:${last?['status']}';
-    final nearBottom = !scroll.hasClients || scroll.position.extentAfter < 160;
-    if (length != messageCount || signature != liveSignature && nearBottom) {
-      liveSignature = signature;
+    if (length != messageCount) {
       messageCount = length;
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted && scroll.hasClients) {
-          scroll.animateTo(
-            scroll.position.maxScrollExtent,
-            duration: const Duration(milliseconds: 250),
-            curve: Curves.easeOut,
-          );
-        }
-      });
+      followOutput();
     }
+  }
+
+  void followOutput() {
+    if (scrollQueued || (scroll.hasClients && scroll.position.pixels > 160)) {
+      return;
+    }
+    scrollQueued = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      scrollQueued = false;
+      if (mounted && scroll.hasClients && scroll.position.pixels <= 160) {
+        // The reversed list has a stable bottom at zero, even with lazy history.
+        // Do not restart a scroll animation for every arriving token.
+        if (scroll.position.pixels != 0) scroll.jumpTo(0);
+      }
+    });
   }
 
   @override
   void dispose() {
+    observedAi?.liveUpdates.removeListener(followOutput);
     input.dispose();
     scroll.dispose();
     super.dispose();
@@ -155,7 +162,6 @@ class _ChatPageState extends State<ChatPage> {
       setState(() {
         attachment = null;
         messageCount = -1;
-        liveSignature = '';
       });
     }
   }
@@ -197,7 +203,9 @@ class _ChatPageState extends State<ChatPage> {
                   ? store.aiStatus!
                   : (ai.config['model'] as String).isEmpty
                   ? '请配置模型'
-                  : ai.config['model'],
+                  : '${ai.configurationName(ai.provider)} · ${ai.config['model']}',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
               style: const TextStyle(fontSize: 11, color: muted),
             ),
           ],
@@ -216,6 +224,7 @@ class _ChatPageState extends State<ChatPage> {
           PopupMenuButton<String>(
             tooltip: '更多',
             itemBuilder: (_) => const [
+              PopupMenuItem(value: 'providers', child: Text('切换供应商')),
               PopupMenuItem(value: 'actions', child: Text('操作管理')),
               PopupMenuItem(value: 'memory', child: Text('顾问记忆')),
             ],
@@ -223,6 +232,8 @@ class _ChatPageState extends State<ChatPage> {
               context,
               value == 'actions'
                   ? const AgentActionsPage()
+                  : value == 'providers'
+                  ? const AiSettingsPage()
                   : const AgentStatePage(),
             ),
           ),
@@ -231,8 +242,9 @@ class _ChatPageState extends State<ChatPage> {
       body: Column(
         children: [
           Expanded(
-            child: ListView(
+            child: _LazyChatList(
               controller: scroll,
+              reverse: messages.isNotEmpty,
               padding: const EdgeInsets.fromLTRB(20, 10, 20, 24),
               children: [
                 if (messages.isEmpty && unlinked.isEmpty) ...[
@@ -263,14 +275,21 @@ class _ChatPageState extends State<ChatPage> {
                     ),
                   ),
                 ],
-                ...messages.map(
-                  (m) => _Message(
-                    m,
-                    actions: actions
-                        .where((a) => proposalOwners[a['id']] == m['id'])
-                        .toList(),
-                  ),
-                ),
+                ...messages.map((m) {
+                  final linkedActions = actions
+                      .where((a) => proposalOwners[a['id']] == m['id'])
+                      .toList();
+                  final key = ValueKey('chat-message:${m['id']}');
+                  if (m['id'] == ai.liveMessage?['id']) {
+                    return ValueListenableBuilder<int>(
+                      key: key,
+                      valueListenable: ai.liveUpdates,
+                      builder: (context, _, child) =>
+                          _Message(ai.liveMessage ?? m, actions: linkedActions),
+                    );
+                  }
+                  return _Message(m, key: key, actions: linkedActions);
+                }),
                 for (final a in unlinked)
                   Padding(
                     padding: const EdgeInsets.only(bottom: 14),
@@ -420,10 +439,38 @@ class _ChatPageState extends State<ChatPage> {
   }
 }
 
+// Build only the messages near the viewport. Keys keep image/selection state when rows move.
+class _LazyChatList extends StatelessWidget {
+  final ScrollController controller;
+  final EdgeInsets padding;
+  final List<Widget> children;
+  final bool reverse;
+  const _LazyChatList({
+    required this.controller,
+    required this.padding,
+    required this.children,
+    required this.reverse,
+  });
+  @override
+  Widget build(BuildContext context) => ListView.builder(
+    controller: controller,
+    padding: padding,
+    reverse: reverse,
+    itemCount: children.length,
+    findChildIndexCallback: (key) {
+      final index = children.indexWhere((child) => child.key == key);
+      if (index < 0) return null;
+      return reverse ? children.length - 1 - index : index;
+    },
+    itemBuilder: (_, index) =>
+        children[reverse ? children.length - 1 - index : index],
+  );
+}
+
 class _Message extends StatelessWidget {
   final Json message;
   final List<Json>? actions;
-  const _Message(this.message, {this.actions});
+  const _Message(this.message, {super.key, this.actions});
   @override
   Widget build(BuildContext context) {
     final user = message['role'] == 'user';
@@ -581,6 +628,17 @@ Set<String> _proposalIds(Json message) {
   return ids;
 }
 
+// Avoid reparsing a growing Markdown document for every token. Completed text remains selectable.
+class _ReplyText extends StatelessWidget {
+  final String data;
+  final bool streaming;
+  const _ReplyText({required this.data, required this.streaming});
+  @override
+  Widget build(BuildContext context) => streaming
+      ? Text(data, style: const TextStyle(height: 1.5))
+      : MarkdownBody(data: data, selectable: true);
+}
+
 class _AssistantContent extends StatelessWidget {
   final Json message;
   final List<Json>? actions;
@@ -604,12 +662,20 @@ class _AssistantContent extends StatelessWidget {
       children: [
         if (hasTrace) _ProcessingTrace(message),
         if (blocks.isEmpty && '${message['content'] ?? ''}'.isNotEmpty)
-          MarkdownBody(data: '${message['content']}', selectable: true),
+          _ReplyText(
+            data: '${message['content']}',
+            streaming: message['status'] == 'streaming',
+          ),
         for (final block in blocks)
           if (block['type'] == 'text')
             Padding(
               padding: const EdgeInsets.symmetric(vertical: 6),
-              child: MarkdownBody(data: '${block['text']}', selectable: true),
+              child: _ReplyText(
+                data: '${block['text']}',
+                streaming:
+                    message['status'] == 'streaming' &&
+                    identical(block, blocks.last),
+              ),
             ),
         for (final a in proposals)
           Padding(
@@ -665,105 +731,111 @@ class _ProcessingTrace extends StatelessWidget {
       isScrollControlled: true,
       useSafeArea: true,
       showDragHandle: true,
-      builder: (context) {
-        AppScope.storeOf(context);
-        final blocks = message['blocks'] as List? ?? [];
-        return FractionallySizedBox(
-          heightFactor: .8,
-          child: ListView(
-            padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
-            children: [
-              Text('处理记录', style: Theme.of(context).textTheme.titleMedium),
-              const SizedBox(height: 8),
-              for (var i = 0; i < blocks.length; i++)
-                if (blocks[i]['type'] == 'reasoning')
-                  ExpansionTile(
-                    key: ValueKey('${message['id']}:reasoning:$i'),
-                    tilePadding: EdgeInsets.zero,
-                    title: const Text(
-                      '思考 / 摘要',
-                      style: TextStyle(fontSize: 13),
-                    ),
-                    children: [
-                      Align(
-                        alignment: Alignment.centerLeft,
-                        child: MarkdownBody(
-                          data: '${blocks[i]['text']}',
-                          selectable: true,
+      builder: (context) => ValueListenableBuilder<int>(
+        valueListenable: AppScope.of(context).ai.liveUpdates,
+        builder: (context, _, child) {
+          AppScope.storeOf(context);
+          final blocks = message['blocks'] as List? ?? [];
+          return FractionallySizedBox(
+            heightFactor: .8,
+            child: ListView(
+              padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
+              children: [
+                Text('处理记录', style: Theme.of(context).textTheme.titleMedium),
+                const SizedBox(height: 8),
+                for (var i = 0; i < blocks.length; i++)
+                  if (blocks[i]['type'] == 'reasoning')
+                    ExpansionTile(
+                      key: ValueKey('${message['id']}:reasoning:$i'),
+                      tilePadding: EdgeInsets.zero,
+                      title: const Text(
+                        '思考 / 摘要',
+                        style: TextStyle(fontSize: 13),
+                      ),
+                      children: [
+                        Align(
+                          alignment: Alignment.centerLeft,
+                          child: MarkdownBody(
+                            data: '${blocks[i]['text']}',
+                            selectable: true,
+                          ),
+                        ),
+                      ],
+                    )
+                  else if (blocks[i]['type'] == 'tool')
+                    ExpansionTile(
+                      key: ValueKey('${message['id']}:tool:$i'),
+                      tilePadding: EdgeInsets.zero,
+                      title: Text(
+                        '${toolLabels[blocks[i]['name']] ?? blocks[i]['name'] ?? '工具调用'}'
+                            .replaceAll('…', ''),
+                        style: const TextStyle(fontSize: 13),
+                      ),
+                      subtitle: Text(
+                        status(Json.from(blocks[i])),
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: blocks[i]['status'] == 'error' ? coral : muted,
                         ),
                       ),
-                    ],
-                  )
-                else if (blocks[i]['type'] == 'tool')
-                  ExpansionTile(
-                    key: ValueKey('${message['id']}:tool:$i'),
-                    tilePadding: EdgeInsets.zero,
-                    title: Text(
-                      '${toolLabels[blocks[i]['name']] ?? blocks[i]['name'] ?? '工具调用'}'
-                          .replaceAll('…', ''),
-                      style: const TextStyle(fontSize: 13),
-                    ),
-                    subtitle: Text(
-                      status(Json.from(blocks[i])),
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: blocks[i]['status'] == 'error' ? coral : muted,
-                      ),
-                    ),
-                    children: [
-                      Align(
-                        alignment: Alignment.centerLeft,
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const Text(
-                              '调用参数',
-                              style: TextStyle(fontWeight: FontWeight.w600),
-                            ),
-                            SelectableText(
-                              pretty(blocks[i]['arguments']),
-                              style: const TextStyle(fontSize: 12),
-                            ),
-                            if (blocks[i]['result'] != null) ...[
-                              const SizedBox(height: 8),
+                      children: [
+                        Align(
+                          alignment: Alignment.centerLeft,
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
                               const Text(
-                                '工具结果',
+                                '调用参数',
                                 style: TextStyle(fontWeight: FontWeight.w600),
                               ),
                               SelectableText(
-                                pretty(blocks[i]['result']),
+                                pretty(blocks[i]['arguments']),
                                 style: const TextStyle(fontSize: 12),
                               ),
+                              if (blocks[i]['result'] != null) ...[
+                                const SizedBox(height: 8),
+                                const Text(
+                                  '工具结果',
+                                  style: TextStyle(fontWeight: FontWeight.w600),
+                                ),
+                                SelectableText(
+                                  pretty(blocks[i]['result']),
+                                  style: const TextStyle(fontSize: 12),
+                                ),
+                              ],
                             ],
-                          ],
+                          ),
                         ),
+                      ],
+                    ),
+                if (message['error'] != null)
+                  SelectableText(
+                    '${message['error']}',
+                    style: const TextStyle(color: coral, fontSize: 12),
+                  ),
+                if (message['usage'] is List)
+                  ExpansionTile(
+                    tilePadding: EdgeInsets.zero,
+                    title: const Text(
+                      '用量与响应信息',
+                      style: TextStyle(fontSize: 13),
+                    ),
+                    children: [
+                      SelectableText(
+                        pretty({
+                          'model': message['model'],
+                          'responseId': message['responseId'],
+                          'usage': message['usage'],
+                        }),
+                        style: const TextStyle(fontSize: 12),
                       ),
                     ],
                   ),
-              if (message['error'] != null)
-                SelectableText(
-                  '${message['error']}',
-                  style: const TextStyle(color: coral, fontSize: 12),
-                ),
-              if (message['usage'] is List)
-                ExpansionTile(
-                  tilePadding: EdgeInsets.zero,
-                  title: const Text('用量与响应信息', style: TextStyle(fontSize: 13)),
-                  children: [
-                    SelectableText(
-                      pretty({
-                        'model': message['model'],
-                        'responseId': message['responseId'],
-                        'usage': message['usage'],
-                      }),
-                      style: const TextStyle(fontSize: 12),
-                    ),
-                  ],
-                ),
-            ],
-          ),
-        );
-      },
+              ],
+            ),
+          );
+        },
+      ),
     );
   }
 

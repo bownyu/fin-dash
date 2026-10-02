@@ -4,8 +4,24 @@ import '../domain/models.dart';
 import 'agent_actions.dart';
 import 'ai_service.dart';
 
-class VoiceClarification extends FormatException {
-  const VoiceClarification(super.message);
+class VoiceDraft {
+  final String entryId;
+  final Json fields;
+  final String? message;
+  VoiceDraft(this.entryId, Json fields, {this.message})
+    : fields = Map.unmodifiable(fields);
+  VoiceDraft update(Json changes) =>
+      VoiceDraft(entryId, {...fields, ...changes});
+  LedgerTx validate(WalletData data) =>
+      AgentActions.prepareTransaction(data, fields, id: entryId);
+  String? problem(WalletData data) {
+    try {
+      validate(data);
+      return null;
+    } on FormatException catch (e) {
+      return e.message;
+    }
+  }
 }
 
 class VoiceBookkeeping {
@@ -13,34 +29,46 @@ class VoiceBookkeeping {
   final AiService ai;
   VoiceBookkeeping(this.store, this.ai);
 
-  Future<LedgerTx> record(
+  /// Parsing never writes a transaction. Confirmation is a separate operation.
+  Future<VoiceDraft> preview(
     String text, {
     required String entryId,
     String? accountId,
   }) async {
-    if (store.data.settings['locked'] == true) {
-      throw const FormatException('账本已锁定，请先解锁后记账');
+    _unlocked();
+    if (text.trim().isEmpty) throw const FormatException('请先说出或输入记账内容');
+    if (text.length > 1000) throw const FormatException('一次最多识别 1000 字，请分开记账');
+    Json input;
+    try {
+      input = await ai.interpretVoice(text, defaultAccountId: accountId);
+    } on FormatException catch (e) {
+      _unlocked();
+      throw FormatException('${e.message}。记账内容已保留，请重试 AI 解析');
     }
-    final existing = store.data.transactions
-        .where((t) => t.id == entryId)
-        .firstOrNull;
-    if (existing != null) return existing;
-    final input = await ai.interpretVoice(text, defaultAccountId: accountId);
-    if (input['question'] is String &&
-        (input['question'] as String).trim().isNotEmpty) {
-      throw VoiceClarification(input['question']);
-    }
+    _unlocked();
+    if (input.containsKey('id')) throw const FormatException('语音入口只能新增账单');
+    return VoiceDraft(
+      entryId,
+      {
+        for (final field in input.entries)
+          if (field.key != 'question' && field.key != 'missingFields')
+            field.key: field.value,
+      },
+      message: input['question'] is String ? input['question'] as String : null,
+    );
+  }
+
+  Future<LedgerTx> confirm(VoiceDraft draft) async {
+    _unlocked();
     LedgerTx? result;
     await store.change((d) {
       if (d.settings['locked'] == true) {
         throw const FormatException('账本已锁定，本次未记账');
       }
-      final transaction = AgentActions.prepareTransaction(
-        d,
-        input,
-        id: entryId,
-      );
-      final previous = d.transactions.where((t) => t.id == entryId).firstOrNull;
+      final transaction = draft.validate(d);
+      final previous = d.transactions
+          .where((t) => t.id == draft.entryId)
+          .firstOrNull;
       if (previous != null &&
           jsonEncode(previous.toJson()) != jsonEncode(transaction.toJson())) {
         throw const FormatException('这笔记录已经保存，请开始新的语音记账');
@@ -49,12 +77,19 @@ class VoiceBookkeeping {
       if (transaction.accountId != null) {
         d.settings['quickEntryAccountId'] = transaction.accountId;
       }
-      result = transaction;
+      result = previous ?? transaction;
     });
     return result!;
   }
 
+  void _unlocked() {
+    if (store.data.settings['locked'] == true) {
+      throw const FormatException('账本已锁定，请先解锁后记账');
+    }
+  }
+
   Future<void> undo(LedgerTx transaction) => store.change((d) {
+    if (d.settings['locked'] == true) throw const FormatException('账本已锁定，请先解锁');
     final current = d.transactions
         .where((t) => t.id == transaction.id)
         .firstOrNull;

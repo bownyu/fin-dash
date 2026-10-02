@@ -7,6 +7,7 @@ import 'package:fin_dash/data/wallet_store.dart';
 import 'package:fin_dash/domain/models.dart';
 import 'package:fin_dash/ui/design.dart';
 import 'package:fin_dash/ui/agent_actions_page.dart';
+import 'package:fin_dash/ui/payment_notifications_page.dart';
 import 'package:fin_dash/ui/ai_pages.dart';
 import 'package:fin_dash/ui/preferences.dart';
 import 'helpers.dart';
@@ -41,6 +42,8 @@ void main() {
     final ai = AiService(store, TestVault());
     await tester.pumpWidget(harness(store, ai, const AiSettingsPage()));
     await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('edit-provider:custom')));
+    await tester.pumpAndSettle();
     expect(find.text('接口协议'), findsOneWidget);
     expect(find.text('智谱 AI'), findsNothing);
     expect(find.text('NVIDIA NIM'), findsNothing);
@@ -54,6 +57,8 @@ void main() {
       scrollable: find.byType(Scrollable).first,
     );
     expect(tester.takeException(), null);
+    Navigator.of(tester.element(find.byType(AiConfigurationEditor))).pop();
+    await tester.pumpAndSettle();
     await store.change(
       (d) => d.chats.add({
         'id': 'streamed',
@@ -169,7 +174,7 @@ void main() {
     addTearDown(tester.view.resetDevicePixelRatio);
     final store = await emptyStore();
     final ai = AiService(store, TestVault());
-    for (final page in [const ChatPage()]) {
+    for (final page in [const ChatPage(), const PaymentNotificationsPage()]) {
       await tester.pumpWidget(harness(store, ai, page));
       await tester.pumpAndSettle();
       expect(tester.takeException(), null);

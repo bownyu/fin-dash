@@ -6,12 +6,13 @@ import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
 import '../domain/models.dart';
 import '../services/file_export.dart';
+import '../services/payment_notifications.dart';
+import 'payment_review_page.dart';
 import 'ai_pages.dart';
 import 'charts.dart';
 import 'design.dart';
 import 'editors.dart';
 import 'preferences.dart';
-import 'voice_entry_page.dart';
 
 class HomePage extends StatefulWidget {
   final VoidCallback onBills, onStats;
@@ -35,6 +36,7 @@ class _HomePageState extends State<HomePage> {
       range: DateRange.forPeriod(spendingPeriod, DateTime.now()),
     );
     final recent = store.query().take(12).toList();
+    final pendingPayments = PaymentNotifications.pendingCount(store.data);
     final budget = (store.data.settings['budget'] as num? ?? 0).toInt();
     final monthSpend = store.total(
       TxType.expense,
@@ -42,16 +44,41 @@ class _HomePageState extends State<HomePage> {
     );
     return PageList(
       children: [
-        FilledButton.icon(
-          key: const Key('home-voice-entry'),
-          style: FilledButton.styleFrom(
-            padding: const EdgeInsets.symmetric(vertical: 16),
+        if (pendingPayments > 0) ...[
+          Semantics(
+            liveRegion: true,
+            child: Panel(
+              key: const Key('home-payment-pending'),
+              child: Row(
+                children: [
+                  const Icon(Icons.receipt_long_rounded, color: primary),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          '$pendingPayments 笔支付记录待确认',
+                          style: const TextStyle(fontWeight: FontWeight.w700),
+                        ),
+                        const Text(
+                          '核对金额和实际账户后入账',
+                          style: TextStyle(color: muted, fontSize: 12),
+                        ),
+                      ],
+                    ),
+                  ),
+                  TextButton(
+                    onPressed: () =>
+                        openPage(context, const PaymentReviewPage()),
+                    child: const Text('去核对'),
+                  ),
+                ],
+              ),
+            ),
           ),
-          onPressed: () => openVoiceEntry(context),
-          icon: const Icon(Icons.mic_rounded),
-          label: const Text('语音快速记账'),
-        ),
-        const SizedBox(height: 16),
+          const SizedBox(height: 14),
+        ],
         OverviewGrid(
           hero: HeroPanel(
             child: Column(
@@ -487,6 +514,7 @@ class _HomePageState extends State<HomePage> {
           ),
         if (recent.isNotEmpty)
           TextButton(onPressed: widget.onBills, child: const Text('查看全部账单 →')),
+        const SizedBox(height: 72),
       ],
     );
   }

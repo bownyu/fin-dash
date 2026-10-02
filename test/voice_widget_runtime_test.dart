@@ -46,22 +46,31 @@ void main() {
       VoiceWidgetRuntime.install(store, ai, () => shown++);
       addTearDown(() => VoiceWidgetRuntime.channel.setMethodCallHandler(null));
       final request = {
-        'operation': 'record',
-        'text': '午餐二十八元',
+        'operation': 'preview',
+        'text': '上周五午餐二十八元',
         'entryId': 'widget-1',
       };
       final result = await widgetRequest(request);
       expect(result['success'], true);
-      expect(result['message'], contains('¥ 28.00'));
+      expect(result['summary'], contains('¥ 28.00'));
+      expect(result['canConfirm'], true);
+      expect(store.data.transactions, isEmpty);
+      expect(store.balance(bank), 100000);
+      final confirm = {
+        'operation': 'confirm',
+        'draft': jsonEncode(result['draft']),
+      };
+      final saved = await widgetRequest(confirm);
+      expect(saved['success'], true);
       expect(store.balance(bank), 97200);
       expect(store.data.chats, isEmpty);
       expect(shown, 0);
-      await widgetRequest(request);
+      await widgetRequest(confirm);
       expect(calls, 1);
       expect(store.data.transactions.length, 1);
       final undo = await widgetRequest({
         'operation': 'undo',
-        'transaction': jsonEncode(result['transaction']),
+        'transaction': jsonEncode(saved['transaction']),
       });
       expect(undo['undone'], true);
       expect(store.balance(bank), 100000);
@@ -116,9 +125,9 @@ void main() {
       addTearDown(() {
         final prefix =
             '${Directory.systemTemp.absolute.path}${Platform.pathSeparator}findash-chat-image-';
-      if (!directory.absolute.path.startsWith(prefix)) {
-        throw StateError('Unexpected test directory');
-      }
+        if (!directory.absolute.path.startsWith(prefix)) {
+          throw StateError('Unexpected test directory');
+        }
         return directory.delete(recursive: true);
       });
       final id = List.filled(64, 'b').join();

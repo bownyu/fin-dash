@@ -262,7 +262,7 @@ void main() {
   });
 
   test(
-    'new setup has only custom config and migration keeps explicit legacy endpoint',
+    'new setup and editing preserve the legacy configuration identity and endpoint',
     () async {
       final store = await emptyStore(), vault = TestVault('legacy-key');
       final ai = AiService(store, vault);
@@ -281,7 +281,7 @@ void main() {
         ...ai.config,
         'protocol': responsesProtocol,
       }, 'new-key');
-      expect(ai.provider, 'custom');
+      expect(ai.provider, 'nvidia');
       expect(ai.config['baseURL'], 'https://existing.example/v1');
       expect(ai.config['protocol'], responsesProtocol);
       expect(vault.key, 'new-key');
