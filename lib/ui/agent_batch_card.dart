@@ -67,9 +67,12 @@ class _AgentBatchCardState extends State<AgentBatchCard> {
     final undoneCount = review.items
         .where((a) => a['status'] == 'undone')
         .length;
-    final selected = choice?.token == review.token
-        ? choice!.ids
-        : review.suggested;
+    final staleChoice = choice != null && choice!.token != review.token;
+    final selected = choice == null
+        ? review.suggested
+        : choice!.ids.intersection(
+            pending.map((a) => a['id'] as String).toSet(),
+          );
     final partial = choice?.token == review.token && choice!.allowPartial;
     final groups = agentBatchGroups(pending);
     final preparing = b['generation'] == 'preparing';
@@ -136,6 +139,7 @@ class _AgentBatchCardState extends State<AgentBatchCard> {
           if (groups.length > 4) Text('另有 ${groups.length - 4} 组变更，明细中查看'),
           if (uncertain > 0)
             Text('$uncertain 项待核对，默认未选中', style: const TextStyle(color: coral)),
+          if (staleChoice) const Text('方案已更新，已保留选择；请查看明细后重新审阅。'),
           if (review.problems.isNotEmpty)
             Text(
               '${review.problems.length} 项存在冲突，已从默认选择中排除',
@@ -173,6 +177,7 @@ class _AgentBatchCardState extends State<AgentBatchCard> {
                   onPressed:
                       busy ||
                           preparing ||
+                          staleChoice ||
                           selected.isEmpty ||
                           (interrupted && !partial)
                       ? null

@@ -7,6 +7,7 @@ import 'package:sqlite3/sqlite3.dart';
 import '../domain/models.dart';
 import 'backup.dart';
 import 'storage_base.dart';
+import 'ledger_changes.dart';
 export 'storage_base.dart';
 
 typedef _Loaded = ({WalletData? data, int revision, String generation});
@@ -17,15 +18,20 @@ typedef _Commit = ({
   WalletData previous,
   WalletData next,
   bool replace,
+  bool metadataOnly,
 });
+typedef _CommitStats = ({int changedRows, int scannedRows});
 
 /// All SQLite access, diffing, validation and changed-row encoding happen in a
 /// worker. The UI publishes its candidate only after both durable files commit.
 class LocalWalletStorage
-    implements IncrementalWalletStorage, RestorePointStorage {
+    implements RecordWalletStorage, QueryWalletStorage, RestorePointStorage {
   final Directory? directory;
   _Loaded? _loaded;
   int lastChangedRows = 0;
+
+  /// Payload rows compared plus SQL position rows read, excluding mirror writes.
+  int lastScannedRows = 0;
   LocalWalletStorage({this.directory});
   Future<String> get _path async =>
       '${(directory ?? await getApplicationSupportDirectory()).path}/findash_ledger.sqlite';
@@ -67,8 +73,70 @@ class LocalWalletStorage
       previous: previous,
       next: next,
       replace: false,
+      metadataOnly: false,
     ), debugLabel: 'wallet-sqlite-commit');
-    lastChangedRows = result;
+    lastChangedRows = result.changedRows;
+    lastScannedRows = result.scannedRows;
+    _loaded = (
+      data: null,
+      revision: loaded.revision + 1,
+      generation: loaded.generation,
+    );
+  }
+
+  @override
+  Future<void> commitChanges(LedgerChangeSet changes) async {
+    if (_loaded == null) await loadSnapshot();
+    final loaded = _loaded!;
+    final result = await compute(_commitRecords, (
+      await _path,
+      loaded.revision,
+      loaded.generation,
+      changes,
+    ), debugLabel: 'wallet-record-commit');
+    lastChangedRows = result.changedRows;
+    lastScannedRows = result.scannedRows;
+    _loaded = (
+      data: null,
+      revision: loaded.revision + 1,
+      generation: loaded.generation,
+    );
+  }
+
+  @override
+  Future<Json> queryRecords(Json request) async {
+    if (_loaded == null) await loadSnapshot();
+    return compute(_queryRecords, (
+      await _path,
+      _loaded!.revision,
+      _loaded!.generation,
+      request,
+    ), debugLabel: 'wallet-record-query');
+  }
+
+  @override
+  Future<void> commitMetadata(WalletData previous, WalletData next) async {
+    if (!identical(previous.accounts, next.accounts) ||
+        !identical(previous.transactions, next.transactions) ||
+        !identical(previous.categories, next.categories) ||
+        !identical(previous.quickEntries, next.quickEntries)) {
+      throw StateError('元数据提交不能修改财务记录');
+    }
+    if (_loaded == null) await loadSnapshot();
+    final loaded = _loaded!;
+    // Bootstrap must include default categories and any initial financial data.
+    if (loaded.revision == 0) return commitSnapshot(previous, next);
+    final result = await compute(_commit, (
+      path: await _path,
+      revision: loaded.revision,
+      generation: loaded.generation,
+      previous: _metadataSnapshot(previous),
+      next: _metadataSnapshot(next),
+      replace: false,
+      metadataOnly: true,
+    ), debugLabel: 'wallet-sqlite-metadata');
+    lastChangedRows = result.changedRows;
+    lastScannedRows = result.scannedRows;
     _loaded = (
       data: null,
       revision: loaded.revision + 1,
@@ -91,14 +159,17 @@ class LocalWalletStorage
       }
     }
     final loaded = _loaded!;
-    lastChangedRows = await compute(_commit, (
+    final result = await compute(_commit, (
       path: path,
       revision: loaded.revision,
       generation: loaded.generation,
       previous: WalletData(),
       next: next,
       replace: true,
+      metadataOnly: false,
     ), debugLabel: 'wallet-sqlite-restore');
+    lastChangedRows = result.changedRows;
+    lastScannedRows = result.scannedRows;
     _loaded = (
       data: null,
       revision: loaded.revision + 1,
@@ -117,6 +188,14 @@ class LocalWalletStorage
   Future<void> save(String data) async =>
       replaceSnapshot(await compute(_import, data));
 }
+
+// No financial references enter the isolate message graph on a metadata write.
+WalletData _metadataSnapshot(WalletMetadata metadata) => WalletData(
+  accounts: [],
+  transactions: [],
+  categories: [],
+  quickEntries: [],
+).withMetadata(metadata);
 
 String _export(WalletData data) => jsonEncode(data.toJson());
 WalletData _import(String raw) => parseBackup(raw).data;
@@ -141,6 +220,18 @@ Database _open(String path) {
     db.execute(
       'CREATE INDEX IF NOT EXISTS wallet_order ON wallet_rows(bucket, position)',
     );
+    for (final field in [
+      'date',
+      'type',
+      'accountId',
+      'transferFromId',
+      'transferToId',
+      'categoryId',
+    ]) {
+      db.execute(
+        "CREATE INDEX IF NOT EXISTS wallet_tx_$field ON wallet_rows(json_extract(body,'\$.$field')) WHERE bucket='transactions'",
+      );
+    }
     db.execute('PRAGMA user_version = 1');
     return db;
   } catch (_) {
@@ -284,6 +375,23 @@ _Loaded _readConsistent(String path) {
     db.execute('ATTACH DATABASE ? AS recovery', ['$path.bak']);
     db.execute('BEGIN');
     final loaded = _read(db);
+    final futureVersion =
+        db.select('PRAGMA recovery.user_version').first.values.first as int;
+    if (futureVersion > 1) throw UnsupportedError('数据库版本较新，请更新应用');
+    if (db
+        .select('PRAGMA recovery.quick_check')
+        .any((r) => r.values.first != 'ok')) {
+      throw const FormatException('恢复副本完整性检查失败');
+    }
+    for (final pair in [('main', 'recovery'), ('recovery', 'main')]) {
+      if (db
+          .select(
+            'SELECT bucket,id,position,kind,body,checksum FROM ${pair.$1}.wallet_rows EXCEPT SELECT bucket,id,position,kind,body,checksum FROM ${pair.$2}.wallet_rows LIMIT 1',
+          )
+          .isNotEmpty) {
+        throw const FormatException('账本与恢复副本内容不一致');
+      }
+    }
     if (_meta(db, 'revision', 'recovery') != '${loaded.revision}' ||
         _meta(db, 'generation', 'recovery') != loaded.generation) {
       throw const FormatException('账本与恢复副本版本不一致，请使用备份恢复');
@@ -298,6 +406,14 @@ _Loaded _readConsistent(String path) {
 Future<_Loaded> _load(String path) async {
   File(path).parent.createSync(recursive: true);
   final mirror = '$path.bak';
+  if (File(path).existsSync() && File(mirror).existsSync()) {
+    try {
+      final fast = _readConsistent(path);
+      if (fast.data != null) return fast;
+    } catch (error) {
+      if (error is UnsupportedError) rethrow;
+    }
+  }
   if (!File(path).existsSync() && File(mirror).existsSync()) {
     _readFile(mirror);
     _copyVerified(mirror, path);
@@ -326,6 +442,7 @@ Future<_Loaded> _load(String path) async {
         previous: WalletData(),
         next: old,
         replace: true,
+        metadataOnly: false,
       ));
       loaded = (data: old, revision: 1, generation: loaded.generation);
     }
@@ -446,6 +563,19 @@ Map<_Key, _Entry> _rows(WalletData data) {
 
 void _validateChange(_Commit request) {
   final next = request.next, previous = request.previous;
+  if (request.metadataOnly) {
+    for (final data in [previous, next]) {
+      if (data.accounts.isNotEmpty ||
+          data.transactions.isNotEmpty ||
+          data.categories.isNotEmpty ||
+          data.quickEntries.isNotEmpty ||
+          request.replace ||
+          request.revision == 0) {
+        throw StateError('无效的元数据提交');
+      }
+    }
+    return;
+  }
   if (request.replace ||
       request.revision == 0 ||
       !listEquals(previous.accounts, next.accounts)) {
@@ -473,7 +603,7 @@ void _validateChange(_Commit request) {
   );
 }
 
-int _commit(_Commit request) {
+_CommitStats _commit(_Commit request) {
   _validateChange(request);
   final db = _open(request.path);
   try {
@@ -492,8 +622,20 @@ int _commit(_Commit request) {
           ? <_Key, _Entry>{}
           : _rows(request.replace ? _read(db).data! : request.previous);
       final next = _rows(request.next);
+      final positionRows = request.metadataOnly
+          ? [
+              for (final bucket in {
+                ...previous.keys.map((key) => key.$1),
+                ...next.keys.map((key) => key.$1),
+              })
+                ...db.select(
+                  'SELECT bucket,id,position FROM wallet_rows WHERE bucket=?',
+                  [bucket],
+                ),
+            ]
+          : db.select('SELECT bucket,id,position FROM wallet_rows');
       final positions = <_Key, int>{
-        for (final r in db.select('SELECT bucket,id,position FROM wallet_rows'))
+        for (final r in positionRows)
           (r['bucket'] as String, r['id'] as String): r['position'] as int,
       };
       final ranks = <_Key, int>{};
@@ -592,7 +734,272 @@ int _commit(_Commit request) {
         _setMeta(db, 'initialized', '1', schema);
       }
       db.execute('COMMIT');
-      return changed;
+      return (
+        changedRows: changed,
+        scannedRows: previous.length + next.length + positions.length,
+      );
+    } catch (_) {
+      db.execute('ROLLBACK');
+      rethrow;
+    }
+  } finally {
+    db.close();
+  }
+}
+
+Json _queryRecords((String, int, String, Json) request) {
+  final (path, revision, generation, args) = request;
+  final db = _open(path);
+  try {
+    db.execute('BEGIN');
+    if (_meta(db, 'revision') != '$revision' ||
+        _meta(db, 'generation') != generation) {
+      throw const FormatException('账本已变化，请重新查询');
+    }
+    final clauses = <String>["bucket='transactions'"], values = <Object?>[];
+    for (final pair in [('type', 'type'), ('categoryId', 'categoryId')]) {
+      if (args[pair.$1] != null) {
+        clauses.add("json_extract(body,'\$.${pair.$2}')=?");
+        values.add(args[pair.$1]);
+      }
+    }
+    if (args['accountId'] != null) {
+      clauses.add(
+        "(json_extract(body,'\$.accountId')=? OR json_extract(body,'\$.transferFromId')=? OR json_extract(body,'\$.transferToId')=?)",
+      );
+      values.addAll(List.filled(3, args['accountId']));
+    }
+    if (args['startInclusive'] != null) {
+      clauses.add(
+        "json_extract(body,'\$.date')>=? AND json_extract(body,'\$.date')<?",
+      );
+      values.addAll([args['startInclusive'], args['endExclusive']]);
+    }
+    final where = clauses.join(' AND ');
+    final totals = db
+        .select(
+          "SELECT COUNT(*) AS count, "
+          "COALESCE(SUM(CASE WHEN json_extract(body,'\$.type')='expense' THEN json_extract(body,'\$.amountCents') ELSE 0 END),0) AS expense, "
+          "COALESCE(SUM(CASE WHEN json_extract(body,'\$.type')='income' THEN json_extract(body,'\$.amountCents') ELSE 0 END),0) AS income "
+          'FROM wallet_rows WHERE $where',
+          values,
+        )
+        .single;
+    final rows = args['aggregate'] == true
+        ? <Row>[]
+        : db.select(
+            "SELECT body,checksum,id,kind,bucket FROM wallet_rows WHERE $where ORDER BY json_extract(body,'\$.date') DESC,id ASC LIMIT ? OFFSET ?",
+            [...values, args['limit'], args['offset']],
+          );
+    final transactions = <Json>[];
+    for (final row in rows) {
+      if (row['checksum'] !=
+          _checksum(row['bucket'], row['id'], row['kind'], row['body'])) {
+        throw const FormatException('数据库记录校验失败');
+      }
+      transactions.add(Json.from(jsonDecode(row['body'])));
+    }
+    return {
+      'transactions': transactions,
+      'expenseCents': totals['expense'],
+      'incomeCents': totals['income'],
+      'transactionCount': totals['count'],
+    };
+  } finally {
+    db.close();
+  }
+}
+
+_CommitStats _commitRecords((String, int, String, LedgerChangeSet) request) {
+  final (path, revision, generation, changes) = request;
+  if (revision == 0) throw StateError('记录提交需要已初始化的账本');
+  final previous = _rows(changes.previous), next = _rows(changes.next);
+  const financial = {'accounts', 'transactions', 'categories', 'quickEntries'};
+  final moved = {
+    'accounts': changes.movedAccountIds,
+    'transactions': changes.movedTransactionIds,
+    'categories': changes.movedCategoryIds,
+    'quickEntries': changes.movedQuickIds,
+  };
+  final db = _open(path);
+  var scanned = previous.length + next.length, changed = 0;
+  try {
+    db.execute('ATTACH DATABASE ? AS recovery', ['$path.bak']);
+    db.execute('PRAGMA recovery.journal_mode = DELETE');
+    db.execute('PRAGMA recovery.synchronous = FULL');
+    db.execute('BEGIN IMMEDIATE');
+    try {
+      for (final schema in ['main', 'recovery']) {
+        if (_meta(db, 'revision', schema) != '$revision' ||
+            _meta(db, 'generation', schema) != generation) {
+          throw const FormatException('账本已被其他实例更新，请重新打开后重试');
+        }
+      }
+      final positions = <_Key, int>{};
+      final maxima = <String, int>{};
+      for (final bucket in {
+        ...previous.keys.map((k) => k.$1),
+        ...next.keys.map((k) => k.$1),
+      }) {
+        if (financial.contains(bucket)) {
+          maxima[bucket] =
+              db.select(
+                    'SELECT MAX(position) AS maximum FROM wallet_rows WHERE bucket=?',
+                    [bucket],
+                  ).single['maximum']
+                  as int? ??
+              -1;
+          for (final key in {
+            ...previous.keys,
+            ...next.keys,
+          }.where((k) => k.$1 == bucket)) {
+            final row = db.select(
+              'SELECT * FROM wallet_rows WHERE bucket=? AND id=?',
+              [key.$1, key.$2],
+            ).firstOrNull;
+            scanned++;
+            if (row != null) {
+              if (row['checksum'] !=
+                  _checksum(
+                    row['bucket'],
+                    row['id'],
+                    row['kind'],
+                    row['body'],
+                  )) {
+                throw const FormatException('数据库记录校验失败');
+              }
+              positions[key] = row['position'];
+              if (!previous.containsKey(key)) {
+                throw const FormatException('账本包含重复的记录 ID');
+              }
+            }
+          }
+        } else {
+          final rows = db.select(
+            'SELECT id,position FROM wallet_rows WHERE bucket=?',
+            [bucket],
+          );
+          scanned += rows.length;
+          for (final row in rows) {
+            positions[(bucket, row['id'] as String)] = row['position'];
+          }
+        }
+      }
+      // Validate changed transactions against current accounts inside this transaction.
+      final accountRows = <String, WalletAccount>{
+        for (final a in changes.next.accounts) a.id: a,
+      };
+      final removedAccounts = changes.previous.accounts
+          .map((a) => a.id)
+          .where((id) => !accountRows.containsKey(id))
+          .toSet();
+      for (final t in changes.next.transactions) {
+        for (final id in {t.accountId, t.fromId, t.toId}.whereType<String>()) {
+          if (removedAccounts.contains(id)) {
+            throw const FormatException('账单关联账户不存在');
+          }
+          if (!accountRows.containsKey(id)) {
+            final row = db.select(
+              "SELECT body FROM wallet_rows WHERE bucket='accounts' AND id=?",
+              ['id:$id'],
+            ).firstOrNull;
+            scanned++;
+            if (row == null) throw const FormatException('账单关联账户不存在');
+            accountRows[id] = WalletAccount.fromJson(
+              Json.from(jsonDecode(row['body'])),
+            );
+          }
+        }
+      }
+      validateWallet(
+        WalletData(
+          accounts: accountRows.values.toList(),
+          transactions: changes.next.transactions,
+          categories: changes.next.categories,
+          quickEntries: changes.next.quickEntries,
+        ),
+      );
+      for (final id in removedAccounts) {
+        final references = db.select(
+          "SELECT id,body FROM wallet_rows WHERE bucket='transactions' AND "
+          "(json_extract(body,'\$.accountId')=? OR json_extract(body,'\$.transferFromId')=? OR json_extract(body,'\$.transferToId')=?)",
+          [id, id, id],
+        );
+        scanned += references.length;
+        for (final row in references) {
+          final key = ('transactions', row['id'] as String);
+          if (previous.containsKey(key) && !next.containsKey(key)) continue;
+          final tx =
+              next[key]?.value as LedgerTx? ??
+              LedgerTx.fromJson(Json.from(jsonDecode(row['body'])));
+          if ([tx.accountId, tx.fromId, tx.toId].contains(id)) {
+            throw const FormatException('账户有关联账单，不能删除');
+          }
+        }
+      }
+      final ranks = <_Key, int>{};
+      for (final bucket in next.keys.map((k) => k.$1).toSet()) {
+        final keys = next.keys.where((k) => k.$1 == bucket).toList();
+        var maximum =
+            maxima[bucket] ??
+            positions.entries
+                .where((e) => e.key.$1 == bucket)
+                .fold<int>(-1, (a, e) => a > e.value ? a : e.value);
+        var last = -1, stable = true;
+        for (final key in keys) {
+          final rank =
+              financial.contains(bucket) &&
+                  moved[bucket]!.contains(key.$2.substring(3))
+              ? ++maximum
+              : positions[key] ?? ++maximum;
+          if (rank <= last) stable = false;
+          ranks[key] = rank;
+          last = rank;
+        }
+        if (!financial.contains(bucket) && !stable) {
+          for (var i = 0; i < keys.length; i++) {
+            ranks[keys[i]] = i;
+          }
+        }
+      }
+      for (final key in previous.keys.where((k) => !next.containsKey(k))) {
+        for (final schema in ['main', 'recovery']) {
+          db.execute(
+            'DELETE FROM $schema.wallet_rows WHERE bucket=? AND id=?',
+            [key.$1, key.$2],
+          );
+        }
+        changed++;
+      }
+      for (final entry in next.entries) {
+        final key = entry.key, value = entry.value, old = previous[key];
+        if (old != null &&
+            old.kind == value.kind &&
+            _same(old.value, value.value) &&
+            positions[key] == ranks[key]) {
+          continue;
+        }
+        final body = jsonEncode(_json(value.value));
+        for (final schema in ['main', 'recovery']) {
+          db.execute(
+            'INSERT OR REPLACE INTO $schema.wallet_rows VALUES (?,?,?,?,?,?)',
+            [
+              key.$1,
+              key.$2,
+              ranks[key],
+              value.kind,
+              body,
+              _checksum(key.$1, key.$2, value.kind, body),
+            ],
+          );
+        }
+        changed++;
+      }
+      for (final schema in ['main', 'recovery']) {
+        _setMeta(db, 'revision', '${revision + 1}', schema);
+      }
+      db.execute('COMMIT');
+      return (changedRows: changed, scannedRows: scanned);
     } catch (_) {
       db.execute('ROLLBACK');
       rethrow;
@@ -623,6 +1030,7 @@ Future<_Loaded> _restoreDamaged((String, WalletData) request) async {
     previous: WalletData(),
     next: data,
     replace: true,
+    metadataOnly: false,
   ));
   final verified = _readFile(stage);
   final moved = <(String, String)>[];

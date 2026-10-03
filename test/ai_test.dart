@@ -18,7 +18,7 @@ http.Response reply(Json message) => http.Response(
 );
 void main() {
   test(
-    'tool calls use real account state and cognition is persisted before acknowledgement',
+    'tool calls use real accounts and cognition waits for local review',
     () async {
       final store = await configuredAiStore();
       await store.saveAccount(bank);
@@ -66,7 +66,14 @@ void main() {
         }),
       );
       await ai.send('分析我的资产');
-      expect(round, 2);
+      expect(round, 1);
+      expect(store.data.agent['tags'], isEmpty);
+      final task = ai.tasks.tasks.single;
+      await ai.tasks.applyPreference(
+        task['id'],
+        task['preferenceReview']['id'],
+      );
+      expect(store.data.agent['tags'], ['节俭']);
       expect(ai.error, null);
       expect(ai.busy, false);
       expect(store.data.chats.last['role'], 'assistant');

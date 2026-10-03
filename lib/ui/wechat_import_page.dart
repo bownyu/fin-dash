@@ -62,10 +62,6 @@ class _WechatImportPageState extends State<WechatImportPage> {
   }
 
   Future<void> pick() async {
-    if (AppScope.of(context).ai.busy) {
-      toast(context, '请先等待或停止当前 AI 请求');
-      return;
-    }
     setState(() {
       busy = true;
       error = '';

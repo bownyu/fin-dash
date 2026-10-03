@@ -15,7 +15,7 @@ String agentActionGroup(Json a) {
   }
   if (old.isEmpty) return '新增${LedgerTx.fromJson(next).type.label}账单';
   final changed = next.keys
-      .where((k) => k != 'id' && next[k] != old[k])
+      .where((k) => !['id', 'categoryId'].contains(k) && next[k] != old[k])
       .toSet();
   if (changed.length == 1 && changed.contains('category')) {
     return '分类：${old['category']} → ${next['category']}';

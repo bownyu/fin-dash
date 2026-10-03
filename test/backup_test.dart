@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:fin_dash/data/backup.dart';
 import 'package:fin_dash/domain/models.dart';
 import 'helpers.dart';
+import 'package:fin_dash/data/wallet_migration.dart';
 
 Json legacyBackup() => {
   'version': '2.0',
@@ -147,7 +148,11 @@ void main() {
       });
       final copy = await emptyStore();
       await copy.restore(parseBackup(store.exportBackup()));
-      expect(copy.data.toJson(), store.data.toJson());
+      final expected = migrateWallet(store.data);
+      expect(copy.ledgerEpoch, isNot(store.ledgerEpoch));
+      expected.extras['ledgerEpoch'] = copy.ledgerEpoch;
+      expected.extras['ledgerRevision'] = copy.ledgerRevision;
+      expect(copy.data.toJson(), expected.toJson());
       expect(copy.balance(bank), 99850);
     },
   );

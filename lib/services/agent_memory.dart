@@ -72,7 +72,7 @@ class AgentMemory {
     }
     Json? saved;
     var deduplicated = false;
-    await store.change((d) {
+    await store.changeMetadata((d) {
       final items = List<dynamic>.from(d.agent['memories'] ?? []);
       var index = update
           ? items.indexWhere((m) => m is Map && m['id'] == args['id'])
@@ -122,7 +122,7 @@ class AgentMemory {
   }
 
   Future<Json> forget(String id) async {
-    await store.change((d) {
+    await store.changeMetadata((d) {
       final items = List<dynamic>.from(d.agent['memories'] ?? []);
       if (!items.any((m) => m is Map && m['id'] == id)) {
         throw const FormatException('记忆不存在');
@@ -135,7 +135,7 @@ class AgentMemory {
     return {'deleted': true, 'id': id};
   }
 
-  static void _event(WalletData d, String title) {
+  static void _event(WalletMetadata d, String title) {
     d.agent['events'] = [
       {
         'id': newId(),

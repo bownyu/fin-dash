@@ -49,6 +49,7 @@ Future<void> main(List<String> args) async {
   await store.initialize(demo: demo);
   try {
     await ai.actions.recoverInterrupted();
+    await ai.tasks.recover();
   } catch (e) {
     store.log('error', '恢复未完成方案失败，已保留原数据：$e');
   }

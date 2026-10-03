@@ -24,8 +24,8 @@ dynamic removeSecrets(dynamic value) {
 }
 
 ImportPreview parseBackup(String text) {
-  if (text.length > 30 * 1024 * 1024) {
-    throw const FormatException('备份文件超过 30 MB');
+  if (text.length > 128 * 1024 * 1024) {
+    throw const FormatException('备份文件超过 128 MB');
   }
   dynamic decoded;
   try {
@@ -42,7 +42,7 @@ ImportPreview parseBackup(String text) {
   if (decoded is! Map) throw const FormatException('备份结构不正确');
   final j = Json.from(decoded);
   if (j['format'] == 'findash-flutter') {
-    if (j['schema'] != 1) throw const FormatException('此备份版本暂不支持');
+    if (![1, 2].contains(j['schema'])) throw const FormatException('此备份版本暂不支持');
     final data = WalletData.fromJson(j);
     validateWallet(data);
     return ImportPreview(data, [

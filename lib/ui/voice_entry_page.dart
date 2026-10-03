@@ -19,7 +19,14 @@ Future<void> openVoiceEntry(BuildContext context) =>
 class VoiceEntryPage extends StatefulWidget {
   final bool autoStart;
   final VoiceInput? voice;
-  const VoiceEntryPage({super.key, this.autoStart = false, this.voice});
+  final String? initialText, entryId;
+  const VoiceEntryPage({
+    super.key,
+    this.autoStart = false,
+    this.voice,
+    this.initialText,
+    this.entryId,
+  });
   @override
   State<VoiceEntryPage> createState() => _VoiceEntryPageState();
 }
@@ -28,7 +35,7 @@ class _VoiceEntryPageState extends State<VoiceEntryPage>
     with WidgetsBindingObserver {
   final transcript = TextEditingController();
   late final voice = widget.voice ?? VoiceInput();
-  String? accountId, error;
+  String? accountId, error, pendingEntryId;
   String captureState = 'idle';
   bool initialized = false,
       listening = false,
@@ -51,6 +58,8 @@ class _VoiceEntryPageState extends State<VoiceEntryPage>
     super.didChangeDependencies();
     if (initialized) return;
     initialized = true;
+    pendingEntryId = widget.entryId;
+    transcript.text = widget.initialText ?? '';
     final store = AppScope.storeOf(context);
     final accounts = store.activeAccounts;
     final preferred = store.data.settings['quickEntryAccountId'];
@@ -146,6 +155,7 @@ class _VoiceEntryPageState extends State<VoiceEntryPage>
       return;
     }
     final service = bookkeeping;
+    if (saved != null) pendingEntryId = null;
     FocusManager.instance.primaryFocus?.unfocus();
     setState(() {
       processing = true;
@@ -156,7 +166,7 @@ class _VoiceEntryPageState extends State<VoiceEntryPage>
     try {
       final result = await service.preview(
         transcript.text,
-        entryId: newId(),
+        entryId: pendingEntryId ??= newId(),
         accountId: accountId,
       );
       if (mounted) setState(() => draft = result);
@@ -237,7 +247,12 @@ class _VoiceEntryPageState extends State<VoiceEntryPage>
             _ => '正在录音 · 说完请点结束，停顿不会结束录音',
           }
         : processing
-        ? 'AI 正在整理账单…'
+        ? (AppScope.of(
+                    context,
+                  ).ai.voiceQueue.waiting.containsKey(pendingEntryId) &&
+                  AppScope.storeOf(context).aiStatus != '解析语音账单…'
+              ? '已排队，文字草稿已保存…'
+              : 'AI 正在整理账单…')
         : saving
         ? '正在保存…'
         : saved != null
@@ -256,6 +271,12 @@ class _VoiceEntryPageState extends State<VoiceEntryPage>
         appBar: AppBar(
           title: const Text('语音记账'),
           actions: [
+            if (processing)
+              TextButton(
+                onPressed: () =>
+                    AppScope.of(context).ai.cancelVoice(pendingEntryId!),
+                child: const Text('停止解析'),
+              ),
             PopupMenuButton<String>(
               tooltip: '更多',
               enabled: !busy && !listening,

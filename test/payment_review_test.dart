@@ -243,8 +243,8 @@ void main() {
       ];
       await store.change((d) => d.settings['locked'] = true);
       await expectLater(service.acceptMany(items), throwsFormatException);
+      await store.setLocked(false);
       await store.change((d) {
-        d.settings['locked'] = false;
         d.accounts[0] = bank.copyWith(archived: true);
       });
       await expectLater(service.acceptMany(items), throwsFormatException);

@@ -7,6 +7,7 @@ import 'package:fin_dash/data/storage_sqlite.dart';
 import 'package:fin_dash/data/wallet_store.dart';
 import 'package:fin_dash/domain/models.dart';
 import 'helpers.dart';
+import 'package:fin_dash/data/wallet_migration.dart';
 
 void main() {
   late Directory dir;
@@ -50,12 +51,13 @@ void main() {
       });
       final storage = store.storage as LocalWalletStorage;
       await store.saveTx(tx(id: 'new'));
-      expect(storage.lastChangedRows, 1);
+      expect(storage.lastChangedRows, 2);
       await store.deleteTxs({'t-500'});
       expect(
         storage.lastChangedRows,
-        1,
-        reason: 'deletion must not rewrite the remaining ranks',
+        2,
+        reason:
+            'deletion plus ledger revision must not rewrite remaining ranks',
       );
       await store.change((d) {
         (d.extras['paymentNotifications'] as List)[0]['status'] = 'applied';
@@ -84,7 +86,9 @@ void main() {
       await backup.writeAsString(original);
       final store = await open();
       expect(store.startupError, null);
-      expect(store.data.toJson(), data.toJson());
+      final expected = migrateWallet(data);
+      expected.extras['ledgerEpoch'] = store.ledgerEpoch;
+      expect(store.data.toJson(), expected.toJson());
       await store.saveTx(tx(id: 'new'));
       expect((await open()).data.transactions.length, 2);
       expect(await backup.readAsString(), original);

@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'package:crypto/crypto.dart';
 import '../domain/models.dart';
+import 'ledger_changes.dart';
 
 abstract class WalletStorage {
   Future<String?> load();
@@ -18,6 +19,20 @@ abstract interface class IncrementalWalletStorage implements WalletStorage {
   Future<WalletData?> loadSnapshot();
   Future<void> commitSnapshot(WalletData previous, WalletData next);
   Future<void> replaceSnapshot(WalletData next);
+}
+
+/// Same durable transaction as a full write, with no financial payload transfer.
+abstract interface class MetadataWalletStorage
+    implements IncrementalWalletStorage {
+  Future<void> commitMetadata(WalletData previous, WalletData next);
+}
+
+abstract interface class RecordWalletStorage implements MetadataWalletStorage {
+  Future<void> commitChanges(LedgerChangeSet changes);
+}
+
+abstract interface class QueryWalletStorage {
+  Future<Json> queryRecords(Json request);
 }
 
 String seal(String payload) => jsonEncode({

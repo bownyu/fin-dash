@@ -281,10 +281,10 @@ class _ChoiceSheetState<T> extends State<_ChoiceSheet<T>> {
           item.value == widget.selected ||
           (widget.selected == null && item.value == '');
       final value = item.value;
-      final scope = context.dependOnInheritedWidgetOfExactType<AppScope>();
-      final account = value is String ? scope?.notifier?.account(value) : null;
+      final scope = context.dependOnInheritedWidgetOfExactType<AppScopeData>();
+      final account = value is String ? scope?.notifier.account(value) : null;
       final category = value is String
-          ? scope?.notifier?.data.categories
+          ? scope?.notifier.data.categories
                 .where((c) => c.name == value)
                 .firstOrNull
           : null;

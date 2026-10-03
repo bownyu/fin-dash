@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
 import '../domain/models.dart';
+import '../domain/command_context.dart';
 import '../services/file_export.dart';
 import '../services/payment_notifications.dart';
 import 'payment_review_page.dart';
@@ -29,7 +30,14 @@ class _HomePageState extends State<HomePage> {
   Period spendingPeriod = Period.day;
   @override
   Widget build(BuildContext context) {
-    final store = AppScope.storeOf(context);
+    final store = AppScope.storeOf(
+      context,
+      domains: const {
+        WalletDomain.ledger,
+        WalletDomain.preferences,
+        WalletDomain.sources,
+      },
+    );
     final colors = WalletColors.of(context);
     final visible = store.data.settings['visible'] != false;
     final value = [store.netWorth, store.assets, store.liabilities][assetView];
@@ -653,7 +661,10 @@ class AccountsPage extends StatelessWidget {
   const AccountsPage({super.key});
   @override
   Widget build(BuildContext context) {
-    final store = AppScope.storeOf(context);
+    final store = AppScope.storeOf(
+      context,
+      domains: const {WalletDomain.ledger, WalletDomain.preferences},
+    );
     return Scaffold(
       appBar: AppBar(
         title: const Text('资产管理'),
@@ -825,7 +836,10 @@ class _AccountRow extends StatelessWidget {
         children: [
           Expanded(
             child: MoneyText(
-              AppScope.storeOf(context).balance(a),
+              AppScope.storeOf(
+                context,
+                domains: const {WalletDomain.ledger, WalletDomain.preferences},
+              ).balance(a),
               size: 17,
               respectPrivacy: true,
             ),
@@ -842,8 +856,14 @@ class AccountDetailPage extends StatelessWidget {
   const AccountDetailPage(this.id, {super.key});
   @override
   Widget build(BuildContext context) {
-    final store = AppScope.storeOf(context),
-        a = AppScope.storeOf(context).account(id);
+    final store = AppScope.storeOf(
+          context,
+          domains: const {WalletDomain.ledger, WalletDomain.preferences},
+        ),
+        a = AppScope.storeOf(
+          context,
+          domains: const {WalletDomain.ledger, WalletDomain.preferences},
+        ).account(id);
     if (a == null) {
       return Scaffold(
         appBar: AppBar(title: const Text('账户')),
@@ -1087,7 +1107,10 @@ class _StatsPageState extends State<StatsPage> {
   TxType type = TxType.expense;
   @override
   Widget build(BuildContext context) {
-    final store = AppScope.storeOf(context),
+    final store = AppScope.storeOf(
+          context,
+          domains: const {WalletDomain.ledger, WalletDomain.preferences},
+        ),
         range = DateRange.forPeriod(period, anchor);
     final grouped = store.breakdown(type, range),
         total = store.total(type, range: range),
@@ -1488,7 +1511,10 @@ class BillsPageState extends State<BillsPage> {
   }
 
   Future<void> filters() async {
-    final store = AppScope.storeOf(context);
+    final store = AppScope.storeOf(
+      context,
+      domains: const {WalletDomain.ledger, WalletDomain.preferences},
+    );
     var newType = type, newCategory = category, newAccount = accountId;
     var newRange = range;
     var label = dateLabel;
@@ -1686,7 +1712,10 @@ class BillsPageState extends State<BillsPage> {
       return '"${safe.replaceAll('"', '""')}"';
     }
 
-    final store = AppScope.storeOf(context);
+    final store = AppScope.storeOf(
+      context,
+      domains: const {WalletDomain.ledger, WalletDomain.preferences},
+    );
     final rows = [
       '日期,类型,名称,分类,金额,账户,转出账户,转入账户,备注',
       ...list.map(
@@ -1721,7 +1750,10 @@ class BillsPageState extends State<BillsPage> {
 
   @override
   Widget build(BuildContext context) {
-    final store = AppScope.storeOf(context);
+    final store = AppScope.storeOf(
+      context,
+      domains: const {WalletDomain.ledger, WalletDomain.preferences},
+    );
     final list = store.query(
       range: range,
       type: type,

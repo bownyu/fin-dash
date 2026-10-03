@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
+import 'package:fin_dash/domain/command_context.dart';
 import 'package:fin_dash/services/ai_service.dart';
 import 'package:fin_dash/ui/ai_pages.dart';
 import 'helpers.dart';
@@ -11,6 +12,67 @@ import 'agent_chat_interaction_test.dart' show chatHarness;
 import 'ai_streaming_test.dart' show StreamingClient, event, chunk;
 
 void main() {
+  test('json equality matches digest semantics without hashing', () {
+    expect(
+      jsonEquals(
+        {
+          'a': 1,
+          'b': [
+            1,
+            {'c': null},
+          ],
+        },
+        {
+          'b': [
+            1,
+            {'c': null},
+          ],
+          'a': 1,
+        },
+      ),
+      true,
+    );
+    expect(jsonEquals({'a': null}, <String, dynamic>{}), false);
+    expect(jsonEquals([1, 2], [2, 1]), false);
+    expect(
+      jsonEquals(
+        {
+          'a': [1],
+        },
+        {
+          'a': [1, 2],
+        },
+      ),
+      false,
+    );
+    expect(jsonEquals('x', 'x'), true);
+  });
+
+  test(
+    'commits notify only changed domains and logs stay off the UI tree',
+    () async {
+      final store = await configuredAiStore();
+      final notified = <WalletDomain>[];
+      for (final domain in WalletDomain.values) {
+        store.domainUpdates[domain]!.addListener(() => notified.add(domain));
+      }
+      var runtime = 0, logs = 0;
+      store.runtimeUpdates.addListener(() => runtime++);
+      store.logUpdates.addListener(() => logs++);
+      await store.changeMetadata(
+        (d) => d.chats.add({'id': 'm', 'role': 'user', 'content': '你好'}),
+      );
+      expect(notified, [WalletDomain.conversations]);
+      notified.clear();
+      await store.changeMetadata((d) => d.chats.first['content'] = '你好');
+      expect(notified, isEmpty);
+      await store.changeMetadata((d) => d.agent['tags'] = ['通勤']);
+      expect(notified, [WalletDomain.memory]);
+      store.log('request', '第 1 轮');
+      expect((runtime, logs), (0, 1));
+    },
+  );
+
   test(
     'token bursts notify only the reply and persist the complete output',
     () async {

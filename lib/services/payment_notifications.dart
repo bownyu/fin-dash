@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import '../data/wallet_store.dart';
 import '../domain/models.dart';
+import '../domain/ledger_operations.dart';
 
 class PaymentAcceptance {
   final String eventId;
@@ -357,7 +358,9 @@ class PaymentNotifications {
         throw const FormatException('请选择有效账户');
       }
     }
-    d.transactions.add(tx);
+    tx=LedgerTx.fromJson({...tx.toJson(),'sourceType':'notification','sourceId':eventId,
+      if(record['kind']=='refund') 'originalTransactionId':refundOf});
+    LedgerOperations.putTransaction(d, tx, mode: TransactionWrite.insert);
     record['status'] = 'applied';
     record['transactionId'] = tx.id;
     if (record['kind'] == 'refund') record['refundOf'] = refundOf;

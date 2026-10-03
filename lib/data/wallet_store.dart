@@ -3,14 +3,32 @@ import 'dart:convert';
 import 'dart:math';
 import 'package:flutter/foundation.dart';
 import '../domain/models.dart';
+import '../domain/ledger_operations.dart';
+import '../domain/command_context.dart';
 import 'backup.dart';
 import 'storage_base.dart';
 import 'wallet_codec.dart';
+import 'wallet_migration.dart';
+import 'ledger_changes.dart';
 
 class WalletStore extends ChangeNotifier {
   final WalletStorage storage;
   WalletData _data = WalletData();
-  WalletData? _derivedFrom;
+  List<WalletAccount>? _derivedAccounts;
+  List<LedgerTx>? _derivedTransactions;
+  int _ledgerRevision = 0;
+
+  /// Changes only when financial records change; metadata has its own lifetime.
+  int get ledgerRevision => _ledgerRevision;
+  String get ledgerEpoch => _data.extras['ledgerEpoch'] as String;
+  final runtimeUpdates = ChangeNotifier();
+
+  /// Debug logs are only shown on their own page; logging must not rebuild
+  /// every runtime-dependent screen during a reply.
+  final logUpdates = ChangeNotifier();
+  final domainUpdates = {
+    for (final domain in WalletDomain.values) domain: ChangeNotifier(),
+  };
   Map<String, int>? _balanceEffects;
   List<LedgerTx>? _orderedTransactions;
   Map<String, WalletAccount>? _accountsById;
@@ -22,6 +40,7 @@ class WalletStore extends ChangeNotifier {
   String? aiStatus;
   final List<Json> debugLogs = [];
   Future<void> _tail = Future.value();
+  bool _hasCommitted = false;
   WalletStore(this.storage);
   Future<void> initialize({bool demo = false}) async {
     try {
@@ -31,6 +50,16 @@ class WalletStore extends ChangeNotifier {
           : await _loadJson();
       if (loaded != null) {
         _data = loaded;
+        _hasCommitted = true;
+        if (loaded.extras['dataModelVersion'] != 2) {
+          final migrated = migrateWallet(loaded);
+          if (backend is IncrementalWalletStorage) {
+            await backend.commitSnapshot(loaded, migrated);
+          } else {
+            await storage.save(await encodeWalletSnapshot(migrated));
+          }
+          _data = migrated;
+        }
       } else if (demo) {
         _data = demoData();
       }
@@ -47,6 +76,10 @@ class WalletStore extends ChangeNotifier {
       log('error', '恢复前快照暂时无法读取，现有账本不受影响');
     }
     loading = false;
+    _data.extras.putIfAbsent('ledgerEpoch', newId);
+    _data.extras['dataModelVersion'] = 2;
+    _ledgerRevision = _data.extras['ledgerRevision'] as int? ?? 0;
+    _data.freeze();
     notifyListeners();
   }
 
@@ -55,27 +88,167 @@ class WalletStore extends ChangeNotifier {
     return raw == null ? null : decodeWalletSnapshot(raw);
   }
 
-  Future<void> change(void Function(WalletData) mutate) {
+  Future<void> change(void Function(WalletData) mutate) => _commit((current) {
+    final next = LedgerChangeSet.draft(current);
+    mutate(next);
+    return next;
+  });
+
+  Future<void> changeMetadata(void Function(WalletMetadata) mutate) =>
+      _commit((current) {
+        final next = current.cloneMetadata();
+        mutate(next);
+        return current.withMetadata(next);
+      }, metadataOnly: true);
+
+  Future<void> _commit(
+    WalletData Function(WalletData) prepare, {
+    bool metadataOnly = false,
+  }) {
     final work = _tail.then((_) async {
       if (startupError != null) throw StateError('请先恢复账本');
-      final next = _data.clone();
-      mutate(next);
+      final next = prepare(_data);
+      if (_financialChange(_data, next)) {
+        LedgerOperations.ensureUnlocked(_data);
+        next.extras['ledgerRevision'] = _ledgerRevision + 1;
+      }
       final backend = storage;
-      if (backend is IncrementalWalletStorage) {
+      final changes = metadataOnly ? null : LedgerChangeSet.from(_data, next);
+      if (_hasCommitted && changes != null && backend is RecordWalletStorage) {
+        await backend.commitChanges(changes);
+      } else if (metadataOnly && backend is MetadataWalletStorage) {
+        await backend.commitMetadata(_data, next);
+      } else if (backend is IncrementalWalletStorage) {
         await backend.commitSnapshot(_data, next);
       } else {
         await backend.save(await encodeWalletSnapshot(next));
       }
-      _data = next;
+      _publish(next);
+      _hasCommitted = true;
       notifyListeners();
     });
     _tail = work.catchError((_) {});
     return work;
   }
 
+  void _publish(WalletData next) {
+    final ledgerChanged = _financialChange(_data, next);
+    final previous = _data;
+    if (ledgerChanged) _ledgerRevision++;
+    next.freeze(previous: previous);
+    _data = next;
+    for (final domain in WalletDomain.values) {
+      // Runs on the UI isolate for every commit; hashing the full chat history
+      // here stalled frames while the assistant was saving each step.
+      bool changedJson(Object? a, Object? b) => !jsonEquals(a, b);
+      Json select(WalletData d, List<String> keys) => {
+        for (final k in keys) k: d.extras[k],
+      };
+      final changed = switch (domain) {
+        WalletDomain.ledger => ledgerChanged,
+        WalletDomain.conversations =>
+          changedJson(previous.chats, next.chats) ||
+              changedJson(
+                select(previous, [
+                  'chatSessions',
+                  'activeChatSessionId',
+                  'chatDrafts',
+                ]),
+                select(next, [
+                  'chatSessions',
+                  'activeChatSessionId',
+                  'chatDrafts',
+                ]),
+              ),
+        WalletDomain.preferences =>
+          changedJson(previous.settings, next.settings) ||
+              changedJson(previous.profile, next.profile) ||
+              changedJson(previous.providerConfigs, next.providerConfigs),
+        WalletDomain.memory => changedJson(previous.agent, next.agent),
+        WalletDomain.tasks => changedJson(
+          select(previous, ['tasks', 'agentActions', 'agentActionBatches']),
+          select(next, ['tasks', 'agentActions', 'agentActionBatches']),
+        ),
+        WalletDomain.sources => changedJson(
+          select(previous, ['paymentNotifications', 'paymentReminderSeen']),
+          select(next, ['paymentNotifications', 'paymentReminderSeen']),
+        ),
+      };
+      if (changed) domainUpdates[domain]!.notifyListeners();
+    }
+  }
+
+  bool _financialChange(WalletData previous, WalletData next) {
+    bool changed(List old, List fresh) => fresh is LedgerList
+        ? fresh.changed || fresh.reordered
+        : !listEquals(old, fresh);
+    return changed(previous.accounts, next.accounts) ||
+        changed(previous.transactions, next.transactions) ||
+        changed(previous.categories, next.categories) ||
+        changed(previous.quickEntries, next.quickEntries) ||
+        previous.settings['budget'] != next.settings['budget'] ||
+        !jsonEquals(previous.goals, next.goals);
+  }
+
+  /// A synchronous unit of work: no network or user wait can hold this queue.
+  Future<Json> execute(
+    CommandContext context,
+    void Function(WalletData) apply,
+  ) async {
+    Json? receipt;
+    await change((d) {
+      LedgerOperations.ensureUnlocked(d);
+      if (context.ledgerEpoch != ledgerEpoch) {
+        throw const FormatException('账本已恢复，请重新审阅');
+      }
+      final receipts = (d.extras['operationReceipts'] as List? ?? [])
+          .map((r) => Json.from(r))
+          .toList();
+      final existing = receipts
+          .where((r) => r['operationId'] == context.operationId)
+          .firstOrNull;
+      if (existing != null) {
+        if (existing['payloadHash'] != context.payloadHash) {
+          throw const FormatException('操作 ID 已用于不同内容');
+        }
+        receipt = existing;
+        return;
+      }
+      for (final expected in context.expectedRecords.entries) {
+        final tx = d.transactions
+            .where((t) => t.id == expected.key)
+            .firstOrNull;
+        if ((tx == null ? null : digest(tx.toJson())) != expected.value) {
+          throw const FormatException('相关账单已变化，请重新打开后保存');
+        }
+      }
+      apply(d);
+      receipt = {
+        'id': newId(),
+        'operationId': context.operationId,
+        'payloadHash': context.payloadHash,
+        'ledgerEpoch': ledgerEpoch,
+        'source': context.source,
+        'status': 'applied',
+        'createdAt': DateTime.now().toIso8601String(),
+      };
+      receipts.add(receipt!);
+      d.extras['operationReceipts'] = receipts;
+    });
+    return Map.unmodifiable(receipt!);
+  }
+
+  Future<void> setLocked(bool locked) =>
+      changeMetadata((d) => d.settings['locked'] = locked);
+  Future<void> setBudget(int cents) => changeMetadata((d) {
+    LedgerOperations.ensureUnlocked(d);
+    d.settings['budget'] = LedgerOperations.money(cents, '预算');
+  });
+
   Future<void> restore(ImportPreview preview) {
     final work = _tail.then((_) async {
-      final next = preview.data.clone();
+      final next = migrateWallet(preview.data, restored: true);
+      next.extras['ledgerRevision'] = _ledgerRevision + 1;
       final backend = storage;
       // Do not overwrite the current ledger if its restore point cannot commit.
       if (startupError == null && backend is RestorePointStorage) {
@@ -89,7 +262,7 @@ class WalletStore extends ChangeNotifier {
       } else {
         await backend.save(await encodeWalletSnapshot(next));
       }
-      _data = next;
+      _publish(next);
       startupError = null;
       notifyListeners();
     });
@@ -116,8 +289,14 @@ class WalletStore extends ChangeNotifier {
   // Committed writes replace _data. Failed saves and AI status updates keep
   // the current snapshot, so cached ledger results remain valid.
   void _checkDerivedData() {
-    if (identical(_derivedFrom, _data)) return;
-    _derivedFrom = _data;
+    final sameAccounts = listEquals(_derivedAccounts, _data.accounts);
+    final sameTransactions = listEquals(
+      _derivedTransactions,
+      _data.transactions,
+    );
+    _derivedAccounts = _data.accounts;
+    _derivedTransactions = _data.transactions;
+    if (sameAccounts && sameTransactions) return;
     _balanceEffects = null;
     _orderedTransactions = null;
     _accountsById = null;
@@ -228,12 +407,7 @@ class WalletStore extends ChangeNotifier {
         throw const FormatException('账户已归档或不存在');
       }
     }
-    final index = d.transactions.indexWhere((t) => t.id == tx.id);
-    if (index < 0) {
-      d.transactions.add(tx);
-    } else {
-      d.transactions[index] = tx;
-    }
+    LedgerOperations.putTransaction(d, tx);
     if (tx.accountId != null) d.settings['quickEntryAccountId'] = tx.accountId;
   });
 
@@ -251,7 +425,7 @@ class WalletStore extends ChangeNotifier {
   }
 
   Future<void> deleteTxs(Set<String> ids) =>
-      change((d) => d.transactions.removeWhere((t) => ids.contains(t.id)));
+      change((d) => LedgerOperations.deleteTransactions(d, ids));
   Future<void> saveAccount(WalletAccount a, {int? currentBalance}) =>
       change((d) {
         final delta = d.transactions.fold<int>(
@@ -261,12 +435,7 @@ class WalletStore extends ChangeNotifier {
         final actual = currentBalance == null
             ? a
             : a.copyWith(openingBalance: currentBalance - delta);
-        final index = d.accounts.indexWhere((x) => x.id == a.id);
-        if (index < 0) {
-          d.accounts.add(actual);
-        } else {
-          d.accounts[index] = actual;
-        }
+        LedgerOperations.putAccount(d, actual);
       });
   Future<void> deleteAccount(String id) => change((d) {
     if (d.transactions.any(
@@ -315,9 +484,11 @@ class WalletStore extends ChangeNotifier {
     }
     d.categories.removeWhere((x) => x.id == c.id);
   });
+  void refreshRuntime() => runtimeUpdates.notifyListeners();
+
   void setAiStatus(String? status) {
     aiStatus = status;
-    notifyListeners();
+    runtimeUpdates.notifyListeners();
   }
 
   void log(String type, String text) {
@@ -327,7 +498,7 @@ class WalletStore extends ChangeNotifier {
       'text': text,
     });
     if (debugLogs.length > 100) debugLogs.removeLast();
-    notifyListeners();
+    logUpdates.notifyListeners();
   }
 
   List<Json> get patterns {

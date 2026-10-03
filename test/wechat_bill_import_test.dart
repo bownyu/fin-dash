@@ -287,8 +287,8 @@ void main() {
         service.import(bill, selectedIds: ids, accountMapping: mapping),
         throwsFormatException,
       );
+      await store.setLocked(false);
       await store.change((d) {
-        d.settings['locked'] = false;
         d.accounts[0] = bank.copyWith(archived: true);
       });
       await expectLater(
@@ -327,12 +327,14 @@ void main() {
       await store.saveAccount(
         WalletAccount.fromJson({...bank.toJson(), 'name': '中国银行储蓄卡(2222)'}),
       );
-      await store.saveAccount(
-        const WalletAccount(
-          id: 'fund',
-          name: '微信零钱通',
-          category: 'investment',
-          subType: 'wechat_balance',
+      await store.change(
+        (d) => d.accounts.add(
+          const WalletAccount(
+            id: 'fund',
+            name: '微信零钱通',
+            category: 'investment',
+            subType: 'wechat_balance',
+          ),
         ),
       );
       final service = WechatBillImporter(store);

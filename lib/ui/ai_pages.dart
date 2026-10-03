@@ -7,6 +7,7 @@ import 'package:image_picker/image_picker.dart';
 import '../domain/models.dart';
 import '../services/ai_service.dart';
 import 'design.dart';
+import 'tasks_page.dart';
 import 'interaction.dart';
 import 'preferences.dart';
 import 'agent_actions_page.dart';
@@ -293,6 +294,11 @@ class _ChatPageState extends State<ChatPage> {
             ),
             actions: [
               IconButton(
+                tooltip: '任务与回执',
+                onPressed: () => openPage(context, const TasksPage()),
+                icon: const Icon(Icons.task_alt),
+              ),
+              IconButton(
                 tooltip: '新建对话',
                 onPressed: ai.busy ? null : newConversation,
                 icon: const Icon(Icons.add_comment_outlined),
@@ -412,6 +418,14 @@ class _ChatPageState extends State<ChatPage> {
                         batches: linkedBatches,
                       );
                     }),
+                    for (final task in ai.tasks.tasks.where(
+                      (t) =>
+                          t['sessionId'] == ai.activeSessionId &&
+                          (t['interaction'] != null ||
+                              t['preferenceReview'] != null ||
+                              t['result'] != null),
+                    ))
+                      TaskCard(key: ValueKey(task['id']), taskId: task['id']),
                     for (final b in unlinkedBatches)
                       Padding(
                         padding: const EdgeInsets.only(bottom: 14),
@@ -587,19 +601,31 @@ class _LazyChatList extends StatelessWidget {
     required this.reverse,
   });
   @override
-  Widget build(BuildContext context) => ListView.builder(
-    controller: controller,
-    padding: padding,
-    reverse: reverse,
-    itemCount: children.length,
-    findChildIndexCallback: (key) {
-      final index = children.indexWhere((child) => child.key == key);
-      if (index < 0) return null;
-      return reverse ? children.length - 1 - index : index;
-    },
-    itemBuilder: (_, index) =>
-        children[reverse ? children.length - 1 - index : index],
-  );
+  Widget build(BuildContext context) {
+    // Every mounted row asks for its index after a rebuild; index keys once
+    // instead of scanning the whole history per row.
+    Map<Key, int>? indexes;
+    return ListView.builder(
+      controller: controller,
+      padding: padding,
+      reverse: reverse,
+      itemCount: children.length,
+      findChildIndexCallback: (key) {
+        if (indexes == null) {
+          indexes = {};
+          for (var i = 0; i < children.length; i++) {
+            final childKey = children[i].key;
+            if (childKey != null) indexes!.putIfAbsent(childKey, () => i);
+          }
+        }
+        final index = indexes![key];
+        if (index == null) return null;
+        return reverse ? children.length - 1 - index : index;
+      },
+      itemBuilder: (_, index) =>
+          children[reverse ? children.length - 1 - index : index],
+    );
+  }
 }
 
 class _Message extends StatelessWidget {

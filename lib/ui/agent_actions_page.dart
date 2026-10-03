@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'agent_action_card.dart';
 import 'agent_batch_card.dart';
 import 'design.dart';
+import 'tasks_page.dart';
 
 class AgentActionsPage extends StatefulWidget {
   const AgentActionsPage({super.key});
@@ -40,6 +41,11 @@ class _AgentActionsPageState extends State<AgentActionsPage> {
       appBar: AppBar(title: const Text('操作管理')),
       body: PageList(
         children: [
+          TextButton.icon(
+            onPressed: () => openPage(context, const TasksPage()),
+            icon: const Icon(Icons.task_alt),
+            label: const Text('查看所有任务、补充信息与回执'),
+          ),
           const Text('也可以直接在对话中确认变更，处理结果会保存在对话里。'),
           const SizedBox(height: 16),
           SegmentedButton<bool>(

@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
 import '../data/wallet_store.dart';
 import '../domain/models.dart';
+import '../domain/command_context.dart';
 import '../services/ai_service.dart';
 
 const primary = Color(0xFF3478F6);
@@ -525,17 +526,109 @@ class OverviewGrid extends StatelessWidget {
   );
 }
 
-class AppScope extends InheritedNotifier<WalletStore> {
+class AppScope extends StatefulWidget {
+  final WalletStore store;
   final AiService ai;
+  final Widget child;
   const AppScope({
     super.key,
-    required WalletStore store,
+    required this.store,
     required this.ai,
+    required this.child,
+  });
+  static AppScopeData of(BuildContext context) =>
+      InheritedModel.inheritFrom<AppScopeData>(context)!;
+  static WalletStore storeOf(
+    BuildContext context, {
+    Set<WalletDomain>? domains,
+  }) {
+    final selected = domains ?? WalletDomain.values.toSet();
+    for (final domain in selected) {
+      InheritedModel.inheritFrom<AppScopeData>(context, aspect: domain);
+    }
+    return context.getInheritedWidgetOfExactType<AppScopeData>()!.store;
+  }
+
+  @override
+  State<AppScope> createState() => _AppScopeState();
+}
+
+class _AppScopeState extends State<AppScope> {
+  final versions = {for (final domain in WalletDomain.values) domain: 0};
+  final callbacks = <WalletDomain, VoidCallback>{};
+  int runtime = 0;
+  void refreshRuntime() {
+    if (mounted) setState(() => runtime++);
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    for (final domain in WalletDomain.values) {
+      callbacks[domain] = () {
+        if (mounted) setState(() => versions[domain] = versions[domain]! + 1);
+      };
+      widget.store.domainUpdates[domain]!.addListener(callbacks[domain]!);
+    }
+    widget.store.runtimeUpdates.addListener(refreshRuntime);
+  }
+
+  @override
+  void didUpdateWidget(covariant AppScope oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if(oldWidget.store==widget.store)return;
+    for(final domain in WalletDomain.values) {
+      oldWidget.store.domainUpdates[domain]!.removeListener(callbacks[domain]!);
+      widget.store.domainUpdates[domain]!.addListener(callbacks[domain]!);
+      versions[domain]=versions[domain]!+1;
+    }
+    oldWidget.store.runtimeUpdates.removeListener(refreshRuntime);
+    widget.store.runtimeUpdates.addListener(refreshRuntime);
+    runtime++;
+  }
+
+  @override
+  void dispose() {
+    for (final domain in WalletDomain.values) {
+      widget.store.domainUpdates[domain]!.removeListener(callbacks[domain]!);
+    }
+    widget.store.runtimeUpdates.removeListener(refreshRuntime);
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => AppScopeData(
+    store: widget.store,
+    ai: widget.ai,
+    versions: Map.of(versions),
+    runtime: runtime,
+    child: widget.child,
+  );
+}
+
+class AppScopeData extends InheritedModel<WalletDomain> {
+  final WalletStore store;
+  final AiService ai;
+  final Map<WalletDomain, int> versions;
+  final int runtime;
+  WalletStore get notifier => store;
+  const AppScopeData({
+    super.key,
+    required this.store,
+    required this.ai,
+    required this.versions,
+    required this.runtime,
     required super.child,
-  }) : super(notifier: store);
-  static AppScope of(BuildContext context) =>
-      context.dependOnInheritedWidgetOfExactType<AppScope>()!;
-  static WalletStore storeOf(BuildContext context) => of(context).notifier!;
+  });
+  @override
+  bool updateShouldNotify(AppScopeData oldWidget) =>
+      runtime != oldWidget.runtime ||
+      versions.entries.any((e) => oldWidget.versions[e.key] != e.value);
+  @override
+  bool updateShouldNotifyDependent(
+    AppScopeData oldWidget,
+    Set<WalletDomain> dependencies,
+  ) => dependencies.any((d) => versions[d] != oldWidget.versions[d]);
 }
 
 Future<T?> openPage<T>(

@@ -4,7 +4,8 @@ import '../data/wallet_store.dart';
 import '../domain/models.dart';
 import '../domain/agent_action_summary.dart';
 import '../data/backup.dart';
-import 'agent_input.dart';
+import '../domain/ledger_operations.dart';
+import '../domain/review_contracts.dart';
 
 class AgentBatchReview {
   final Json batch;
@@ -49,10 +50,11 @@ class AgentActions {
   final WalletStore store;
   WalletData? _reviewData;
   final Map<String, AgentBatchReview> _reviewCache = {};
+  Map<String, Json>? _reviewBatches;
   AgentActions(this.store);
 
   List<Json> get items => _items(store.data).reversed.toList();
-  static List<Json> _items(WalletData d) =>
+  static List<Json> _items(WalletMetadata d) =>
       (d.extras['agentActions'] as List? ?? [])
           .map((e) => Json.from(e as Map))
           .toList();
@@ -130,7 +132,7 @@ class AgentActions {
     };
   }
 
-  static List<Json> _batches(WalletData d) =>
+  static List<Json> _batches(WalletMetadata d) =>
       (d.extras['agentActionBatches'] as List? ?? [])
           .map((e) => Json.from(e as Map))
           .toList();
@@ -228,6 +230,7 @@ class AgentActions {
           jsonEncode(
             _ordered({
               'revision': batch['revision'],
+              'ledgerEpoch': batch['ledgerEpoch'],
               'generation': batch['generation'],
               'items': actions
                   .map(
@@ -252,12 +255,18 @@ class AgentActions {
     if (!identical(_reviewData, store.data)) {
       _reviewData = store.data;
       _reviewCache.clear();
+      _reviewBatches = null;
     }
     if (_reviewCache.containsKey(id)) return _reviewCache[id]!;
-    final d = store.data, b = _batch(store.data, id);
+    final d = store.data;
+    // One scan of the chat history per committed snapshot, not one per batch.
+    // Reversed so the first batch with an id wins, as with firstWhere.
+    _reviewBatches ??= {for (final b in _allBatches(d).reversed) b['id']: b};
+    final b = _reviewBatches![id] ?? (throw const FormatException('方案不存在'));
     final entries = _inBatch(d, b);
     final problems = <String, String>{};
-    final draft = d.clone();
+    // Settled batches never touch the draft, so skip copying the wallet.
+    late final draft = d.clone();
     for (final a in entries.where(
       (a) => a['status'] == 'pending' && a['kind'] == 'account',
     )) {
@@ -305,7 +314,7 @@ class AgentActions {
     return b;
   }
 
-  static void _saveBatch(WalletData d, Json b) {
+  static void _saveBatch(WalletMetadata d, Json b) {
     final list = _batches(d);
     final index = list.indexWhere((x) => x['id'] == b['id']);
     if (index < 0) {
@@ -314,6 +323,36 @@ class AgentActions {
       list[index] = b;
     }
     d.extras['agentActionBatches'] = list;
+    final tasks = (d.extras['tasks'] as List? ?? [])
+        .map((t) => Json.from(t))
+        .toList();
+    final taskId = b['taskId'] ??= newId();
+    final task =
+        tasks.where((t) => t['id'] == taskId).firstOrNull ??
+        <String, dynamic>{
+          'id': taskId,
+          'goal': b['title'],
+          'sessionId': b['sessionId'],
+          'ledgerEpoch': b['ledgerEpoch'] ?? d.extras['ledgerEpoch'],
+          'createdAt': b['createdAt'],
+        };
+    if (!tasks.contains(task)) tasks.add(task);
+    task['planId'] = b['id'];
+    final pending = _items(
+      d,
+    ).any((a) => a['batchId'] == b['id'] && a['status'] == 'pending');
+    task['state'] = task['interaction'] != null && b['closed'] != true
+        ? 'needsInput'
+        : b['closed'] == true
+        ? 'cancelled'
+        : !pending && (b['receipts'] as List? ?? []).isNotEmpty
+        ? 'completed'
+        : b['generation'] == 'preparing'
+        ? 'preparing'
+        : b['generation'] == 'interrupted'
+        ? 'interrupted'
+        : 'ready';
+    d.extras['tasks'] = tasks;
   }
 
   /// One tool call may prepare many changes; no approval is exposed to the model.
@@ -341,6 +380,13 @@ class AgentActions {
           batches.where((x) => x['id'] == batchId).firstOrNull ??
           <String, dynamic>{
             'id': batchId,
+            'taskId':
+                (d.extras['tasks'] as List? ?? []).any(
+                  (t) => t['id'] == batchId,
+                )
+                ? batchId
+                : newId(),
+            'ledgerEpoch': d.extras['ledgerEpoch'],
             'title': title.substring(0, title.length > 80 ? 80 : title.length),
             'sessionId': sessionId,
             'sourceMessageId': sourceMessageId ?? batchId,
@@ -510,8 +556,8 @@ class AgentActions {
 
   Future<void> setGeneration(String id, String state) async {
     if (!_batches(store.data).any((b) => b['id'] == id)) return;
-    await store.change((d) {
-      final b = _batch(d, id);
+    await store.changeMetadata((d) {
+      final b = _batches(d).firstWhere((b) => b['id'] == id);
       if (b['generation'] != state) {
         b['generation'] = state;
         b['revision'] = (b['revision'] as int) + 1;
@@ -520,8 +566,8 @@ class AgentActions {
     });
   }
 
-  static void syncRun(WalletData d, Json run) {
-    final ids = {run['id'], ...run['batchIds'] as List? ?? []};
+  static void syncRun(WalletMetadata d, Json run) {
+    final ids = {run['id'], run['taskId'], ...run['batchIds'] as List? ?? []};
     final errors = (run['blocks'] as List? ?? [])
         .where(
           (block) =>
@@ -581,6 +627,10 @@ class AgentActions {
   }
 
   static void _checkReview(WalletData d, Json b, String token) {
+    if (b['ledgerEpoch'] != null &&
+        b['ledgerEpoch'] != d.extras['ledgerEpoch']) {
+      throw const FormatException('账本已恢复，此方案已失效，请重新准备');
+    }
     if (_token(b, _inBatch(d, b)) != token) {
       throw const FormatException('方案已更新，请重新查看并确认当前内容');
     }
@@ -681,15 +731,33 @@ class AgentActions {
     Set<String> selected, {
     bool allowPartial = false,
   }) async {
+    final reviewed = review(id);
+    final grant = AuthorizationGrant(
+      taskId: reviewed.batch['taskId'] ?? id,
+      planId: id,
+      planDigest: token,
+      planRevision: reviewed.batch['revision'] as int,
+      ledgerEpoch: store.ledgerEpoch,
+      selectedItemIds: selected,
+      userEventId: newId(),
+    );
+    final selection = grant.selectedItemIds;
     var count = 0;
     await store.change((d) {
+      LedgerOperations.ensureUnlocked(d);
+      if (grant.ledgerEpoch != store.ledgerEpoch) {
+        throw const FormatException('账本已恢复，请重新审阅');
+      }
       final b = _materialize(d, id);
+      if (b['ledgerEpoch'] != null && b['ledgerEpoch'] != store.ledgerEpoch) {
+        throw const FormatException('账本已恢复，此方案已失效');
+      }
       for (final receipt in b['receipts'] as List? ?? []) {
         if (receipt['status'] == 'applied' &&
             receipt['token'] == token &&
             _same(
               (receipt['actionIds'] as List).toList()..sort(),
-              selected.toList()..sort(),
+              selection.toList()..sort(),
             )) {
           count = (receipt['actionIds'] as List).length;
           return;
@@ -702,10 +770,10 @@ class AgentActions {
       if (b['generation'] == 'interrupted' && !allowPartial) {
         throw const FormatException('方案尚未完整，请继续准备或明确选择只执行已准备部分');
       }
-      if (selected.isEmpty) throw const FormatException('请先选择要执行的项目');
+      if (selection.isEmpty) throw const FormatException('请先选择要执行的项目');
       final actions = _items(d);
-      final chosen = actions.where((a) => selected.contains(a['id'])).toList();
-      if (chosen.length != selected.length ||
+      final chosen = actions.where((a) => selection.contains(a['id'])).toList();
+      if (chosen.length != selection.length ||
           chosen.any((a) => a['batchId'] != id || a['status'] != 'pending')) {
         throw const FormatException('选择范围已变化，请重新审阅');
       }
@@ -749,6 +817,7 @@ class AgentActions {
       }
       (b['receipts'] ??= <Json>[]).add({
         'id': receiptId,
+        ...grant.toReceiptFields(),
         'token': token,
         'actionIds': ordered.map((a) => a['id']).toList(),
         'status': 'applied',
@@ -798,7 +867,11 @@ class AgentActions {
       });
 
   Future<void> undoBatch(String id, String receiptId) => store.change((d) {
+    LedgerOperations.ensureUnlocked(d);
     final b = _materialize(d, id);
+    if (b['ledgerEpoch'] != null && b['ledgerEpoch'] != store.ledgerEpoch) {
+      throw const FormatException('账本已恢复，旧回执不能撤销当前账本');
+    }
     final receipts = (b['receipts'] as List? ?? [])
         .map((e) => Json.from(e))
         .toList();
@@ -886,6 +959,7 @@ class AgentActions {
   }
 
   Future<void> apply(String id) => store.change((d) {
+    LedgerOperations.ensureUnlocked(d);
     final actions = _items(d);
     final a = _find(actions, id);
     if (a['status'] == 'applied') return;
@@ -914,6 +988,7 @@ class AgentActions {
   });
 
   Future<void> undo(String id) => store.change((d) {
+    LedgerOperations.ensureUnlocked(d);
     final actions = _items(d);
     final a = _find(actions, id);
     if (a['status'] == 'undone') return;
@@ -987,11 +1062,7 @@ class AgentActions {
     String? id,
   }) {
     if (input.containsKey('id')) throw const FormatException('语音入口只能新增账单');
-    final desired = _desired(data, 'transaction', id ?? newId(), input);
-    final trial = data.clone();
-    _write(trial, 'transaction', desired['id'], desired);
-    validateWallet(trial);
-    return LedgerTx.fromJson(desired);
+    return LedgerOperations.prepareTransaction(data, input, id: id ?? newId());
   }
 
   static Json _find(List<Json> items, String id) => items.firstWhere(
@@ -1083,59 +1154,7 @@ class AgentActions {
       }
       return WalletAccount.fromJson(raw).toJson();
     }
-    final old = d.transactions.where((t) => t.id == id).firstOrNull;
-    if (args['id'] != null && old == null) throw const FormatException('账单不存在');
-    final raw = <String, dynamic>{
-      ...?old?.toJson(),
-      'id': id,
-      for (final k in [
-        'title',
-        'type',
-        'amountCents',
-        'date',
-        'category',
-        'note',
-        'accountId',
-        'transferFromId',
-        'transferToId',
-      ])
-        if (args.containsKey(k)) k: args[k],
-    };
-    raw['title'] = _text(raw['title'], '账单标题');
-    raw['category'] = _text(raw['category'], '分类');
-    raw['amountCents'] = _money(raw['amountCents'], '金额');
-    if (raw['amountCents'] == 0) throw const FormatException('交易金额必须大于零');
-    raw['date'] = parseAgentDate(raw['date']).toIso8601String();
-    if (!TxType.values.any((t) => t.name == raw['type'])) {
-      throw const FormatException('交易类型无效');
-    }
-    raw['note'] = raw['note'] == null
-        ? ''
-        : _text(raw['note'], '备注', empty: true);
-    final type = TxType.values.byName(raw['type']);
-    if (type == TxType.transfer) {
-      raw['accountId'] = null;
-      if (raw['transferFromId'] == raw['transferToId']) {
-        throw const FormatException('转出与转入账户不能相同');
-      }
-    } else {
-      raw['transferFromId'] = null;
-      raw['transferToId'] = null;
-      if (!d.categories.any(
-        (c) => c.name == raw['category'] && c.type == type,
-      )) {
-        throw const FormatException('请使用已有的收支分类');
-      }
-    }
-    for (final account
-        in type == TxType.transfer
-            ? [raw['transferFromId'], raw['transferToId']]
-            : [raw['accountId']]) {
-      if (!d.accounts.any((a) => a.id == account && !a.archived)) {
-        throw const FormatException('请选择有效的未归档账户');
-      }
-    }
-    return LedgerTx.fromJson(raw).toJson();
+    return LedgerOperations.prepareTransaction(d, args, id: id).toJson();
   }
 
   static void _write(WalletData d, String kind, String id, Json? value) {

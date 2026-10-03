@@ -2373,32 +2373,36 @@ class DebugLogsPage extends StatelessWidget {
   const DebugLogsPage({super.key});
   @override
   Widget build(BuildContext context) {
-    final logs = AppScope.storeOf(context).debugLogs;
+    final store = AppScope.storeOf(context, domains: const {});
+    final logs = store.debugLogs;
     return Scaffold(
       appBar: AppBar(title: const Text('顾问调试记录')),
-      body: PageList(
-        children: [
-          if (logs.isEmpty)
-            const EmptyState('暂无调试记录', '本次打开应用的 AI 请求状态会显示在这里。'),
-          ...logs.map(
-            (log) => Padding(
-              padding: const EdgeInsets.only(bottom: 12),
-              child: Panel(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      '${log['type']} · ${log['time']}',
-                      style: const TextStyle(color: muted, fontSize: 11),
-                    ),
-                    const SizedBox(height: 7),
-                    SelectableText(log['text']),
-                  ],
+      body: ListenableBuilder(
+        listenable: store.logUpdates,
+        builder: (context, _) => PageList(
+          children: [
+            if (logs.isEmpty)
+              const EmptyState('暂无调试记录', '本次打开应用的 AI 请求状态会显示在这里。'),
+            ...logs.map(
+              (log) => Padding(
+                padding: const EdgeInsets.only(bottom: 12),
+                child: Panel(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        '${log['type']} · ${log['time']}',
+                        style: const TextStyle(color: muted, fontSize: 11),
+                      ),
+                      const SizedBox(height: 7),
+                      SelectableText(log['text']),
+                    ],
+                  ),
                 ),
               ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }

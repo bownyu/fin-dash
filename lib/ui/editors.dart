@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
 import '../domain/models.dart';
+import '../application/ledger_commands.dart';
 import 'design.dart';
 import 'interaction.dart';
 
@@ -45,6 +46,8 @@ class _TransactionEditorState extends State<TransactionEditor> {
       changedDate = false,
       keypadExpanded = true;
   String? baseline;
+  final operationId = newId(), transactionId = newId();
+  late String ledgerEpoch;
   String get snapshot => formSnapshot([
     amount.text,
     title.text,
@@ -62,6 +65,7 @@ class _TransactionEditorState extends State<TransactionEditor> {
     if (initialized) return;
     initialized = true;
     final store = AppScope.storeOf(context);
+    ledgerEpoch = store.ledgerEpoch;
     final tx = widget.initial, q = widget.quick;
     type = tx?.type ?? q?.type ?? widget.initialType;
     category =
@@ -171,7 +175,7 @@ class _TransactionEditorState extends State<TransactionEditor> {
         );
       } else {
         final transaction = LedgerTx(
-          id: widget.initial?.id ?? newId(),
+          id: widget.initial?.id ?? transactionId,
           title: name,
           amount: cents!,
           date: changedDate || widget.initial != null ? date : DateTime.now(),
@@ -181,11 +185,25 @@ class _TransactionEditorState extends State<TransactionEditor> {
               ? 'swap_horiz'
               : cat?.icon ?? 'receipt_long',
           note: note.text.trim(),
+          categoryId: cat?.id,
+          sourceType: widget.initial?.sourceType ?? 'manual',
+          sourceId: widget.initial?.sourceId,
+          originalTransactionId: widget.initial?.originalTransactionId,
+          timePrecision: widget.initial?.timePrecision ?? 'second',
           accountId: type == TxType.transfer ? null : accountId,
           fromId: type == TxType.transfer ? fromId : null,
           toId: type == TxType.transfer ? toId : null,
         );
-        await (widget.onSave ?? store.saveTx)(transaction);
+        if (widget.onSave != null) {
+          await widget.onSave!(transaction);
+        } else {
+          await LedgerCommands(store).saveTransaction(
+            transaction,
+            operationId: operationId,
+            ledgerEpoch: ledgerEpoch,
+            expected: widget.initial,
+          );
+        }
       }
     });
     if (!mounted) return;
