@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import '../domain/models.dart';
 import '../services/wechat_bill_import.dart';
 import 'design.dart';
+import 'interaction.dart';
 import 'editors.dart';
 
 class WechatImportPage extends StatefulWidget {
@@ -126,15 +127,15 @@ class _WechatImportPageState extends State<WechatImportPage> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(
-                '收入 ${money(rows.where((r) => r.type == TxType.income).fold(0, (s, r) => s + r.amount))}\n'
-                '支出 ${money(rows.where((r) => r.type == TxType.expense).fold(0, (s, r) => s + r.amount))}',
+                '收入 ${privateMoney(context, rows.where((r) => r.type == TxType.income).fold(0, (s, r) => s + r.amount))}\n'
+                '支出 ${privateMoney(context, rows.where((r) => r.type == TxType.expense).fold(0, (s, r) => s + r.amount))}',
               ),
               const SizedBox(height: 12),
               for (final entry in details.entries)
                 Text(
                   preserveBalances
                       ? '${names[entry.key]}：保持当前余额'
-                      : '${names[entry.key]}：余额变化 ${money(entry.value)}',
+                      : '${names[entry.key]}：余额变化 ${privateMoney(context, entry.value)}',
                 ),
               const SizedBox(height: 12),
               Text(
@@ -210,8 +211,9 @@ class _WechatImportPageState extends State<WechatImportPage> {
     final ready =
         chosen.isNotEmpty &&
         chosen.every((r) => validAccounts.contains(mapping[r.payment]));
-    return PopScope(
-      canPop: !busy,
+    return EditorGuard(
+      busy: busy,
+      hasChanges: () => bill != null,
       child: Scaffold(
         appBar: AppBar(title: const Text('导入微信账单')),
         body: CustomScrollView(
@@ -245,7 +247,7 @@ class _WechatImportPageState extends State<WechatImportPage> {
                       ),
                       const SizedBox(height: 8),
                       Text(
-                        '识别 ${rows.length} 笔 · 收入 ${money(bill!.total(TxType.income))} · 支出 ${money(bill!.total(TxType.expense))}',
+                        '识别 ${rows.length} 笔 · 收入 ${privateMoney(context, bill!.total(TxType.income))} · 支出 ${privateMoney(context, bill!.total(TxType.expense))}',
                       ),
                       Text(
                         '已导入 ${duplicateIds.length} 笔 · 可能重复 ${similar.length} 笔 · 跳过 ${bill!.issues.length} 行',
@@ -266,7 +268,7 @@ class _WechatImportPageState extends State<WechatImportPage> {
                           child: Row(
                             children: [
                               Expanded(
-                                child: DropdownButtonFormField<String>(
+                                child: WalletSelectField<String>(
                                   key: ValueKey(
                                     'wechat-account:${entry.key}:${mapping[entry.key]}',
                                   ),
@@ -381,7 +383,7 @@ class _WechatImportPageState extends State<WechatImportPage> {
                           }
                         }),
                   title: Text(
-                    '${row.type.label} ${money(row.amount)} · ${row.title}',
+                    '${row.type.label} ${privateMoney(context, row.amount)} · ${row.title}',
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
                   ),

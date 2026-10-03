@@ -1065,8 +1065,8 @@ class AgentActions {
       }
       raw['creditLimitCents'] = _money(raw['creditLimitCents'] ?? 0, '信用额度');
       for (final k in ['billingDay', 'repaymentDay']) {
-        if (raw[k] != null && (raw[k] is! int || raw[k] < 1 || raw[k] > 28)) {
-          throw const FormatException('当前账本支持的账单日与还款日为 1 至 28');
+        if (raw[k] != null && (raw[k] is! int || raw[k] < 1 || raw[k] > 31)) {
+          throw const FormatException('账单日与还款日为 1 至 31，短月按月末计算');
         }
       }
       if (args.containsKey('currentBalanceCents')) {

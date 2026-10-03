@@ -66,6 +66,37 @@ extension PeriodLabels on Period {
   };
 }
 
+/// A configured 29/30/31 means the last valid day in shorter months.
+DateTime monthDay(int year, int month, int day) {
+  final first = DateTime(year, month);
+  final lastDay = DateTime(first.year, first.month + 1, 0).day;
+  return DateTime(first.year, first.month, min(day, lastDay));
+}
+
+DateTime nextRepaymentDate(int repaymentDay, DateTime now) {
+  final today = DateTime(now.year, now.month, now.day);
+  final thisMonth = monthDay(now.year, now.month, repaymentDay);
+  return thisMonth.isBefore(today)
+      ? monthDay(now.year, now.month + 1, repaymentDay)
+      : thisMonth;
+}
+
+DateRange creditBillingCycle(
+  int billingDay,
+  bool includeDayInPrevious,
+  DateTime now,
+) {
+  DateTime cutoff(int offset) {
+    final day = monthDay(now.year, now.month + offset, billingDay);
+    return includeDayInPrevious ? day.add(const Duration(days: 1)) : day;
+  }
+
+  final current = cutoff(0);
+  return now.isBefore(current)
+      ? DateRange(cutoff(-1), current)
+      : DateRange(current, cutoff(1));
+}
+
 class DateRange {
   final DateTime start, end;
   const DateRange(this.start, this.end);

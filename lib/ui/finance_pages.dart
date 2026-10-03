@@ -12,8 +12,10 @@ import 'payment_review_page.dart';
 import 'ai_pages.dart';
 import 'charts.dart';
 import 'design.dart';
+import 'interaction.dart';
 import 'editors.dart';
 import 'preferences.dart';
+import 'voice_entry_page.dart';
 
 class HomePage extends StatefulWidget {
   final VoidCallback onBills, onStats;
@@ -289,19 +291,16 @@ class _HomePageState extends State<HomePage> {
           ],
         ),
         const SizedBox(height: 16),
-        Row(
-          children: [
-            Expanded(
-              child: _Action(
+        LayoutBuilder(
+          builder: (context, box) {
+            final actions = <Widget>[
+              _Action(
                 '记一笔',
                 Icons.add_rounded,
                 primary,
                 () => openPage(context, const TransactionEditor(), modal: true),
               ),
-            ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: _Action(
+              _Action(
                 '转账',
                 Icons.swap_horiz_rounded,
                 mint,
@@ -311,17 +310,42 @@ class _HomePageState extends State<HomePage> {
                   modal: true,
                 ),
               ),
-            ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: _Action(
+              _Action(
                 'AI 顾问',
                 Icons.auto_awesome_rounded,
                 const Color(0xFFA78BFA),
                 () => openPage(context, const ChatPage()),
               ),
-            ),
-          ],
+              KeyedSubtree(
+                key: const Key('home-voice-entry'),
+                child: _Action(
+                  '语音记账',
+                  Icons.mic_rounded,
+                  primary,
+                  () => openVoiceEntry(context),
+                ),
+              ),
+            ];
+            if (box.maxWidth < 340 ||
+                MediaQuery.textScalerOf(context).scale(1) > 1.15) {
+              return Wrap(
+                spacing: 10,
+                runSpacing: 10,
+                children: [
+                  for (final action in actions)
+                    SizedBox(width: (box.maxWidth - 10) / 2, child: action),
+                ],
+              );
+            }
+            return Row(
+              children: [
+                for (var i = 0; i < actions.length; i++) ...[
+                  if (i > 0) const SizedBox(width: 10),
+                  Expanded(child: actions[i]),
+                ],
+              ],
+            );
+          },
         ),
         if (store.suggestions.isNotEmpty) ...[
           const SizedBox(height: 18),
@@ -341,7 +365,10 @@ class _HomePageState extends State<HomePage> {
                         style: const TextStyle(fontWeight: FontWeight.w600),
                       ),
                       Text(
-                        store.suggestions.first['text'],
+                        privateFinancialText(
+                          context,
+                          store.suggestions.first['text'],
+                        ),
                         style: Theme.of(context).textTheme.bodySmall,
                       ),
                     ],
@@ -433,8 +460,8 @@ class _HomePageState extends State<HomePage> {
                     Expanded(
                       child: Text(
                         monthSpend > budget
-                            ? '超出 ${money(monthSpend - budget)}'
-                            : '还可支出 ${money(budget - monthSpend)}',
+                            ? '超出 ${privateMoney(context, monthSpend - budget)}'
+                            : '还可支出 ${privateMoney(context, budget - monthSpend)}',
                         style: TextStyle(
                           fontWeight: FontWeight.w600,
                           color: monthSpend > budget ? coral : null,
@@ -459,7 +486,7 @@ class _HomePageState extends State<HomePage> {
                 ),
                 const SizedBox(height: 10),
                 Text(
-                  '预算 ${money(budget)} · 支出 ${money(monthSpend)}',
+                  '预算 ${privateMoney(context, budget)} · 支出 ${privateMoney(context, monthSpend)}',
                   style: Theme.of(context).textTheme.bodySmall,
                 ),
               ],
@@ -609,7 +636,9 @@ class _QuickTile extends StatelessWidget {
                 style: const TextStyle(fontSize: 12),
               ),
               Text(
-                amount == null ? '自定金额' : money(amount!, symbol: false),
+                amount == null
+                    ? '自定金额'
+                    : privateMoney(context, amount!, symbol: false),
                 style: Theme.of(context).textTheme.bodySmall,
               ),
             ],
@@ -829,11 +858,11 @@ class AccountDetailPage extends StatelessWidget {
     DateRange? cycle;
     if (credit && a.billingDay != null) {
       final now = DateTime.now();
-      final cutoffDay = a.billingDay! + (a.countBillingDayInPrevious ? 1 : 0);
-      final cutoff = DateTime(now.year, now.month, cutoffDay);
-      cycle = now.isBefore(cutoff)
-          ? DateRange(DateTime(now.year, now.month - 1, cutoffDay), cutoff)
-          : DateRange(cutoff, DateTime(now.year, now.month + 1, cutoffDay));
+      cycle = creditBillingCycle(
+        a.billingDay!,
+        a.countBillingDayInPrevious,
+        now,
+      );
     }
     return Scaffold(
       appBar: AppBar(
@@ -926,7 +955,7 @@ class AccountDetailPage extends StatelessWidget {
                     Padding(
                       padding: const EdgeInsets.only(top: 10),
                       child: Text(
-                        '本期 ${DateFormat('M/d').format(cycle.start)}–${DateFormat('M/d').format(cycle.end.subtract(const Duration(days: 1)))} · 消费 ${money(store.total(TxType.expense, transactions: txs.where((t) => cycle!.contains(t.date)).toList()))}',
+                        '本期 ${DateFormat('M/d').format(cycle.start)}–${DateFormat('M/d').format(cycle.end.subtract(const Duration(days: 1)))} · 消费 ${privateMoney(context, store.total(TxType.expense, transactions: txs.where((t) => cycle!.contains(t.date)).toList()))}',
                         style: Theme.of(context).textTheme.bodySmall,
                       ),
                     ),
@@ -1153,12 +1182,7 @@ class _StatsPageState extends State<StatsPage> {
             Expanded(
               child: TextButton(
                 onPressed: () async {
-                  final date = await showDatePicker(
-                    context: context,
-                    initialDate: anchor,
-                    firstDate: DateTime(2000),
-                    lastDate: DateTime(2100),
-                  );
+                  final date = await pickPeriodAnchor(context, period, anchor);
                   if (date != null) setState(() => anchor = date);
                 },
                 child: Text(
@@ -1178,7 +1202,12 @@ class _StatsPageState extends State<StatsPage> {
             ),
             TextButton(
               onPressed: () => setState(() => anchor = DateTime.now()),
-              child: const Text('今天'),
+              child: Text(switch (period) {
+                Period.day => '今天',
+                Period.week => '本周',
+                Period.month => '本月',
+                Period.year => '今年',
+              }),
             ),
           ],
         ),
@@ -1224,15 +1253,24 @@ class _StatsPageState extends State<StatsPage> {
                 onHorizontalDragEnd: (d) {
                   if ((d.primaryVelocity ?? 0).abs() > 100) {
                     setState(
-                      () => period =
-                          Period.values[(period.index +
-                                  ((d.primaryVelocity ?? 0) < 0 ? 1 : -1))
-                              .clamp(0, 3)],
+                      () => anchor = DateRange.shift(
+                        period,
+                        anchor,
+                        (d.primaryVelocity ?? 0) < 0 ? 1 : -1,
+                      ),
                     );
                   }
                 },
                 child: RingChart(
                   segments: segments,
+                  onSegmentTap: (index) => openPage(
+                    context,
+                    FilteredBillsPage(
+                      range: range,
+                      type: type,
+                      category: grouped.keys.elementAt(index),
+                    ),
+                  ),
                   center: Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
@@ -1258,7 +1296,7 @@ class _StatsPageState extends State<StatsPage> {
                 ),
               const SizedBox(height: 8),
               Text(
-                '结余 ${money(store.total(TxType.income, range: range) - store.total(TxType.expense, range: range))} · 转账不计入收支',
+                '结余 ${privateMoney(context, store.total(TxType.income, range: range) - store.total(TxType.expense, range: range))} · 转账不计入收支',
                 style: Theme.of(context).textTheme.bodySmall,
               ),
             ],
@@ -1266,7 +1304,18 @@ class _StatsPageState extends State<StatsPage> {
         ),
         const SectionTitle('收支趋势'),
         Panel(
-          child: TrendChart(values: values, labels: labels),
+          child: TrendChart(
+            values: values,
+            labels: labels,
+            pointLabels: [
+              for (var i = 0; i < values.length; i++)
+                period == Period.day
+                    ? '${i.toString().padLeft(2, '0')}:00'
+                    : period == Period.year
+                    ? '${i + 1}月'
+                    : dayKey(range.start.add(Duration(days: i))),
+            ],
+          ),
         ),
         const SectionTitle('分类明细'),
         if (grouped.isEmpty)
@@ -1346,7 +1395,7 @@ class _Summary extends StatelessWidget {
     this.title,
     this.value,
     this.color, {
-    this.respectPrivacy = false,
+    this.respectPrivacy = true,
   });
   @override
   Widget build(BuildContext context) => Panel(
@@ -1390,10 +1439,10 @@ class BillsPage extends StatefulWidget {
     this.initialCategory,
   });
   @override
-  State<BillsPage> createState() => _BillsPageState();
+  State<BillsPage> createState() => BillsPageState();
 }
 
-class _BillsPageState extends State<BillsPage> {
+class BillsPageState extends State<BillsPage> {
   final search = TextEditingController();
   Timer? _searchTimer;
   String _query = '';
@@ -1402,6 +1451,12 @@ class _BillsPageState extends State<BillsPage> {
   String? category, accountId;
   String dateLabel = '全部日期';
   Set<String>? selected;
+  bool exitSelection() {
+    if (selected == null) return false;
+    setState(() => selected = null);
+    return true;
+  }
+
   @override
   void initState() {
     super.initState();
@@ -1542,9 +1597,10 @@ class _BillsPageState extends State<BillsPage> {
                   ],
                 ),
                 const SizedBox(height: 18),
-                DropdownButtonFormField<String>(
+                WalletSelectField<String>(
                   key: ValueKey(newAccount),
                   initialValue: newAccount,
+                  nullLabel: '全部账户',
                   decoration: const InputDecoration(labelText: '账户'),
                   isExpanded: true,
                   items: [
@@ -1557,25 +1613,29 @@ class _BillsPageState extends State<BillsPage> {
                       state(() => newAccount = v == '' ? null : v),
                 ),
                 const SizedBox(height: 16),
-                DropdownButtonFormField<String>(
-                  key: ValueKey('$newType-$newCategory'),
-                  initialValue: newCategory,
-                  decoration: const InputDecoration(labelText: '分类'),
-                  isExpanded: true,
-                  items: [
-                    const DropdownMenuItem(value: '', child: Text('全部分类')),
-                    ...store.data.categories
-                        .where((c) => newType == null || c.type == newType)
-                        .map((c) => c.name)
-                        .toSet()
-                        .map(
-                          (name) =>
-                              DropdownMenuItem(value: name, child: Text(name)),
-                        ),
-                  ],
-                  onChanged: (v) =>
-                      state(() => newCategory = v == '' ? null : v),
-                ),
+                if (newType != TxType.transfer)
+                  WalletSelectField<String>(
+                    key: ValueKey('$newType-$newCategory'),
+                    initialValue: newCategory,
+                    nullLabel: '全部分类',
+                    decoration: const InputDecoration(labelText: '分类'),
+                    isExpanded: true,
+                    items: [
+                      const DropdownMenuItem(value: '', child: Text('全部分类')),
+                      ...store.data.categories
+                          .where((c) => newType == null || c.type == newType)
+                          .map((c) => c.name)
+                          .toSet()
+                          .map(
+                            (name) => DropdownMenuItem(
+                              value: name,
+                              child: Text(name),
+                            ),
+                          ),
+                    ],
+                    onChanged: (v) =>
+                        state(() => newCategory = v == '' ? null : v),
+                  ),
                 const SizedBox(height: 22),
                 Row(
                   children: [
@@ -1733,6 +1793,13 @@ class _BillsPageState extends State<BillsPage> {
                 ),
               ] else ...[
                 IconButton(
+                  tooltip: '选择账单',
+                  onPressed: list.isEmpty
+                      ? null
+                      : () => setState(() => selected = {}),
+                  icon: const Icon(Icons.checklist_rounded),
+                ),
+                IconButton(
                   tooltip: '导出当前账单',
                   onPressed: list.isEmpty ? null : () => exportCsv(list),
                   icon: const Icon(Icons.ios_share_rounded, size: 21),
@@ -1842,8 +1909,15 @@ class _BillsPageState extends State<BillsPage> {
         ),
         Expanded(
           child: groups.isEmpty
-              ? const SingleChildScrollView(
-                  child: EmptyState('没有符合条件的账单', '调整筛选条件，或者记下新的一笔。'),
+              ? SingleChildScrollView(
+                  child: EmptyState(
+                    '没有符合条件的账单',
+                    '调整筛选条件，或者记下新的一笔。',
+                    action: TextButton(
+                      onPressed: filters,
+                      child: const Text('调整筛选'),
+                    ),
+                  ),
                 )
               : ListView.builder(
                   padding: EdgeInsets.fromLTRB(
@@ -1870,7 +1944,7 @@ class _BillsPageState extends State<BillsPage> {
                               ),
                             ),
                             Text(
-                              '支出 ${money(dailyExpenses[day]!)}',
+                              '支出 ${privateMoney(context, dailyExpenses[day]!)}',
                               style: Theme.of(context).textTheme.bodySmall,
                             ),
                           ],

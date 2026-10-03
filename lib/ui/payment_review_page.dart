@@ -3,6 +3,7 @@ import 'package:intl/intl.dart';
 import '../domain/models.dart';
 import '../services/payment_notifications.dart';
 import 'design.dart';
+import 'interaction.dart';
 import 'editors.dart';
 
 LedgerTx paymentNotificationDraft(
@@ -11,7 +12,7 @@ LedgerTx paymentNotificationDraft(
   String? accountId,
 }) {
   final type = switch (record['kind']) {
-    'income' => TxType.income,
+    'income' || 'refund' => TxType.income,
     'transfer' || 'repayment' => TxType.transfer,
     _ => TxType.expense,
   };
@@ -44,43 +45,67 @@ Future<void> reviewPaymentNotification(
   PaymentNotifications service,
   Json record,
 ) async {
-  if (record['kind'] == 'refund') {
-    await showDialog<void>(
-      context: context,
-      builder: (c) => AlertDialog(
-        title: const Text('先核对退款对应的原账单'),
-        content: SingleChildScrollView(
-          child: Text(
-            '${record['title']}\n${record['text']}\n\n'
-            '请核对原交易与实际到账金额。退款通知暂不直接转成收入或新消费。',
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(c),
-            child: const Text('知道了'),
-          ),
-        ],
-      ),
-    );
-    return;
-  }
   final store = AppScope.storeOf(context);
+  LedgerTx? original;
+  final refund = record['kind'] == 'refund';
+  if (refund) {
+    final candidates = store
+        .query(type: TxType.expense)
+        .where((t) => t.amount >= (record['amountCents'] as int? ?? 0))
+        .toList();
+    if (candidates.isEmpty) {
+      toast(context, '请先记录或导入退款对应的原消费，再核对退款到账。原通知仍保留。');
+      return;
+    }
+    original = await pickWalletOption<LedgerTx>(
+      context,
+      title: '选择退款对应的原消费',
+      items: [
+        for (final tx in candidates)
+          DropdownMenuItem(value: tx, child: Text(tx.title)),
+      ],
+      label: (tx) => tx.title,
+      subtitle: (tx) =>
+          '${dayKey(tx.date)} · ${privateMoney(context, tx.amount)} · ${store.account(tx.accountId)?.name ?? '未关联账户'}',
+      icon: (_) => Icons.receipt_long_outlined,
+    );
+    if (original == null || !context.mounted) return;
+  }
+  final linked = original;
   await Navigator.of(context).push<void>(
     MaterialPageRoute(
       settings: const RouteSettings(name: '/payment-notification-review'),
       builder: (_) => TransactionEditor(
-        initial: paymentNotificationDraft(record, store.data),
-        pageTitle: '核对通知账单',
+        initial: refund
+            ? LedgerTx.fromJson({
+                ...paymentNotificationDraft(
+                  record,
+                  store.data,
+                  accountId: linked?.accountId,
+                ).toJson(),
+                'category': '退款',
+              })
+            : paymentNotificationDraft(record, store.data),
+        saveLabel: refund ? '确认退款到账' : null,
+        pageTitle: refund ? '核对退款到账' : '核对通知账单',
         reviewNote:
-            '${record['reviewReason']}\n通知时间可能与交易时间不同，请核对金额、时间和实际账户。\n\n${record['title']}\n${record['text']}',
+            '${refund ? '原消费：${linked!.title} · ${privateMoney(context, linked.amount)}\n退款将关联原消费并单独记为退款收入；原消费保留。请确认实际到账账户和金额。\n' : ''}${record['reviewReason']}\n通知时间可能与交易时间不同，请核对金额、时间和实际账户。\n\n${record['title']}\n${record['text']}',
         onSave: (updated) async {
+          if (refund &&
+              !await confirm(
+                context,
+                '确认实际退款已到账？',
+                '${linked!.title}\n退款 ${privateMoney(context, updated.amount)} → ${store.account(updated.accountId)?.name ?? '待选账户'}\n原消费保留，退款单独计入退款分类。',
+                action: '确认到账',
+              )) {
+            throw const FormatException('退款尚未确认，核对内容已保留');
+          }
           final needsReview = service.needsDuplicateReview(
             record,
             transaction: updated,
           );
-          var duplicateReviewed = false;
-          if (needsReview) {
+          var duplicateReviewed = refund;
+          if (needsReview && !refund) {
             if (!context.mounted) throw const FormatException('核对页面已关闭');
             duplicateReviewed = await confirm(
               context,
@@ -96,6 +121,7 @@ Future<void> reviewPaymentNotification(
             record['eventId'],
             updated,
             duplicateReviewed: duplicateReviewed,
+            refundOf: linked?.id,
           );
         },
       ),
@@ -127,11 +153,6 @@ class _PaymentReviewPageState extends State<PaymentReviewPage> {
     if (service != null) return;
     service =
         widget.notifications ?? PaymentNotifications(AppScope.storeOf(context));
-    selected.addAll(
-      service!.pending
-          .where((r) => service!.batchProblem(r) == null)
-          .map((r) => r['eventId'] as String),
-    );
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) refresh();
     });
@@ -144,17 +165,12 @@ class _PaymentReviewPageState extends State<PaymentReviewPage> {
       error = null;
     });
     try {
-      final known = service!.pending.map((r) => r['eventId']).toSet();
       await service!.sync();
-      selected.addAll(
-        service!.pending
-            .where(
-              (r) =>
-                  !known.contains(r['eventId']) &&
-                  service!.batchProblem(r) == null,
-            )
-            .map((r) => r['eventId'] as String),
-      );
+      final eligibleIds = service!.pending
+          .where((r) => service!.batchProblem(r) == null)
+          .map((r) => r['eventId'])
+          .toSet();
+      selected.removeWhere((id) => !eligibleIds.contains(id));
     } catch (_) {
       if (mounted) setState(() => error = '同步未完成，已保存的记录仍可核对');
     } finally {
@@ -175,6 +191,24 @@ class _PaymentReviewPageState extends State<PaymentReviewPage> {
         )
         .toList();
     if (records.isEmpty) return;
+    if (only == null && records.length > 1) {
+      final accountName = store.account(accountId)?.name ?? '所选账户';
+      final expense = records
+          .where((r) => r['kind'] == 'expense')
+          .fold<int>(0, (sum, r) => sum + (r['amountCents'] as int));
+      final income = records
+          .where((r) => r['kind'] == 'income')
+          .fold<int>(0, (sum, r) => sum + (r['amountCents'] as int));
+      if (!await confirm(
+        context,
+        '将 ${records.length} 笔全部记入 $accountName？',
+        '支出 ${privateMoney(context, expense)} · 收入 ${privateMoney(context, income)}\n请确认每笔都属于这个账户；其他账户的记录请分开处理。',
+        action: '确认入账',
+      )) {
+        return;
+      }
+      if (!mounted || busy) return;
+    }
     setState(() {
       busy = true;
       error = null;
@@ -418,7 +452,7 @@ class _PaymentReviewPageState extends State<PaymentReviewPage> {
                         Text(
                           record['amountCents'] == null
                               ? '金额待核对'
-                              : money(record['amountCents']),
+                              : privateMoney(context, record['amountCents']),
                           style: Theme.of(context).textTheme.headlineLarge
                               ?.copyWith(
                                 fontSize: 30,
@@ -579,7 +613,7 @@ class _PaymentReviewPageState extends State<PaymentReviewPage> {
                       mainAxisSize: MainAxisSize.min,
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
-                        DropdownButtonFormField<String>(
+                        WalletSelectField<String>(
                           key: ValueKey('payment-batch-account:$accountId'),
                           initialValue: validAccount ? accountId : null,
                           isExpanded: true,
@@ -619,7 +653,7 @@ class _PaymentReviewPageState extends State<PaymentReviewPage> {
                         Text(
                           chosen.isEmpty
                               ? '选择记录后可一起确认'
-                              : '已选 ${chosen.length} 笔 · 支出 ${money(expense)}${income > 0 ? ' · 收入 ${money(income)}' : ''}',
+                              : '已选 ${chosen.length} 笔 · 支出 ${privateMoney(context, expense)}${income > 0 ? ' · 收入 ${privateMoney(context, income)}' : ''}',
                           style: Theme.of(context).textTheme.bodySmall,
                         ),
                         const SizedBox(height: 8),
@@ -633,7 +667,7 @@ class _PaymentReviewPageState extends State<PaymentReviewPage> {
                             child: Text(
                               !validAccount
                                   ? '先选择账户，再确认'
-                                  : '确认选中 ${chosen.length} 笔',
+                                  : '确认 ${chosen.length} 笔 → ${store.account(accountId)?.name ?? '所选账户'}',
                               key: ValueKey('$validAccount:${chosen.length}'),
                             ),
                           ),

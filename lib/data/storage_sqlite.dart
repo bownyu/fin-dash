@@ -21,13 +21,29 @@ typedef _Commit = ({
 
 /// All SQLite access, diffing, validation and changed-row encoding happen in a
 /// worker. The UI publishes its candidate only after both durable files commit.
-class LocalWalletStorage implements IncrementalWalletStorage {
+class LocalWalletStorage
+    implements IncrementalWalletStorage, RestorePointStorage {
   final Directory? directory;
   _Loaded? _loaded;
   int lastChangedRows = 0;
   LocalWalletStorage({this.directory});
   Future<String> get _path async =>
       '${(directory ?? await getApplicationSupportDirectory()).path}/findash_ledger.sqlite';
+
+  @override
+  Future<String?> loadRestorePoint() async {
+    final file = File('${await _path}.restore-point');
+    return await file.exists() ? unseal(await file.readAsString()) : null;
+  }
+
+  @override
+  Future<void> saveRestorePoint(String data) async {
+    final file = File('${await _path}.restore-point');
+    await file.parent.create(recursive: true);
+    final pending = File('${file.path}.pending');
+    await pending.writeAsString(seal(data), flush: true);
+    await pending.rename(file.path);
+  }
 
   @override
   Future<WalletData?> loadSnapshot() async {

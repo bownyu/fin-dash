@@ -17,6 +17,7 @@ class WalletStore extends ChangeNotifier {
   Map<String, String>? _searchText;
   WalletData get data => _data;
   bool loading = true;
+  bool hasRestorePoint = false;
   String? startupError;
   String? aiStatus;
   final List<Json> debugLogs = [];
@@ -35,6 +36,15 @@ class WalletStore extends ChangeNotifier {
       }
     } catch (e) {
       startupError = '本地数据加载失败：$e';
+    }
+    try {
+      final backend = storage;
+      if (backend is RestorePointStorage) {
+        hasRestorePoint =
+            await (backend as RestorePointStorage).loadRestorePoint() != null;
+      }
+    } catch (_) {
+      log('error', '恢复前快照暂时无法读取，现有账本不受影响');
     }
     loading = false;
     notifyListeners();
@@ -67,6 +77,13 @@ class WalletStore extends ChangeNotifier {
     final work = _tail.then((_) async {
       final next = preview.data.clone();
       final backend = storage;
+      // Do not overwrite the current ledger if its restore point cannot commit.
+      if (startupError == null && backend is RestorePointStorage) {
+        await (backend as RestorePointStorage).saveRestorePoint(
+          await encodeWalletSnapshot(_data),
+        );
+        hasRestorePoint = true;
+      }
       if (backend is IncrementalWalletStorage) {
         await backend.replaceSnapshot(next);
       } else {
@@ -219,6 +236,20 @@ class WalletStore extends ChangeNotifier {
     }
     if (tx.accountId != null) d.settings['quickEntryAccountId'] = tx.accountId;
   });
+
+  Future<ImportPreview?> readRestorePoint() async {
+    final backend = storage;
+    if (backend is! RestorePointStorage) return null;
+    final raw = await (backend as RestorePointStorage).loadRestorePoint();
+    return raw == null ? null : parseBackup(raw);
+  }
+
+  Future<void> restorePrevious() async {
+    final preview = await readRestorePoint();
+    if (preview == null) throw const FormatException('没有可用的恢复前快照');
+    await restore(preview);
+  }
+
   Future<void> deleteTxs(Set<String> ids) =>
       change((d) => d.transactions.removeWhere((t) => ids.contains(t.id)));
   Future<void> saveAccount(WalletAccount a, {int? currentBalance}) =>
@@ -354,11 +385,7 @@ class WalletStore extends ChangeNotifier {
     )) {
       final now = DateTime.now();
       final today = DateTime(now.year, now.month, now.day);
-      final due = DateTime(
-        now.year,
-        now.month + (now.day > a.repaymentDay! ? 1 : 0),
-        a.repaymentDay!,
-      );
+      final due = nextRepaymentDate(a.repaymentDay!, now);
       if (due.difference(today).inDays <= 3) {
         result.add({
           'id': 'repay-${a.id}-${due.year}-${due.month}',

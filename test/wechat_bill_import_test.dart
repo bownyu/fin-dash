@@ -1,3 +1,4 @@
+import 'package:fin_dash/ui/interaction.dart';
 import 'dart:typed_data';
 import 'package:excel/excel.dart';
 import 'package:flutter/material.dart' hide TextSpan;
@@ -388,7 +389,7 @@ void main() {
             .onPressed,
         null,
       );
-      await tester.tap(find.byType(DropdownButtonFormField<String>));
+      await tester.tap(find.byType(WalletSelectField<String>));
       await tester.pumpAndSettle();
       await tester.tap(find.text('银行卡').last);
       await tester.pumpAndSettle();

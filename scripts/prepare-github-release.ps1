@@ -78,7 +78,7 @@ $taskReleaseNotes = [IO.File]::ReadAllText((Join-Path $taskRoot "docs/releases/$
 $taskManifest = [ordered]@{schemaVersion=1;applicationId='com.findash.fin_dash';version=$taskName;buildNumber=$taskBuild;
     sizeBytes=(Get-Item -LiteralPath $taskApk).Length;sha256=$taskHash;
     downloadUrl="https://github.com/$Repository/releases/download/v$taskName/" + [Uri]::EscapeDataString($taskApkName);
-    notes="新增应用内检查更新、下载与升级。包含 Agent 批量确认、SQLite 账本与离线语音。升级保留现有账本。"}
+    notes=$taskReleaseNotes}
 [IO.File]::WriteAllText((Join-Path $taskAssets 'ota-manifest.json'), ($taskManifest | ConvertTo-Json -Depth 4), $taskUtf8)
 [IO.File]::WriteAllText((Join-Path $taskAssets 'SHA256SUMS.txt'), "$taskHash  $taskApkName`n", $taskUtf8)
 [IO.File]::WriteAllText((Join-Path $taskAssets 'release-notes.md'), $taskReleaseNotes, $taskUtf8)

@@ -33,6 +33,18 @@ Color txColor(TxType type) => switch (type) {
   TxType.expense => coral,
   TxType.transfer => primary,
 };
+String formSnapshot(List<Object?> values) => jsonEncode(values);
+
+/// Editable amounts remain visible; read-only ledger summaries use this scope.
+String privateMoney(BuildContext context, int value, {bool symbol = true}) =>
+    AppScope.storeOf(context).data.settings['visible'] == false
+    ? (symbol ? '¥ ••••••' : '••••••')
+    : money(value, symbol: symbol);
+
+String privateFinancialText(BuildContext context, String text) =>
+    AppScope.storeOf(context).data.settings['visible'] == false
+    ? text.replaceAll(RegExp(r'[-+]?¥\s*[\d,]+(?:\.\d{2})?'), '¥ ••••••')
+    : text;
 IconData iconOf(String name) => switch (name) {
   'restaurant' || 'fastfood' => Icons.restaurant_rounded,
   'directions_car' || 'local_taxi' => Icons.directions_car_rounded,
@@ -178,6 +190,12 @@ ThemeData walletTheme(Brightness brightness) {
     chipTheme: ChipThemeData(
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
       side: BorderSide.none,
+    ),
+    popupMenuTheme: PopupMenuThemeData(
+      color: dark ? darkSurface : Colors.white,
+      surfaceTintColor: Colors.transparent,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+      elevation: 8,
     ),
     segmentedButtonTheme: SegmentedButtonThemeData(
       style: ButtonStyle(
@@ -566,6 +584,7 @@ Future<bool> confirm(
   String title,
   String message, {
   String action = '确认',
+  String cancelLabel = '取消',
   bool destructive = false,
 }) async =>
     await showDialog<bool>(
@@ -576,7 +595,7 @@ Future<bool> confirm(
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(c, false),
-            child: const Text('取消'),
+            child: Text(cancelLabel),
           ),
           TextButton(
             onPressed: () => Navigator.pop(c, true),
@@ -751,7 +770,7 @@ class MoneyText extends StatelessWidget {
     super.key,
     this.size = 24,
     this.color,
-    this.respectPrivacy = false,
+    this.respectPrivacy = true,
   });
   @override
   Widget build(BuildContext context) {
@@ -761,16 +780,31 @@ class MoneyText extends StatelessWidget {
     return FittedBox(
       fit: BoxFit.scaleDown,
       alignment: Alignment.centerLeft,
-      child: Text(
-        visible ? money(value) : '¥ ••••••',
-        style: TextStyle(
-          fontSize: size,
-          fontWeight: FontWeight.w700,
-          letterSpacing: -.5,
-          color: color,
-          fontFeatures: const [ui.FontFeature.tabularFigures()],
-        ),
-      ),
+      child: visible
+          ? TweenAnimationBuilder<int>(
+              tween: IntTween(begin: value, end: value),
+              duration: Duration(
+                milliseconds: MediaQuery.disableAnimationsOf(context) ? 0 : 220,
+              ),
+              builder: (_, amount, _) => Text(
+                money(amount),
+                style: TextStyle(
+                  fontSize: size,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: -.5,
+                  color: color,
+                  fontFeatures: const [ui.FontFeature.tabularFigures()],
+                ),
+              ),
+            )
+          : Text(
+              '¥ ••••••',
+              style: TextStyle(
+                fontSize: size,
+                fontWeight: FontWeight.w700,
+                color: color,
+              ),
+            ),
     );
   }
 }
@@ -922,7 +956,7 @@ class TransactionRow extends StatelessWidget {
                             ? '−'
                             : tx.type == TxType.income
                             ? '+'
-                            : ''}${money(tx.amount, symbol: false)}',
+                            : ''}${privateMoney(context, tx.amount, symbol: false)}',
                         style: TextStyle(
                           fontSize: 16,
                           fontWeight: FontWeight.w700,
@@ -964,5 +998,6 @@ String dateHeading(DateTime date) {
   if (dayKey(date) == dayKey(today.subtract(const Duration(days: 1)))) {
     return '昨天';
   }
-  return DateFormat('M月d日 EEEE', 'zh_CN').format(date);
+  const weekdays = ['星期一', '星期二', '星期三', '星期四', '星期五', '星期六', '星期日'];
+  return '${date.month}月${date.day}日 ${weekdays[date.weekday - 1]}';
 }

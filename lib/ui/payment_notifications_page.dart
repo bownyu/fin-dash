@@ -249,6 +249,29 @@ class _PaymentNotificationsPageState extends State<PaymentNotificationsPage>
             onSelectionChanged: (v) => setState(() => history = v.first),
           ),
           const SizedBox(height: 14),
+          if (history)
+            TextButton(
+              onPressed: busy
+                  ? null
+                  : () async {
+                      if (!await confirm(
+                        context,
+                        '清除已忽略通知的原文？',
+                        '这些通知将无法再恢复待确认。已入账账单不受影响。',
+                        action: '清除原文',
+                        destructive: true,
+                      )) {
+                        return;
+                      }
+                      if (!context.mounted) return;
+                      await perform(
+                        context,
+                        service!.clearIgnored,
+                        success: '已清除已忽略通知的原文',
+                      );
+                    },
+              child: const Text('清除已忽略通知原文'),
+            ),
           if (!history && records.isNotEmpty)
             FilledButton.icon(
               onPressed: busy
@@ -272,7 +295,7 @@ class _PaymentNotificationsPageState extends State<PaymentNotificationsPage>
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    '${r['sourcePackage'] == 'com.tencent.mm' ? '微信' : '支付宝'} · ${r['amountCents'] == null ? '金额待补全' : money(r['amountCents'])}',
+                    '${r['sourcePackage'] == 'com.tencent.mm' ? '微信' : '支付宝'} · ${r['amountCents'] == null ? '金额待补全' : privateMoney(context, r['amountCents'])}',
                     style: Theme.of(context).textTheme.titleMedium,
                   ),
                   const SizedBox(height: 8),
@@ -296,11 +319,12 @@ class _PaymentNotificationsPageState extends State<PaymentNotificationsPage>
                     Wrap(
                       spacing: 12,
                       children: [
-                        if (r['kind'] != 'refund')
-                          FilledButton(
-                            onPressed: busy ? null : () => review(r),
-                            child: const Text('核对并记账'),
+                        FilledButton(
+                          onPressed: busy ? null : () => review(r),
+                          child: Text(
+                            r['kind'] == 'refund' ? '关联原消费并核对退款' : '核对并记账',
                           ),
+                        ),
                         TextButton(
                           onPressed: busy
                               ? null
@@ -313,7 +337,26 @@ class _PaymentNotificationsPageState extends State<PaymentNotificationsPage>
                       ],
                     ),
                   ] else
-                    Text(r['status'] == 'applied' ? '已入账，可在账单页修改或删除' : '已忽略'),
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          r['status'] == 'applied' ? '已入账，可在账单页修改或删除' : '已忽略',
+                        ),
+                        if (r['status'] == 'ignored' && r['cleared'] != true)
+                          TextButton.icon(
+                            onPressed: busy
+                                ? null
+                                : () => perform(
+                                    context,
+                                    () => service!.restoreIgnored(r['eventId']),
+                                    success: '已恢复到待确认',
+                                  ),
+                            icon: const Icon(Icons.undo_rounded),
+                            label: const Text('恢复待确认'),
+                          ),
+                      ],
+                    ),
                 ],
               ),
             ),

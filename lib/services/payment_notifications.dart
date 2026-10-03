@@ -148,6 +148,7 @@ class PaymentNotifications {
                 : '请核对交易信息',
             'ruleVersion': e['ruleVersion'],
             'status': ignore ? 'ignored' : 'pending',
+            'cleared': ignore,
             'possibleDuplicate': possibleDuplicate,
           });
         }
@@ -158,9 +159,17 @@ class PaymentNotifications {
     String eventId,
     LedgerTx tx, {
     bool duplicateReviewed = false,
+    String? refundOf,
   }) => store.change((d) {
     final records = _records(d);
-    _apply(d, records, eventId, tx, duplicateReviewed: duplicateReviewed);
+    _apply(
+      d,
+      records,
+      eventId,
+      tx,
+      duplicateReviewed: duplicateReviewed,
+      refundOf: refundOf,
+    );
     d.extras['paymentNotifications'] = records;
   });
 
@@ -286,6 +295,7 @@ class PaymentNotifications {
     String eventId,
     LedgerTx tx, {
     bool duplicateReviewed = false,
+    String? refundOf,
   }) {
     if (d.settings['locked'] == true) throw const FormatException('账本已锁定，请先解锁');
     final record = records.firstWhere(
@@ -295,7 +305,41 @@ class PaymentNotifications {
     if (record['status'] == 'applied') return;
     if (record['status'] != 'pending') throw const FormatException('通知已处理');
     if (record['kind'] == 'refund') {
-      throw const FormatException('退款请先核对原交易，暂不直接计入收支');
+      final original = d.transactions
+          .where((t) => t.id == refundOf && t.type == TxType.expense)
+          .firstOrNull;
+      if (original == null || tx.type != TxType.income) {
+        throw const FormatException('退款需人工关联原支出并核对实际到账，不会自动计入收入');
+      }
+      final refunded = records
+          .where((r) => r['status'] == 'applied' && r['refundOf'] == refundOf)
+          .fold<int>(0, (sum, r) {
+            final previous = d.transactions
+                .where((t) => t.id == r['transactionId'])
+                .firstOrNull;
+            return sum + (previous?.amount ?? 0);
+          });
+      if (tx.date.isBefore(original.date) ||
+          tx.amount <= 0 ||
+          tx.amount + refunded > original.amount) {
+        throw const FormatException('退款时间不能早于原交易，累计退款不能超过原支出');
+      }
+      if (!d.categories.any((c) => c.type == TxType.income && c.name == '退款')) {
+        d.categories.add(
+          WalletCategory(
+            newId(),
+            '退款',
+            'currency_exchange',
+            '#58C5AB',
+            TxType.income,
+          ),
+        );
+      }
+      tx = LedgerTx.fromJson({
+        ...tx.toJson(),
+        'category': '退款',
+        'icon': 'currency_exchange',
+      });
     }
     if (!duplicateReviewed &&
         needsDuplicateReview(record, transaction: tx, data: d)) {
@@ -316,6 +360,7 @@ class PaymentNotifications {
     d.transactions.add(tx);
     record['status'] = 'applied';
     record['transactionId'] = tx.id;
+    if (record['kind'] == 'refund') record['refundOf'] = refundOf;
     record['processedAt'] = DateTime.now().toIso8601String();
     d.extras.remove('analysisCache');
   }
@@ -341,8 +386,33 @@ class PaymentNotifications {
     final record = records.firstWhere((r) => r['eventId'] == eventId);
     if (record['status'] != 'pending') return;
     record['status'] = 'ignored';
-    record['text'] = '';
-    record['title'] = '';
+    record['processedAt'] = DateTime.now().toIso8601String();
+    d.extras['paymentNotifications'] = records;
+  });
+
+  Future<void> restoreIgnored(String eventId) => store.change((d) {
+    final records = _records(d);
+    final record = records.where((r) => r['eventId'] == eventId).firstOrNull;
+    if (record == null ||
+        record['status'] != 'ignored' ||
+        record['cleared'] == true) {
+      throw const FormatException('这条通知不能恢复，请手动核对账单');
+    }
+    record['status'] = 'pending';
+    record.remove('processedAt');
+    d.extras['paymentNotifications'] = records;
+    final seen = List<String>.from(d.extras['paymentReminderSeen'] ?? []);
+    seen.remove(eventId);
+    d.extras['paymentReminderSeen'] = seen;
+  });
+
+  Future<void> clearIgnored() => store.change((d) {
+    final records = _records(d);
+    for (final record in records.where((r) => r['status'] == 'ignored')) {
+      record['text'] = '';
+      record['title'] = '';
+      record['cleared'] = true;
+    }
     d.extras['paymentNotifications'] = records;
   });
 
@@ -366,6 +436,7 @@ class PaymentNotifications {
       final records = _records(d);
       for (final r in records.where((r) => r['status'] == 'pending')) {
         r['status'] = 'ignored';
+        r['cleared'] = true;
         r['text'] = '';
         r['title'] = '';
       }

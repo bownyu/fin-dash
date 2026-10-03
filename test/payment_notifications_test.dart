@@ -158,7 +158,7 @@ void main() {
       await inbox.dismiss('a' * 64);
       await inbox.ingest([event('a', 'refund')]);
       expect(inbox.records.single['status'], 'ignored');
-      expect(inbox.records.single['text'], '');
+      expect(inbox.records.single['text'], event('a', 'refund')['text']);
     },
   );
 

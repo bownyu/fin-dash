@@ -2,8 +2,23 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'storage_base.dart';
 export 'storage_base.dart';
 
-class LocalWalletStorage implements WalletStorage {
+class LocalWalletStorage implements WalletStorage, RestorePointStorage {
   static const key = 'findash_flutter_ledger_v1';
+  @override
+  Future<String?> loadRestorePoint() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString('$key.restore-point');
+    return raw == null ? null : unseal(raw);
+  }
+
+  @override
+  Future<void> saveRestorePoint(String data) async {
+    final prefs = await SharedPreferences.getInstance();
+    if (!await prefs.setString('$key.restore-point', seal(data))) {
+      throw StateError('恢复前快照未保存，当前账本未替换');
+    }
+  }
+
   @override
   Future<String?> load() async {
     final prefs = await SharedPreferences.getInstance();

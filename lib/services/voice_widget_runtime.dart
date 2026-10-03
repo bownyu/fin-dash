@@ -54,15 +54,57 @@ class VoiceWidgetRuntime {
           }
           final accounts = store.activeAccounts;
           if (accounts.isEmpty) throw const FormatException('请先在 App 添加账户');
-          final field = draft.fields['type'] == 'transfer'
-              ? (draft.fields['transferFromId'] == null
-                    ? 'transferFromId'
-                    : 'transferToId')
-              : 'accountId';
-          final index = accounts.indexWhere((a) => a.id == draft.fields[field]);
-          draft = draft.update({
-            field: accounts[(index + 1) % accounts.length].id,
-          });
+          final transfer = draft.fields['type'] == 'transfer';
+          if (transfer &&
+              ![
+                'transferFromId',
+                'transferToId',
+              ].contains(request['accountField'])) {
+            final pairs = [
+              for (final from in accounts)
+                for (final to in accounts)
+                  if (from.id != to.id) (from.id, to.id),
+            ];
+            if (pairs.isEmpty) {
+              throw const FormatException('转账需要两个不同账户，请先在 App 添加账户');
+            }
+            final index = pairs.indexWhere(
+              (pair) =>
+                  pair.$1 == draft.fields['transferFromId'] &&
+                  pair.$2 == draft.fields['transferToId'],
+            );
+            final next = pairs[(index + 1) % pairs.length];
+            draft = draft.update({
+              'transferFromId': next.$1,
+              'transferToId': next.$2,
+            });
+          } else {
+            final field = draft.fields['type'] == 'transfer'
+                ? ([
+                        'transferFromId',
+                        'transferToId',
+                      ].contains(request['accountField'])
+                      ? request['accountField'] as String
+                      : draft.fields['transferFromId'] == null
+                      ? 'transferFromId'
+                      : 'transferToId')
+                : 'accountId';
+            final opposite = field == 'transferFromId'
+                ? draft.fields['transferToId']
+                : field == 'transferToId'
+                ? draft.fields['transferFromId']
+                : null;
+            final choices = accounts.where((a) => a.id != opposite).toList();
+            if (choices.isEmpty) {
+              throw const FormatException('转账需要两个不同的可用账户，请先在 App 添加账户');
+            }
+            final index = choices.indexWhere(
+              (a) => a.id == draft.fields[field],
+            );
+            draft = draft.update({
+              field: choices[(index + 1) % choices.length].id,
+            });
+          }
         } else {
           final preferred = store.data.settings['quickEntryAccountId'];
           final accounts = store.activeAccounts;
@@ -86,7 +128,9 @@ class VoiceWidgetRuntime {
           'canConfirm': problem == null,
           'needsClarification': problem != null,
           'message': problem == null
-              ? '点账单换账户 · 右侧确认'
+              ? draft.fields['type'] == 'transfer'
+                    ? '点摘要换组合 · 可分别换转出／转入'
+                    : '点账单换账户 · 右侧确认'
               : accountMissing
               ? '点账单选择付款账户'
               : draft.fields['amountCents'] == null
@@ -110,7 +154,9 @@ class VoiceWidgetRuntime {
         .where((t) => t.name == fields['type'])
         .firstOrNull;
     final amount = fields['amountCents'] is int
-        ? money(fields['amountCents'])
+        ? store.data.settings['visible'] == false
+              ? '¥ ••••••'
+              : money(fields['amountCents'])
         : '金额待补充';
     final account = type == TxType.transfer
         ? '${store.account(fields['transferFromId'])?.name ?? '转出待选'} → ${store.account(fields['transferToId'])?.name ?? '转入待选'}'

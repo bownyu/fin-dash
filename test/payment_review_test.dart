@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:fin_dash/ui/interaction.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:fin_dash/main.dart';
 import 'package:fin_dash/data/storage_base.dart';
@@ -83,10 +84,8 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      expect(find.text('取消全选'), findsOneWidget);
-      await tester.tap(find.byKey(const Key('payment-select-all')));
-      await tester.pumpAndSettle();
       expect(find.text('全选'), findsOneWidget);
+      expect(find.text('选择记录后可一起确认'), findsOneWidget);
       await tester.tap(find.byKey(const Key('payment-select-all')));
       await tester.pumpAndSettle();
       final id = 'b' * 64;
@@ -96,7 +95,7 @@ void main() {
       expect(find.byType(TransactionEditor), findsNothing);
       await tester.tap(find.byKey(ValueKey('payment-details:$id')));
       await tester.pumpAndSettle();
-      await tester.tap(find.byType(DropdownButtonFormField<String>));
+      await tester.tap(find.byType(WalletSelectField<String>));
       await tester.pumpAndSettle();
       await tester.tap(find.text('银行卡').last);
       await tester.pumpAndSettle();
@@ -317,7 +316,9 @@ void main() {
       await tester.tap(find.text('去核对'));
       await tester.pumpAndSettle();
       expect(find.byType(PaymentReviewPage), findsOneWidget);
-      await tester.tap(find.byType(DropdownButtonFormField<String>));
+      await tester.tap(find.byKey(const Key('payment-select-all')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byType(WalletSelectField<String>));
       await tester.pumpAndSettle();
       await tester.tap(find.text('银行卡').last);
       await tester.pumpAndSettle();

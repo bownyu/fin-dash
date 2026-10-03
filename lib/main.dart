@@ -11,7 +11,6 @@ import 'ui/editors.dart';
 import 'ui/finance_pages.dart';
 import 'ui/preferences.dart';
 import 'services/voice_widget_runtime.dart';
-import 'ui/voice_entry_page.dart';
 import 'ui/payment_entry_reminder.dart';
 
 Future<void> main(List<String> args) async {
@@ -212,10 +211,11 @@ class _Shell extends StatefulWidget {
 }
 
 class _ShellState extends State<_Shell> {
+  final _billsKey = GlobalKey<BillsPageState>();
   late final List<Widget> _pages = [
     HomePage(onBills: () => select(2), onStats: () => select(1)),
     const StatsPage(),
-    const BillsPage(),
+    BillsPage(key: _billsKey),
     const ProfilePage(),
   ];
   final _visited = <int>{0};
@@ -251,19 +251,15 @@ class _ShellState extends State<_Shell> {
     return PopScope(
       canPop: index == 0,
       onPopInvokedWithResult: (didPop, _) {
-        if (!didPop) select(0);
+        if (!didPop) {
+          if (index == 2 && _billsKey.currentState?.exitSelection() == true) {
+            return;
+          }
+          select(0);
+        }
       },
       child: Scaffold(
         extendBody: true,
-        floatingActionButton: index == 0
-            ? FloatingActionButton.extended(
-                key: const Key('home-voice-entry'),
-                heroTag: 'voice-entry',
-                onPressed: () => openVoiceEntry(context),
-                icon: const Icon(Icons.mic_rounded),
-                label: const Text('语音记账'),
-              )
-            : null,
         body: SafeArea(
           bottom: false,
           child: Column(

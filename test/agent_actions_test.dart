@@ -231,7 +231,7 @@ void main() {
         throwsFormatException,
       );
       await expectLater(
-        actions.propose('account', {'id': 'bank', 'billingDay': 31}),
+        actions.propose('account', {'id': 'bank', 'billingDay': 32}),
         throwsFormatException,
       );
       await expectLater(

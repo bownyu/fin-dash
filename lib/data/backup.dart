@@ -198,8 +198,8 @@ void validateWallet(WalletData data, {bool allowUnlinked = true}) {
       throw const FormatException('账户信息不合法');
     }
     for (final day in [a.billingDay, a.repaymentDay]) {
-      if (day != null && (day < 1 || day > 28)) {
-        throw const FormatException('账单日与还款日必须为 1–28');
+      if (day != null && (day < 1 || day > 31)) {
+        throw const FormatException('账单日与还款日必须为 1–31');
       }
     }
   }

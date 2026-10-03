@@ -91,7 +91,7 @@ class _AgentBatchCardState extends State<AgentBatchCard> {
               ? muted.withValues(alpha: .2)
               : primary.withValues(alpha: .3),
         ),
-        borderRadius: BorderRadius.circular(14),
+        borderRadius: BorderRadius.circular(20),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,

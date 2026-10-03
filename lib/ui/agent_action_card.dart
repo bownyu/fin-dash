@@ -89,7 +89,7 @@ class _AgentActionCardState extends State<AgentActionCard> {
               ? primary.withValues(alpha: .25)
               : muted.withValues(alpha: .2),
         ),
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: BorderRadius.circular(20),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,

@@ -7,6 +7,7 @@ import 'package:image_picker/image_picker.dart';
 import '../domain/models.dart';
 import '../services/ai_service.dart';
 import 'design.dart';
+import 'interaction.dart';
 import 'preferences.dart';
 import 'agent_actions_page.dart';
 import 'agent_action_card.dart';
@@ -33,6 +34,9 @@ class _ChatPageState extends State<ChatPage> {
   AiService? observedAi;
   bool scrollQueued = false;
   AiImage? attachment;
+  String? composerSession;
+  String? initialSession;
+  final drafts = <String, (String, AiImage?)>{};
 
   Future<void> pickImage() async {
     final ai = AppScope.of(context).ai;
@@ -77,6 +81,25 @@ class _ChatPageState extends State<ChatPage> {
       input.text = widget.initialPrompt!;
     }
     final ai = AppScope.of(context).ai;
+    if (composerSession != ai.activeSessionId) {
+      initialSession ??= ai.activeSessionId;
+      if (composerSession != null) {
+        if (input.text.trim().isNotEmpty || attachment != null) {
+          drafts[composerSession!] = (input.text, attachment);
+        } else {
+          drafts.remove(composerSession);
+        }
+        final restored = drafts.remove(ai.activeSessionId);
+        input.text = restored?.$1 ?? '';
+        attachment = restored?.$2;
+      }
+      composerSession = ai.activeSessionId;
+      messageCount = -1;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && scroll.hasClients) scroll.jumpTo(0);
+      });
+    }
+
     if (observedAi != ai) {
       observedAi?.liveUpdates.removeListener(followOutput);
       observedAi = ai;
@@ -125,7 +148,13 @@ class _ChatPageState extends State<ChatPage> {
     input.clear();
     final image = attachment;
     setState(() => attachment = null);
-    await ai.send(text, analysisRange: widget.analysisRange, image: image);
+    await ai.send(
+      text,
+      analysisRange: ai.activeSessionId == initialSession
+          ? widget.analysisRange
+          : null,
+      image: image,
+    );
     if (mounted &&
         ai.error != null &&
         !ai.lastPromptStored &&
@@ -157,8 +186,21 @@ class _ChatPageState extends State<ChatPage> {
   }
 
   Future<void> newConversation() async {
+    if ((input.text.trim().isNotEmpty || attachment != null) &&
+        !await confirm(
+          context,
+          '新建对话？',
+          '当前未发送的文字和图片将被清除。',
+          action: '新建对话',
+          cancelLabel: '继续编辑',
+        )) {
+      return;
+    }
+    if (!mounted) return;
     final ai = AppScope.of(context).ai;
+    final previousSession = ai.activeSessionId;
     if (await perform(context, ai.newConversation) && mounted) {
+      drafts.remove(previousSession);
       input.clear();
       setState(() {
         attachment = null;
@@ -225,266 +267,308 @@ class _ChatPageState extends State<ChatPage> {
               a['status'] == 'pending' && !proposalOwners.containsKey(a['id']),
         )
         .toList();
-    return Scaffold(
-      appBar: AppBar(
-        title: Column(
-          children: [
-            Text(store.data.agent['name'] ?? 'AI 顾问'),
-            Text(
-              ai.busy
-                  ? store.aiStatus!
-                  : (ai.config['model'] as String).isEmpty
-                  ? '请配置模型'
-                  : '${ai.configurationName(ai.provider)} · ${ai.config['model']}',
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(fontSize: 11, color: muted),
-            ),
-          ],
-        ),
-        actions: [
-          IconButton(
-            tooltip: '新建对话',
-            onPressed: ai.busy ? null : newConversation,
-            icon: const Icon(Icons.add_comment_outlined),
-          ),
-          IconButton(
-            tooltip: '历史对话',
-            onPressed: () => openPage(context, const ChatHistoryPage()),
-            icon: const Icon(Icons.history_rounded),
-          ),
-          PopupMenuButton<String>(
-            tooltip: '更多',
-            itemBuilder: (_) => const [
-              PopupMenuItem(value: 'providers', child: Text('切换供应商')),
-              PopupMenuItem(value: 'actions', child: Text('操作管理')),
-              PopupMenuItem(value: 'memory', child: Text('顾问记忆')),
-            ],
-            onSelected: (value) => openPage(
-              context,
-              value == 'actions'
-                  ? const AgentActionsPage()
-                  : value == 'providers'
-                  ? const AiSettingsPage()
-                  : const AgentStatePage(),
-            ),
-          ),
-        ],
-      ),
-      body: Column(
-        children: [
-          Expanded(
-            child: _LazyChatList(
-              controller: scroll,
-              reverse: messages.isNotEmpty,
-              padding: const EdgeInsets.fromLTRB(20, 10, 20, 24),
+    return EditorGuard(
+      busy: false,
+      hasChanges: () =>
+          input.text.trim().isNotEmpty ||
+          attachment != null ||
+          drafts.isNotEmpty,
+      child: Builder(
+        builder: (context) => Scaffold(
+          appBar: AppBar(
+            title: Column(
               children: [
-                if (messages.isEmpty && unlinked.isEmpty) ...[
-                  EmptyState(
-                    '给每一笔钱，一个更好的计划',
-                    '我可以分析真实账单、读取账户设置，并根据文字或截图准备可核对的账户和账单变更。',
-                    icon: Icons.auto_awesome_rounded,
-                  ),
-                  Panel(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
+                Text(store.data.agent['name'] ?? 'AI 顾问'),
+                Text(
+                  ai.busy
+                      ? store.aiStatus!
+                      : (ai.config['model'] as String).isEmpty
+                      ? '请配置模型'
+                      : '${ai.configurationName(ai.provider)} · ${ai.config['model']}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 11, color: muted),
+                ),
+              ],
+            ),
+            actions: [
+              IconButton(
+                tooltip: '新建对话',
+                onPressed: ai.busy ? null : newConversation,
+                icon: const Icon(Icons.add_comment_outlined),
+              ),
+              IconButton(
+                tooltip: '历史对话',
+                onPressed: () => openPage(
+                  context,
+                  const ChatHistoryPage(returnToChat: true),
+                ),
+                icon: const Icon(Icons.history_rounded),
+              ),
+              PopupMenuButton<String>(
+                tooltip: '更多',
+                itemBuilder: (_) => const [
+                  PopupMenuItem(
+                    value: 'providers',
+                    child: Row(
                       children: [
-                        const Text(
-                          '从这里开始',
-                          style: TextStyle(fontWeight: FontWeight.w600),
-                        ),
-                        const SizedBox(height: 8),
-                        const Text(
-                          '先在 AI 设置中连接模型服务，再告诉我你想改善的收支问题。',
-                          style: TextStyle(color: muted, fontSize: 13),
-                        ),
-                        TextButton(
-                          onPressed: () =>
-                              openPage(context, const AiSettingsPage()),
-                          child: const Text('打开 AI 设置 →'),
-                        ),
+                        Icon(Icons.dns_outlined, size: 20),
+                        SizedBox(width: 12),
+                        Text('切换供应商'),
+                      ],
+                    ),
+                  ),
+                  PopupMenuItem(
+                    value: 'actions',
+                    child: Row(
+                      children: [
+                        Icon(Icons.fact_check_outlined, size: 20),
+                        SizedBox(width: 12),
+                        Text('操作管理'),
+                      ],
+                    ),
+                  ),
+                  PopupMenuItem(
+                    value: 'memory',
+                    child: Row(
+                      children: [
+                        Icon(Icons.psychology_outlined, size: 20),
+                        SizedBox(width: 12),
+                        Text('顾问记忆'),
                       ],
                     ),
                   ),
                 ],
-                ...messages.map((m) {
-                  final linkedActions = actions
-                      .where((a) => proposalOwners[a['id']] == m['id'])
-                      .toList();
-                  final linkedBatches = batches
-                      .where((b) => batchOwners[b['id']] == m['id'])
-                      .toList();
-                  final key = ValueKey('chat-message:${m['id']}');
-                  if (m['id'] == ai.liveMessage?['id']) {
-                    return ValueListenableBuilder<int>(
-                      key: key,
-                      valueListenable: ai.liveUpdates,
-                      builder: (context, _, child) => _Message(
-                        ai.liveMessage ?? m,
-                        actions: linkedActions,
-                        batches: linkedBatches,
+                onSelected: (value) => openPage(
+                  context,
+                  value == 'actions'
+                      ? const AgentActionsPage()
+                      : value == 'providers'
+                      ? const AiSettingsPage()
+                      : const AgentStatePage(),
+                ),
+              ),
+            ],
+          ),
+          body: Column(
+            children: [
+              Expanded(
+                child: _LazyChatList(
+                  controller: scroll,
+                  reverse: messages.isNotEmpty,
+                  padding: const EdgeInsets.fromLTRB(20, 10, 20, 24),
+                  children: [
+                    if (messages.isEmpty && unlinked.isEmpty) ...[
+                      EmptyState(
+                        '给每一笔钱，一个更好的计划',
+                        '我可以分析真实账单、读取账户设置，并根据文字或截图准备可核对的账户和账单变更。',
+                        icon: Icons.auto_awesome_rounded,
                       ),
-                    );
-                  }
-                  return _Message(
-                    m,
-                    key: key,
-                    actions: linkedActions,
-                    batches: linkedBatches,
-                  );
-                }),
-                for (final b in unlinkedBatches)
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 14),
-                    child: AgentBatchCard(
-                      key: ValueKey(b['id']),
-                      batchId: b['id'],
-                    ),
-                  ),
-                for (final a in unlinked)
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 14),
-                    child: AgentActionCard(key: ValueKey(a['id']), action: a),
-                  ),
-                if (ai.busy)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 14),
-                    child: Row(
-                      children: [
-                        const SizedBox.square(
-                          dimension: 15,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: Text(
-                            store.aiStatus!,
-                            style: const TextStyle(color: muted),
-                          ),
-                        ),
-                        TextButton(
-                          onPressed: ai.cancel,
-                          child: const Text('停止'),
-                        ),
-                      ],
-                    ),
-                  ),
-                if (ai.error != null)
-                  Panel(
-                    padding: const EdgeInsets.all(14),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        SelectableText(
-                          ai.error!,
-                          style: const TextStyle(color: coral),
-                        ),
-                        Row(
+                      Panel(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            TextButton(
-                              onPressed: ai.busy ? null : retry,
-                              child: const Text('重试'),
+                            const Text(
+                              '从这里开始',
+                              style: TextStyle(fontWeight: FontWeight.w600),
+                            ),
+                            const SizedBox(height: 8),
+                            const Text(
+                              '先在 AI 设置中连接模型服务，再告诉我你想改善的收支问题。',
+                              style: TextStyle(color: muted, fontSize: 13),
                             ),
                             TextButton(
                               onPressed: () =>
                                   openPage(context, const AiSettingsPage()),
-                              child: const Text('检查设置'),
+                              child: const Text('打开 AI 设置 →'),
                             ),
                           ],
                         ),
-                      ],
-                    ),
-                  ),
-              ],
-            ),
-          ),
-          if (!ai.busy)
-            SizedBox(
-              height: 44,
-              child: ListView(
-                scrollDirection: Axis.horizontal,
-                padding: const EdgeInsets.symmetric(horizontal: 20),
-                children: [
-                  for (final prompt in ['今日分析', '本周总结', '异常检测'])
-                    Padding(
-                      padding: const EdgeInsets.only(right: 8),
-                      child: ActionChip(
-                        label: Text(prompt),
-                        onPressed: () => send(switch (prompt) {
-                          '今日分析' => '请分析今天的收入与支出。',
-                          '本周总结' => '请总结本周的收支与主要变化。',
-                          _ => '请根据真实账单检测最近30天异常支出。',
-                        }),
                       ),
-                    ),
-                ],
-              ),
-            ),
-          if (attachment != null)
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: Row(
-                children: [
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(8),
-                    child: Image.memory(
-                      attachment!.bytes,
-                      width: 56,
-                      height: 56,
-                      fit: BoxFit.cover,
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  const Expanded(
-                    child: Text(
-                      '发送时上传至所配置的 AI 服务，图片保存在本机。',
-                      style: TextStyle(fontSize: 12),
-                    ),
-                  ),
-                  IconButton(
-                    tooltip: '移除截图',
-                    onPressed: () => setState(() => attachment = null),
-                    icon: const Icon(Icons.close),
-                  ),
-                ],
-              ),
-            ),
-          SafeArea(
-            top: false,
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(16, 10, 16, 12),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  IconButton(
-                    tooltip: '添加截图',
-                    onPressed: ai.busy ? null : pickImage,
-                    icon: const Icon(Icons.add_photo_alternate_outlined),
-                  ),
-                  Expanded(
-                    child: TextField(
-                      controller: input,
-                      minLines: 1,
-                      maxLines: 4,
-                      maxLength: 3000,
-                      textInputAction: TextInputAction.newline,
-                      decoration: const InputDecoration(
-                        hintText: '分析账单，或描述想调整的账户…',
-                        counterText: '',
+                    ],
+                    ...messages.map((m) {
+                      final linkedActions = actions
+                          .where((a) => proposalOwners[a['id']] == m['id'])
+                          .toList();
+                      final linkedBatches = batches
+                          .where((b) => batchOwners[b['id']] == m['id'])
+                          .toList();
+                      final key = ValueKey('chat-message:${m['id']}');
+                      if (m['id'] == ai.liveMessage?['id']) {
+                        return ValueListenableBuilder<int>(
+                          key: key,
+                          valueListenable: ai.liveUpdates,
+                          builder: (context, _, child) => _Message(
+                            ai.liveMessage ?? m,
+                            actions: linkedActions,
+                            batches: linkedBatches,
+                          ),
+                        );
+                      }
+                      return _Message(
+                        m,
+                        key: key,
+                        actions: linkedActions,
+                        batches: linkedBatches,
+                      );
+                    }),
+                    for (final b in unlinkedBatches)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 14),
+                        child: AgentBatchCard(
+                          key: ValueKey(b['id']),
+                          batchId: b['id'],
+                        ),
                       ),
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  IconButton.filled(
-                    tooltip: '发送',
-                    onPressed: ai.busy ? null : () => send(),
-                    icon: const Icon(Icons.arrow_upward_rounded),
-                  ),
-                ],
+                    for (final a in unlinked)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 14),
+                        child: AgentActionCard(
+                          key: ValueKey(a['id']),
+                          action: a,
+                        ),
+                      ),
+                    if (ai.busy)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 14),
+                        child: Row(
+                          children: [
+                            const SizedBox.square(
+                              dimension: 15,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            ),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: Text(
+                                store.aiStatus!,
+                                style: const TextStyle(color: muted),
+                              ),
+                            ),
+                            TextButton(
+                              onPressed: ai.cancel,
+                              child: const Text('停止'),
+                            ),
+                          ],
+                        ),
+                      ),
+                    if (ai.error != null)
+                      Panel(
+                        padding: const EdgeInsets.all(14),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            SelectableText(
+                              ai.error!,
+                              style: const TextStyle(color: coral),
+                            ),
+                            Row(
+                              children: [
+                                TextButton(
+                                  onPressed: ai.busy ? null : retry,
+                                  child: const Text('重试'),
+                                ),
+                                TextButton(
+                                  onPressed: () =>
+                                      openPage(context, const AiSettingsPage()),
+                                  child: const Text('检查设置'),
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
+                  ],
+                ),
               ),
-            ),
+              if (!ai.busy)
+                SizedBox(
+                  height: 44,
+                  child: ListView(
+                    scrollDirection: Axis.horizontal,
+                    padding: const EdgeInsets.symmetric(horizontal: 20),
+                    children: [
+                      for (final prompt in ['今日分析', '本周总结', '异常检测'])
+                        Padding(
+                          padding: const EdgeInsets.only(right: 8),
+                          child: ActionChip(
+                            label: Text(prompt),
+                            onPressed: () => send(switch (prompt) {
+                              '今日分析' => '请分析今天的收入与支出。',
+                              '本周总结' => '请总结本周的收支与主要变化。',
+                              _ => '请根据真实账单检测最近30天异常支出。',
+                            }),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              if (attachment != null)
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  child: Row(
+                    children: [
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(8),
+                        child: Image.memory(
+                          attachment!.bytes,
+                          width: 56,
+                          height: 56,
+                          fit: BoxFit.cover,
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      const Expanded(
+                        child: Text(
+                          '发送时上传至所配置的 AI 服务，图片保存在本机。',
+                          style: TextStyle(fontSize: 12),
+                        ),
+                      ),
+                      IconButton(
+                        tooltip: '移除截图',
+                        onPressed: () => setState(() => attachment = null),
+                        icon: const Icon(Icons.close),
+                      ),
+                    ],
+                  ),
+                ),
+              SafeArea(
+                top: false,
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 10, 16, 12),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    children: [
+                      IconButton(
+                        tooltip: '添加截图',
+                        onPressed: ai.busy ? null : pickImage,
+                        icon: const Icon(Icons.add_photo_alternate_outlined),
+                      ),
+                      Expanded(
+                        child: TextField(
+                          controller: input,
+                          minLines: 1,
+                          maxLines: 4,
+                          maxLength: 3000,
+                          textInputAction: TextInputAction.newline,
+                          decoration: const InputDecoration(
+                            hintText: '分析账单，或描述想调整的账户…',
+                            counterText: '',
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      IconButton.filled(
+                        tooltip: '发送',
+                        onPressed: ai.busy ? null : () => send(),
+                        icon: const Icon(Icons.arrow_upward_rounded),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
           ),
-        ],
+        ),
       ),
     );
   }
@@ -962,7 +1046,8 @@ class _ProcessingTrace extends StatelessWidget {
 }
 
 class ChatHistoryPage extends StatelessWidget {
-  const ChatHistoryPage({super.key});
+  final bool returnToChat;
+  const ChatHistoryPage({super.key, this.returnToChat = false});
   @override
   Widget build(BuildContext context) {
     final ai = AppScope.of(context).ai;
@@ -1007,11 +1092,15 @@ class ChatHistoryPage extends StatelessWidget {
                                 () => ai.switchConversation(session['id']),
                               ) &&
                               context.mounted) {
-                            Navigator.of(context).pushReplacement(
-                              MaterialPageRoute(
-                                builder: (_) => const ChatPage(),
-                              ),
-                            );
+                            if (returnToChat) {
+                              Navigator.pop(context);
+                            } else {
+                              Navigator.of(context).pushReplacement(
+                                MaterialPageRoute(
+                                  builder: (_) => const ChatPage(),
+                                ),
+                              );
+                            }
                           }
                         },
                 ),
