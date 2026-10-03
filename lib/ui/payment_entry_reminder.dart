@@ -133,6 +133,10 @@ class _PaymentEntryReminderState extends State<PaymentEntryReminder>
         useSafeArea: true,
         isDismissible: false,
         enableDrag: false,
+        clipBehavior: Clip.antiAlias,
+        shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+        ),
         builder: (_) => FractionallySizedBox(
           heightFactor: .9,
           child: PaymentReviewPage(notifications: service, reminder: true),

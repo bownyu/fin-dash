@@ -3,12 +3,15 @@ import 'dart:typed_data';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
-import '../data/backup.dart';
+import '../app_version.dart';
+import '../services/backup_bundle.dart';
+import 'ota_page.dart';
 import '../domain/models.dart';
 import '../services/ai_service.dart';
 import '../services/file_export.dart';
 import 'ai_pages.dart';
 import 'design.dart';
+import 'interaction.dart';
 import 'editors.dart';
 import 'finance_pages.dart';
 import 'agent_actions_page.dart';
@@ -421,7 +424,7 @@ class ProfilePage extends StatelessWidget {
         const SizedBox(height: 22),
         TextButton(
           onPressed: () async {
-            if (await confirm(context, '退出个人档案？', '账单和账户仍保存在本机，下次进入即可继续。')) {
+            if (await confirm(context, '返回欢迎页？', '账单和账户仍保存在本机，下次进入即可继续。')) {
               if (context.mounted) {
                 AppScope.of(context).ai.cancel();
                 await perform(
@@ -431,12 +434,12 @@ class ProfilePage extends StatelessWidget {
               }
             }
           },
-          child: const Text('退出个人档案', style: TextStyle(color: coral)),
+          child: const Text('返回欢迎页', style: TextStyle(color: coral)),
         ),
         const SizedBox(height: 12),
         const Center(
           child: Text(
-            'FinDash 1.1.0',
+            'FinDash $appVersion',
             textAlign: TextAlign.center,
             style: TextStyle(color: muted, fontSize: 11, height: 1.8),
           ),
@@ -597,6 +600,8 @@ class _ProfileEditorState extends State<ProfileEditor> {
       email = TextEditingController();
   String avatar = '🌿';
   bool initialized = false, saving = false;
+  String? baseline;
+  String get snapshot => formSnapshot([name.text, email.text, avatar]);
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
@@ -606,6 +611,7 @@ class _ProfileEditorState extends State<ProfileEditor> {
     name.text = profile['name'] ?? '';
     email.text = profile['email'] ?? '';
     avatar = profile['avatar'] ?? '🌿';
+    baseline = snapshot;
   }
 
   @override
@@ -637,81 +643,89 @@ class _ProfileEditorState extends State<ProfileEditor> {
   }
 
   @override
-  Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(title: const Text('编辑个人资料')),
-    body: Form(
-      key: form,
-      child: PageList(
-        children: [
-          Center(child: Avatar(avatar, size: 96)),
-          const SizedBox(height: 20),
-          Wrap(
-            alignment: WrapAlignment.center,
-            spacing: 12,
-            runSpacing: 12,
-            children: ['🌿', '🐱', '🌙', '🦊', '🐼', '🌊', '🌻', '🚀']
-                .map(
-                  (s) => InkWell(
-                    onTap: () => setState(() => avatar = s),
-                    child: Avatar(s, size: 44),
-                  ),
-                )
-                .toList(),
-          ),
-          Center(
-            child: TextButton.icon(
-              onPressed: image,
-              icon: const Icon(Icons.photo_library_outlined),
-              label: const Text('从相册选择头像'),
-            ),
-          ),
-          const SizedBox(height: 20),
-          TextFormField(
-            controller: name,
-            maxLength: 20,
-            decoration: const InputDecoration(labelText: '昵称'),
-            validator: (v) => v!.trim().length < 2 ? '昵称至少 2 个字符' : null,
-          ),
-          const SizedBox(height: 16),
-          TextFormField(
-            controller: email,
-            keyboardType: TextInputType.emailAddress,
-            decoration: const InputDecoration(labelText: '邮箱（可选）'),
-            validator: (v) =>
-                v!.trim().isNotEmpty &&
-                    !RegExp(r'^[^\s@]+@[^\s@]+\.[^\s@]+$').hasMatch(v.trim())
-                ? '请输入有效邮箱'
-                : null,
-          ),
-          const SizedBox(height: 24),
-          FilledButton(
-            onPressed: saving
-                ? null
-                : () async {
-                    if (!form.currentState!.validate()) return;
-                    setState(() => saving = true);
-                    final ok = await perform(
-                      context,
-                      () => AppScope.storeOf(context).change(
-                        (d) => d.profile = {
-                          ...d.profile,
-                          'name': name.text.trim(),
-                          'email': email.text.trim(),
-                          'avatar': avatar,
-                        },
+  Widget build(BuildContext context) => EditorGuard(
+    busy: saving,
+    hasChanges: () => baseline != null && baseline != snapshot,
+    child: Builder(
+      builder: (context) => Scaffold(
+        appBar: AppBar(title: const Text('编辑个人资料')),
+        body: Form(
+          key: form,
+          child: PageList(
+            children: [
+              Center(child: Avatar(avatar, size: 96)),
+              const SizedBox(height: 20),
+              Wrap(
+                alignment: WrapAlignment.center,
+                spacing: 12,
+                runSpacing: 12,
+                children: ['🌿', '🐱', '🌙', '🦊', '🐼', '🌊', '🌻', '🚀']
+                    .map(
+                      (s) => InkWell(
+                        onTap: () => setState(() => avatar = s),
+                        child: Avatar(s, size: 44),
                       ),
-                    );
-                    if (context.mounted) {
-                      if (ok) {
-                        Navigator.pop(context);
-                      } else {
-                        setState(() => saving = false);
-                      }
-                    }
-                  },
-            child: const Text('保存资料'),
+                    )
+                    .toList(),
+              ),
+              Center(
+                child: TextButton.icon(
+                  onPressed: image,
+                  icon: const Icon(Icons.photo_library_outlined),
+                  label: const Text('从相册选择头像'),
+                ),
+              ),
+              const SizedBox(height: 20),
+              TextFormField(
+                controller: name,
+                maxLength: 20,
+                decoration: const InputDecoration(labelText: '昵称'),
+                validator: (v) => v!.trim().length < 2 ? '昵称至少 2 个字符' : null,
+              ),
+              const SizedBox(height: 16),
+              TextFormField(
+                controller: email,
+                keyboardType: TextInputType.emailAddress,
+                decoration: const InputDecoration(labelText: '邮箱（可选）'),
+                validator: (v) =>
+                    v!.trim().isNotEmpty &&
+                        !RegExp(
+                          r'^[^\s@]+@[^\s@]+\.[^\s@]+$',
+                        ).hasMatch(v.trim())
+                    ? '请输入有效邮箱'
+                    : null,
+              ),
+              const SizedBox(height: 24),
+              FilledButton(
+                onPressed: saving
+                    ? null
+                    : () async {
+                        if (!form.currentState!.validate()) return;
+                        setState(() => saving = true);
+                        final ok = await perform(
+                          context,
+                          () => AppScope.storeOf(context).change(
+                            (d) => d.profile = {
+                              ...d.profile,
+                              'name': name.text.trim(),
+                              'email': email.text.trim(),
+                              'avatar': avatar,
+                            },
+                          ),
+                        );
+                        if (context.mounted) {
+                          if (ok) {
+                            Navigator.pop(context);
+                          } else {
+                            setState(() => saving = false);
+                          }
+                        }
+                      },
+                child: const Text('保存资料'),
+              ),
+            ],
           ),
-        ],
+        ),
       ),
     ),
   );
@@ -771,7 +785,7 @@ class QuickEntriesPage extends StatelessWidget {
                   leading: IconBadge(q.icon, txColor(q.type)),
                   title: Text(q.title),
                   subtitle: Text(
-                    '${q.type.label} · ${q.amount == null ? '自定金额' : money(q.amount!)} · ${store.account(q.accountId)?.name ?? (q.type == TxType.transfer ? '${store.account(q.fromId)?.name ?? '待选'} → ${store.account(q.toId)?.name ?? '待选'}' : '记账时选择账户')}',
+                    '${q.type.label} · ${q.amount == null ? '自定金额' : privateMoney(context, q.amount!)} · ${store.account(q.accountId)?.name ?? (q.type == TxType.transfer ? '${store.account(q.fromId)?.name ?? '待选'} → ${store.account(q.toId)?.name ?? '待选'}' : '记账时选择账户')}',
                     style: Theme.of(context).textTheme.bodySmall,
                   ),
                   onTap: () => openPage(
@@ -1041,7 +1055,7 @@ class GoalsPage extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(height: 16),
-                DropdownButtonFormField<String>(
+                WalletSelectField<String>(
                   initialValue: status,
                   decoration: const InputDecoration(labelText: '状态'),
                   items: const [
@@ -1169,7 +1183,7 @@ class GoalsPage extends StatelessWidget {
                     ),
                     if (g['targetCents'] != null)
                       Text(
-                        '目标 ${money(g['targetCents'])}',
+                        '目标 ${privateMoney(context, g['targetCents'])}',
                         style: const TextStyle(color: muted),
                       ),
                     if (g['aiAssessment'] != null)
@@ -1265,7 +1279,12 @@ class AiSettingsPage extends StatelessWidget {
                         ),
                       ),
                       if (id == ai.provider)
-                        const Text('使用中', style: TextStyle(color: primary)),
+                        Text(
+                          '${ai.configuration(id)['model']}'.trim().isEmpty
+                              ? '待配置'
+                              : '当前选择',
+                          style: const TextStyle(color: primary),
+                        ),
                     ],
                   ),
                   const SizedBox(height: 8),
@@ -1378,7 +1397,9 @@ class _AiConfigurationEditorState extends State<AiConfigurationEditor> {
       reasoningEffort = 'default';
   bool initialized = false, saving = false, hidden = true, loading = true;
   String? connectionResult;
-  bool connectionFailed = false;
+  bool connectionFailed = false, testing = false;
+  String? baseline;
+  String get snapshot => formSnapshot([formConfiguration, keyInput.text]);
   bool supportsImages = false,
       streaming = true,
       toolsEnabled = true,
@@ -1413,11 +1434,14 @@ class _AiConfigurationEditorState extends State<AiConfigurationEditor> {
     } catch (_) {
       if (mounted) toast(context, '无法读取密钥，请重新填写');
     }
-    if (mounted && provider == value) setState(() => loading = false);
+    if (mounted && provider == value) {
+      baseline = snapshot;
+      setState(() => loading = false);
+    }
   }
 
   Future<void> save({bool close = true}) async {
-    if (saving || loading) return;
+    if (saving || testing || loading) return;
     final scope = AppScope.of(context);
     if (scope.ai.busy) {
       toast(context, '请先停止当前 AI 请求');
@@ -1463,11 +1487,11 @@ class _AiConfigurationEditorState extends State<AiConfigurationEditor> {
   };
 
   Future<void> testConnection() async {
-    if (saving || loading) return;
+    if (saving || testing || loading) return;
     final ai = AppScope.of(context).ai;
     final snapshot = formConfiguration, enteredKey = keyInput.text.trim();
     setState(() {
-      saving = true;
+      testing = true;
       connectionResult = null;
     });
     try {
@@ -1488,7 +1512,7 @@ class _AiConfigurationEditorState extends State<AiConfigurationEditor> {
         });
       }
     } finally {
-      if (mounted) setState(() => saving = false);
+      if (mounted) setState(() => testing = false);
     }
   }
 
@@ -1502,205 +1526,230 @@ class _AiConfigurationEditorState extends State<AiConfigurationEditor> {
   }
 
   @override
-  Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(title: Text(widget.isNew ? '添加供应商配置' : '编辑供应商配置')),
-    body: PageList(
-      children: [
-        Panel(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Icon(Icons.auto_awesome_rounded, color: primary, size: 30),
-              const SizedBox(height: 14),
-              const Text(
-                '连接你的财务顾问',
-                style: TextStyle(fontSize: 19, fontWeight: FontWeight.w700),
-              ),
-              const SizedBox(height: 8),
-              const Text(
-                '自定义 OpenAI 兼容接口，支持 Responses 和 Chat Completions。密钥单独保存，不包含在账本备份中。',
-                style: TextStyle(color: muted, fontSize: 13),
-              ),
-            ],
-          ),
-        ),
-        const SizedBox(height: 22),
-        TextField(
-          key: const Key('provider-name'),
-          controller: name,
-          enabled: !saving && !loading,
-          decoration: const InputDecoration(
-            labelText: '配置名称',
-            hintText: '例如：日常记账、备用供应商',
-          ),
-        ),
-        const SizedBox(height: 18),
-        DropdownButtonFormField<String>(
-          initialValue: protocol,
-          isExpanded: true,
-          decoration: const InputDecoration(labelText: '接口协议'),
-          items: const [
-            DropdownMenuItem(
-              value: responsesProtocol,
-              child: Text('Responses'),
-            ),
-            DropdownMenuItem(
-              value: chatProtocol,
-              child: Text('Chat Completions'),
-            ),
-          ],
-          onChanged: saving || loading
-              ? null
-              : (v) => setState(() => protocol = v!),
-        ),
-        const SizedBox(height: 18),
-        TextField(
-          enabled: !saving && !loading,
-          controller: keyInput,
-          key: const Key('provider-key'),
-          obscureText: hidden,
-          enableSuggestions: false,
-          autocorrect: false,
-          decoration: InputDecoration(
-            labelText: 'API 密钥',
-            suffixIcon: IconButton(
-              tooltip: hidden ? '显示密钥' : '隐藏密钥',
-              onPressed: () => setState(() => hidden = !hidden),
-              icon: Icon(
-                hidden
-                    ? Icons.visibility_outlined
-                    : Icons.visibility_off_outlined,
+  Widget build(BuildContext context) => EditorGuard(
+    busy: saving || testing,
+    hasChanges: () => baseline != null && baseline != snapshot,
+    child: Builder(
+      builder: (context) => Scaffold(
+        appBar: AppBar(title: Text(widget.isNew ? '添加供应商配置' : '编辑供应商配置')),
+        body: PageList(
+          children: [
+            Panel(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Icon(
+                    Icons.auto_awesome_rounded,
+                    color: primary,
+                    size: 30,
+                  ),
+                  const SizedBox(height: 14),
+                  const Text(
+                    '连接你的财务顾问',
+                    style: TextStyle(fontSize: 19, fontWeight: FontWeight.w700),
+                  ),
+                  const SizedBox(height: 8),
+                  const Text(
+                    '自定义 OpenAI 兼容接口，支持 Responses 和 Chat Completions。密钥单独保存，不包含在账本备份中。',
+                    style: TextStyle(color: muted, fontSize: 13),
+                  ),
+                ],
               ),
             ),
-          ),
-        ),
-        const SizedBox(height: 18),
-        TextField(
-          enabled: !saving && !loading,
-          controller: url,
-          key: const Key('provider-url'),
-          decoration: const InputDecoration(
-            labelText: 'Base URL',
-            helperText: '填写基础地址或完整 /responses、/chat/completions 地址',
-            helperMaxLines: 2,
-          ),
-        ),
-        const SizedBox(height: 18),
-        TextField(
-          enabled: !saving && !loading,
-          controller: model,
-          key: const Key('provider-model'),
-          decoration: const InputDecoration(labelText: '模型名称'),
-        ),
-        SwitchListTile(
-          contentPadding: EdgeInsets.zero,
-          title: const Text('流式输出'),
-          subtitle: const Text('逐段显示回答、服务返回的思考与工具过程；不支持流式的服务可关闭。'),
-          value: streaming,
-          onChanged: saving || loading
-              ? null
-              : (v) => setState(() => streaming = v),
-        ),
-        SwitchListTile(
-          contentPadding: EdgeInsets.zero,
-          title: const Text('启用工具调用'),
-          subtitle: const Text('读取账本、管理记忆并准备待确认操作。模型需要支持 function calling。'),
-          value: toolsEnabled,
-          onChanged: saving || loading
-              ? null
-              : (v) => setState(() => toolsEnabled = v),
-        ),
-        DropdownButtonFormField<String>(
-          initialValue: reasoningEffort,
-          isExpanded: true,
-          decoration: const InputDecoration(labelText: '思考强度'),
-          items: const [
-            DropdownMenuItem(value: 'default', child: Text('服务默认（不传参数）')),
-            DropdownMenuItem(value: 'low', child: Text('低')),
-            DropdownMenuItem(value: 'medium', child: Text('中')),
-            DropdownMenuItem(value: 'high', child: Text('高')),
-          ],
-          onChanged: saving || loading
-              ? null
-              : (v) => setState(() => reasoningEffort = v!),
-        ),
-        if (protocol == responsesProtocol)
-          SwitchListTile(
-            contentPadding: EdgeInsets.zero,
-            title: const Text('请求思考摘要'),
-            subtitle: const Text(
-              '仅适用于支持 reasoning.summary 的模型。未返回思考时不会生成或展示虚构内容。',
-            ),
-            value: reasoningSummary,
-            onChanged: saving || loading
-                ? null
-                : (v) => setState(() => reasoningSummary = v),
-          ),
-        SwitchListTile(
-          contentPadding: EdgeInsets.zero,
-          title: const Text('启用图片输入'),
-          subtitle: const Text('所选模型需同时支持图片与工具调用。截图仅在你点击发送时上传到此服务。'),
-          value: supportsImages,
-          onChanged: saving || loading
-              ? null
-              : (v) => setState(() => supportsImages = v),
-        ),
-        const SizedBox(height: 24),
-        FilledButton(
-          key: const Key('save-ai-provider'),
-          onPressed: saving || loading ? null : () => save(),
-          child: Text(
-            loading
-                ? '读取设置…'
-                : saving
-                ? '保存中…'
-                : '保存并使用此配置',
-          ),
-        ),
-        const SizedBox(height: 12),
-        OutlinedButton(
-          onPressed: saving || loading ? null : testConnection,
-          child: const Text('测试连接'),
-        ),
-        const Text(
-          '测试仅发送简短探测，不读取账本；测试成功不代表模型支持所有工具或图片。',
-          style: TextStyle(fontSize: 12, color: muted),
-        ),
-        if (connectionResult != null)
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: 12),
-            child: SelectableText(
-              connectionResult!,
-              style: TextStyle(
-                color: connectionFailed ? coral : primary,
-                fontSize: 12,
+            const SizedBox(height: 22),
+            TextField(
+              key: const Key('provider-name'),
+              controller: name,
+              enabled: !saving && !testing && !loading,
+              decoration: const InputDecoration(
+                labelText: '配置名称',
+                hintText: '例如：日常记账、备用供应商',
               ),
             ),
-          ),
-        const SizedBox(height: 14),
-        TextButton(
-          onPressed: saving || loading
-              ? null
-              : () async {
-                  if (await confirm(
-                    context,
-                    '清除当前服务的密钥？',
-                    '模型和地址设置保留。清除后需要重新填写密钥才能发送请求。',
-                    action: '清除',
-                  )) {
-                    if (context.mounted) {
-                      await perform(
+            const SizedBox(height: 18),
+            WalletSelectField<String>(
+              initialValue: protocol,
+              isExpanded: true,
+              decoration: const InputDecoration(labelText: '接口协议'),
+              items: const [
+                DropdownMenuItem(
+                  value: responsesProtocol,
+                  child: Text('Responses'),
+                ),
+                DropdownMenuItem(
+                  value: chatProtocol,
+                  child: Text('Chat Completions'),
+                ),
+              ],
+              onChanged: saving || testing || loading
+                  ? null
+                  : (v) => setState(() => protocol = v!),
+            ),
+            const SizedBox(height: 18),
+            TextField(
+              enabled: !saving && !testing && !loading,
+              controller: keyInput,
+              key: const Key('provider-key'),
+              obscureText: hidden,
+              enableSuggestions: false,
+              autocorrect: false,
+              decoration: InputDecoration(
+                labelText: 'API 密钥',
+                suffixIcon: IconButton(
+                  tooltip: hidden ? '显示密钥' : '隐藏密钥',
+                  onPressed: () => setState(() => hidden = !hidden),
+                  icon: Icon(
+                    hidden
+                        ? Icons.visibility_outlined
+                        : Icons.visibility_off_outlined,
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(height: 18),
+            TextField(
+              enabled: !saving && !testing && !loading,
+              controller: url,
+              key: const Key('provider-url'),
+              decoration: const InputDecoration(
+                labelText: 'Base URL',
+                helperText: '填写基础地址或完整 /responses、/chat/completions 地址',
+                helperMaxLines: 2,
+              ),
+            ),
+            const SizedBox(height: 18),
+            TextField(
+              enabled: !saving && !testing && !loading,
+              controller: model,
+              key: const Key('provider-model'),
+              decoration: const InputDecoration(labelText: '模型名称'),
+            ),
+            ExpansionTile(
+              title: const Text('高级选项'),
+              subtitle: const Text('流式输出、工具、思考和图片输入'),
+              tilePadding: EdgeInsets.zero,
+              maintainState: true,
+              children: [
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('流式输出'),
+                  subtitle: const Text('逐段显示回答、服务返回的思考与工具过程；不支持流式的服务可关闭。'),
+                  value: streaming,
+                  onChanged: saving || testing || loading
+                      ? null
+                      : (v) => setState(() => streaming = v),
+                ),
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('启用工具调用'),
+                  subtitle: const Text(
+                    '读取账本、管理记忆并准备待确认操作。模型需要支持 function calling。',
+                  ),
+                  value: toolsEnabled,
+                  onChanged: saving || testing || loading
+                      ? null
+                      : (v) => setState(() => toolsEnabled = v),
+                ),
+                WalletSelectField<String>(
+                  initialValue: reasoningEffort,
+                  isExpanded: true,
+                  decoration: const InputDecoration(labelText: '思考强度'),
+                  items: const [
+                    DropdownMenuItem(
+                      value: 'default',
+                      child: Text('服务默认（不传参数）'),
+                    ),
+                    DropdownMenuItem(value: 'low', child: Text('低')),
+                    DropdownMenuItem(value: 'medium', child: Text('中')),
+                    DropdownMenuItem(value: 'high', child: Text('高')),
+                  ],
+                  onChanged: saving || testing || loading
+                      ? null
+                      : (v) => setState(() => reasoningEffort = v!),
+                ),
+                if (protocol == responsesProtocol)
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('请求思考摘要'),
+                    subtitle: const Text(
+                      '仅适用于支持 reasoning.summary 的模型。未返回思考时不会生成或展示虚构内容。',
+                    ),
+                    value: reasoningSummary,
+                    onChanged: saving || testing || loading
+                        ? null
+                        : (v) => setState(() => reasoningSummary = v),
+                  ),
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('启用图片输入'),
+                  subtitle: const Text('所选模型需同时支持图片与工具调用。截图仅在你点击发送时上传到此服务。'),
+                  value: supportsImages,
+                  onChanged: saving || testing || loading
+                      ? null
+                      : (v) => setState(() => supportsImages = v),
+                ),
+              ],
+            ),
+            const SizedBox(height: 24),
+            FilledButton(
+              key: const Key('save-ai-provider'),
+              onPressed: saving || testing || loading ? null : () => save(),
+              child: Text(
+                loading
+                    ? '读取设置…'
+                    : saving
+                    ? '保存中…'
+                    : '保存并使用此配置',
+              ),
+            ),
+            const SizedBox(height: 12),
+            OutlinedButton(
+              onPressed: saving || testing || loading ? null : testConnection,
+              child: Text(testing ? '测试连接中…' : '测试连接'),
+            ),
+            const Text(
+              '测试仅发送简短探测，不读取账本；测试成功不代表模型支持所有工具或图片。',
+              style: TextStyle(fontSize: 12, color: muted),
+            ),
+            if (connectionResult != null)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 12),
+                child: SelectableText(
+                  connectionResult!,
+                  style: TextStyle(
+                    color: connectionFailed ? coral : primary,
+                    fontSize: 12,
+                  ),
+                ),
+              ),
+            const SizedBox(height: 14),
+            TextButton(
+              onPressed: saving || testing || loading
+                  ? null
+                  : () async {
+                      if (await confirm(
                         context,
-                        () => AppScope.of(context).ai.vault.write(provider, ''),
-                        success: '密钥已清除',
-                      );
-                    }
-                    if (mounted) keyInput.clear();
-                  }
-                },
-          child: const Text('清除密钥', style: TextStyle(color: coral)),
+                        '清除当前服务的密钥？',
+                        '模型和地址设置保留。清除后需要重新填写密钥才能发送请求。',
+                        action: '清除',
+                      )) {
+                        if (context.mounted) {
+                          await perform(
+                            context,
+                            () => AppScope.of(
+                              context,
+                            ).ai.vault.write(provider, ''),
+                            success: '密钥已清除',
+                          );
+                        }
+                        if (mounted) keyInput.clear();
+                      }
+                    },
+              child: const Text('清除密钥', style: TextStyle(color: coral)),
+            ),
+          ],
         ),
-      ],
+      ),
     ),
   );
 }
@@ -1717,6 +1766,9 @@ class _PersonaPageState extends State<PersonaPage> {
       prompt = TextEditingController();
   String tone = 'professional';
   bool initialized = false, saving = false;
+  String? baseline;
+  String get snapshot =>
+      formSnapshot([name.text, focus.text, prompt.text, tone]);
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
@@ -1727,6 +1779,7 @@ class _PersonaPageState extends State<PersonaPage> {
     focus.text = (a['focusAreas'] as List? ?? []).join('、');
     prompt.text = a['customPrompt'] ?? '';
     tone = a['tone'] ?? 'professional';
+    baseline = snapshot;
   }
 
   @override
@@ -1738,81 +1791,87 @@ class _PersonaPageState extends State<PersonaPage> {
   }
 
   @override
-  Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(title: const Text('顾问人设')),
-    body: PageList(
-      children: [
-        TextField(
-          controller: name,
-          maxLength: 30,
-          decoration: const InputDecoration(labelText: '顾问名字'),
-        ),
-        const SizedBox(height: 16),
-        DropdownButtonFormField<String>(
-          initialValue: tone,
-          decoration: const InputDecoration(labelText: '交流风格'),
-          items: const [
-            DropdownMenuItem(value: 'professional', child: Text('专业理性')),
-            DropdownMenuItem(value: 'humorous', child: Text('轻松幽默')),
-            DropdownMenuItem(value: 'strict', child: Text('严格督促')),
-            DropdownMenuItem(value: 'encouraging', child: Text('温暖鼓励')),
-            DropdownMenuItem(value: 'roasting', child: Text('毒舌管家')),
+  Widget build(BuildContext context) => EditorGuard(
+    busy: saving,
+    hasChanges: () => baseline != null && baseline != snapshot,
+    child: Builder(
+      builder: (context) => Scaffold(
+        appBar: AppBar(title: const Text('顾问人设')),
+        body: PageList(
+          children: [
+            TextField(
+              controller: name,
+              maxLength: 30,
+              decoration: const InputDecoration(labelText: '顾问名字'),
+            ),
+            const SizedBox(height: 16),
+            WalletSelectField<String>(
+              initialValue: tone,
+              decoration: const InputDecoration(labelText: '交流风格'),
+              items: const [
+                DropdownMenuItem(value: 'professional', child: Text('专业理性')),
+                DropdownMenuItem(value: 'humorous', child: Text('轻松幽默')),
+                DropdownMenuItem(value: 'strict', child: Text('严格督促')),
+                DropdownMenuItem(value: 'encouraging', child: Text('温暖鼓励')),
+                DropdownMenuItem(value: 'roasting', child: Text('毒舌管家')),
+              ],
+              onChanged: (v) => tone = v!,
+            ),
+            const SizedBox(height: 18),
+            TextField(
+              controller: focus,
+              maxLength: 200,
+              decoration: const InputDecoration(
+                labelText: '关注领域',
+                hintText: '如：外卖、购物、深夜消费，以逗号分隔',
+              ),
+            ),
+            const SizedBox(height: 16),
+            TextField(
+              controller: prompt,
+              maxLines: 5,
+              maxLength: 2000,
+              decoration: const InputDecoration(labelText: '额外指引（可选）'),
+            ),
+            const SizedBox(height: 20),
+            FilledButton(
+              onPressed: saving
+                  ? null
+                  : () async {
+                      if (name.text.trim().isEmpty) {
+                        toast(context, '请输入顾问名字');
+                        return;
+                      }
+                      setState(() => saving = true);
+                      final ok = await perform(
+                        context,
+                        () => AppScope.storeOf(context).change((d) {
+                          d.agent.addAll({
+                            'name': name.text.trim(),
+                            'tone': tone,
+                            'focusAreas': focus.text
+                                .split(RegExp('[,，、]'))
+                                .map((s) => s.trim())
+                                .where((s) => s.isNotEmpty)
+                                .toList(),
+                            'customPrompt': prompt.text.trim(),
+                          });
+                          d.extras.remove('analysisCache');
+                        }),
+                      );
+                      if (context.mounted) {
+                        if (ok) {
+                          Navigator.pop(context);
+                        } else {
+                          setState(() => saving = false);
+                        }
+                      }
+                    },
+              child: const Text('保存人设'),
+            ),
           ],
-          onChanged: (v) => tone = v!,
         ),
-        const SizedBox(height: 18),
-        TextField(
-          controller: focus,
-          maxLength: 200,
-          decoration: const InputDecoration(
-            labelText: '关注领域',
-            hintText: '如：外卖、购物、深夜消费，以逗号分隔',
-          ),
-        ),
-        const SizedBox(height: 16),
-        TextField(
-          controller: prompt,
-          maxLines: 5,
-          maxLength: 2000,
-          decoration: const InputDecoration(labelText: '额外指引（可选）'),
-        ),
-        const SizedBox(height: 20),
-        FilledButton(
-          onPressed: saving
-              ? null
-              : () async {
-                  if (name.text.trim().isEmpty) {
-                    toast(context, '请输入顾问名字');
-                    return;
-                  }
-                  setState(() => saving = true);
-                  final ok = await perform(
-                    context,
-                    () => AppScope.storeOf(context).change((d) {
-                      d.agent.addAll({
-                        'name': name.text.trim(),
-                        'tone': tone,
-                        'focusAreas': focus.text
-                            .split(RegExp('[,，、]'))
-                            .map((s) => s.trim())
-                            .where((s) => s.isNotEmpty)
-                            .toList(),
-                        'customPrompt': prompt.text.trim(),
-                      });
-                      d.extras.remove('analysisCache');
-                    }),
-                  );
-                  if (context.mounted) {
-                    if (ok) {
-                      Navigator.pop(context);
-                    } else {
-                      setState(() => saving = false);
-                    }
-                  }
-                },
-          child: const Text('保存人设'),
-        ),
-      ],
+      ),
     ),
   );
 }
@@ -1824,12 +1883,18 @@ class BackupPage extends StatefulWidget {
 }
 
 class _BackupPageState extends State<BackupPage> {
-  bool busy = false;
+  bool busy = false, includeImages = true;
   Future<void> export() async {
     setState(() => busy = true);
     await perform(context, () async {
       final bytes = Uint8List.fromList(
-        utf8.encode(AppScope.storeOf(context).exportBackup()),
+        utf8.encode(
+          await exportBackupBundle(
+            AppScope.storeOf(context),
+            AppScope.of(context).ai.images,
+            includeImages: includeImages,
+          ),
+        ),
       );
       final path = await FilePicker.platform.saveFile(
         dialogTitle: '保存账本备份',
@@ -1859,7 +1924,8 @@ class _BackupPageState extends State<BackupPage> {
       if (result == null) return;
       final bytes = result.files.single.bytes;
       if (bytes == null) throw const FormatException('文件无法读取');
-      final preview = parseBackup(utf8.decode(bytes));
+      final bundle = parseBackupBundle(utf8.decode(bytes));
+      final preview = bundle.preview;
       final net = preview.data.accounts
           .where((a) => a.includeInTotal)
           .fold<int>(
@@ -1885,9 +1951,10 @@ class _BackupPageState extends State<BackupPage> {
                 Text('${preview.legacy ? 'wallet 旧版' : 'Flutter'} 备份'),
                 const SizedBox(height: 12),
                 Text(
-                  '账户 ${preview.data.accounts.length} 个\n账单 ${preview.data.transactions.length} 笔\n快捷交易 ${preview.data.quickEntries.length} 项\n净资产 ${money(net)}',
+                  '账户 ${preview.data.accounts.length} 个\n账单 ${preview.data.transactions.length} 笔\n快捷交易 ${preview.data.quickEntries.length} 项\n净资产 ${privateMoney(context, net)}',
                   style: const TextStyle(height: 1.9),
                 ),
+                Text('可恢复的聊天图片：${bundle.images.length} 张'),
                 const SizedBox(height: 14),
                 ...preview.notes.map(
                   (s) => Padding(
@@ -1900,7 +1967,7 @@ class _BackupPageState extends State<BackupPage> {
                 ),
                 const SizedBox(height: 12),
                 const Text(
-                  '恢复会替换当前账本。请确认这是你要使用的备份。',
+                  '恢复会替换当前账本。替换前会自动保存当前账本快照，可从此页恢复。',
                   style: TextStyle(color: coral, fontSize: 13),
                 ),
               ],
@@ -1919,7 +1986,12 @@ class _BackupPageState extends State<BackupPage> {
         ),
       );
       if (approved == true && mounted) {
-        await AppScope.storeOf(context).restore(preview);
+        final scope = AppScope.of(context);
+        final ledger = AppScope.storeOf(context);
+        for (final image in bundle.images.entries) {
+          await scope.ai.images.save(image.key, image.value);
+        }
+        await ledger.restore(preview);
         if (mounted) {
           toast(context, '已恢复 ${preview.data.transactions.length} 笔账单');
         }
@@ -1931,64 +2003,108 @@ class _BackupPageState extends State<BackupPage> {
   @override
   Widget build(BuildContext context) {
     final store = AppScope.storeOf(context);
-    return Scaffold(
-      appBar: AppBar(title: const Text('备份与恢复')),
-      body: PageList(
-        children: [
-          Panel(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Icon(Icons.backup_outlined, color: primary, size: 36),
-                const SizedBox(height: 18),
-                const Text(
-                  '让记录安心留存',
-                  style: TextStyle(fontSize: 21, fontWeight: FontWeight.w700),
+    return EditorGuard(
+      busy: busy,
+      hasChanges: () => false,
+      child: Builder(
+        builder: (context) => Scaffold(
+          appBar: AppBar(title: const Text('备份与恢复')),
+          body: PageList(
+            children: [
+              Panel(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Icon(Icons.backup_outlined, color: primary, size: 36),
+                    const SizedBox(height: 18),
+                    const Text(
+                      '让记录安心留存',
+                      style: TextStyle(
+                        fontSize: 21,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    Text(
+                      '${store.data.accounts.length} 个账户 · ${store.data.transactions.length} 笔账单 · ${store.data.chats.length} 条对话',
+                      style: const TextStyle(color: muted),
+                    ),
+                    const SizedBox(height: 16),
+                    const Text(
+                      '完整备份包含账户、账单、分类、快捷交易、目标、设置、顾问记忆与历史对话。API 密钥单独保存，恢复后可重新填写。',
+                      style: TextStyle(color: muted, fontSize: 13),
+                    ),
+                  ],
                 ),
-                const SizedBox(height: 12),
-                Text(
-                  '${store.data.accounts.length} 个账户 · ${store.data.transactions.length} 笔账单 · ${store.data.chats.length} 条对话',
-                  style: const TextStyle(color: muted),
-                ),
+              ),
+              SwitchListTile(
+                value: includeImages,
+                onChanged: busy
+                    ? null
+                    : (value) => setState(() => includeImages = value),
+                title: const Text('包含聊天图片'),
+                subtitle: const Text('最多 64 MB 图片附件。密钥不会进入备份。'),
+              ),
+              const SizedBox(height: 26),
+              FilledButton.icon(
+                onPressed: busy || store.startupError != null ? null : export,
+                icon: const Icon(Icons.download_rounded),
+                label: const Text('导出完整备份'),
+              ),
+              const SizedBox(height: 14),
+              OutlinedButton.icon(
+                onPressed: busy ? null : import,
+                icon: const Icon(Icons.upload_file_rounded),
+                label: const Text('选择备份并恢复'),
+              ),
+              const SizedBox(height: 14),
+              OutlinedButton.icon(
+                onPressed: busy
+                    ? null
+                    : () => openPage(context, const WechatImportPage()),
+                icon: const Icon(Icons.table_chart_outlined),
+                label: const Text('导入微信账单（Excel）'),
+              ),
+              if (store.hasRestorePoint) ...[
                 const SizedBox(height: 16),
-                const Text(
-                  '完整备份包含账户、账单、分类、快捷交易、目标、设置、顾问记忆与历史对话。API 密钥单独保存，恢复后可重新填写。',
-                  style: TextStyle(color: muted, fontSize: 13),
+                OutlinedButton.icon(
+                  icon: const Icon(Icons.history_rounded),
+                  label: const Text('恢复上次覆盖前的账本'),
+                  onPressed: busy
+                      ? null
+                      : () async {
+                          if (!await confirm(
+                            context,
+                            '恢复覆盖前的账本？',
+                            '这会替换当前账本。当前内容也会保留为新的恢复快照，可再次回退。',
+                            action: '恢复快照',
+                          )) {
+                            return;
+                          }
+                          if (!context.mounted) return;
+                          setState(() => busy = true);
+                          await perform(
+                            context,
+                            store.restorePrevious,
+                            success: '已恢复覆盖前的账本',
+                          );
+                          if (mounted) setState(() => busy = false);
+                        },
                 ),
               ],
-            ),
+              const SizedBox(height: 22),
+              const Text(
+                '兼容旧版 wallet 的 JSON 和 Base64 备份。导入时保留当前账户余额，避免历史账单重复扣款。',
+                style: TextStyle(color: muted, fontSize: 12),
+              ),
+              if (busy)
+                const Padding(
+                  padding: EdgeInsets.all(24),
+                  child: Center(child: CircularProgressIndicator()),
+                ),
+            ],
           ),
-          const SizedBox(height: 26),
-          FilledButton.icon(
-            onPressed: busy || store.startupError != null ? null : export,
-            icon: const Icon(Icons.download_rounded),
-            label: const Text('导出完整备份'),
-          ),
-          const SizedBox(height: 14),
-          OutlinedButton.icon(
-            onPressed: busy ? null : import,
-            icon: const Icon(Icons.upload_file_rounded),
-            label: const Text('选择备份并恢复'),
-          ),
-          const SizedBox(height: 14),
-          OutlinedButton.icon(
-            onPressed: busy
-                ? null
-                : () => openPage(context, const WechatImportPage()),
-            icon: const Icon(Icons.table_chart_outlined),
-            label: const Text('导入微信账单（Excel）'),
-          ),
-          const SizedBox(height: 22),
-          const Text(
-            '兼容旧版 wallet 的 JSON 和 Base64 备份。导入时保留当前账户余额，避免历史账单重复扣款。',
-            style: TextStyle(color: muted, fontSize: 12),
-          ),
-          if (busy)
-            const Padding(
-              padding: EdgeInsets.all(24),
-              child: Center(child: CircularProgressIndicator()),
-            ),
-        ],
+        ),
       ),
     );
   }
@@ -2180,7 +2296,7 @@ class SettingsPage extends StatelessWidget {
                   title: const Text('每月预算'),
                   subtitle: Text(
                     (store.data.settings['budget'] ?? 0) > 0
-                        ? money(store.data.settings['budget'])
+                        ? privateMoney(context, store.data.settings['budget'])
                         : '未设置',
                   ),
                   trailing: const Icon(
@@ -2191,7 +2307,8 @@ class SettingsPage extends StatelessWidget {
                 ),
                 SwitchListTile.adaptive(
                   contentPadding: EdgeInsets.zero,
-                  title: const Text('首页显示资产金额'),
+                  title: const Text('显示账本金额'),
+                  subtitle: const Text('隐藏账户、账单和预算等金额摘要；编辑输入、备注与 AI 对话保留原文。'),
                   value: store.data.settings['visible'] != false,
                   onChanged: (v) => perform(
                     context,
@@ -2215,9 +2332,22 @@ class SettingsPage extends StatelessWidget {
             ),
           ),
           const SectionTitle('关于'),
+          Panel(
+            padding: EdgeInsets.zero,
+            child: ListTile(
+              leading: const Icon(Icons.system_update_rounded),
+              title: const Text('检查更新'),
+              subtitle: const Text(
+                '下载安装最新版本',
+                style: TextStyle(color: muted, fontSize: 12),
+              ),
+              trailing: const Icon(Icons.chevron_right_rounded),
+              onTap: () => openPage(context, const OtaPage()),
+            ),
+          ),
           const Panel(
             child: Text(
-              'FinDash 1.1.0\n本地账本 · 人民币记账\n\n旧版 Kotlin 工程已保留在 legacy_android。',
+              'FinDash $appVersion\n本地账本 · 人民币记账\n\n账本保存在本机，建议定期导出备份。',
               style: TextStyle(color: muted, height: 1.9),
             ),
           ),
@@ -2230,7 +2360,7 @@ class SettingsPage extends StatelessWidget {
             onTap: () => showLicensePage(
               context: context,
               applicationName: 'FinDash',
-              applicationVersion: '1.1.0',
+              applicationVersion: appVersion,
             ),
           ),
         ],
@@ -2243,32 +2373,36 @@ class DebugLogsPage extends StatelessWidget {
   const DebugLogsPage({super.key});
   @override
   Widget build(BuildContext context) {
-    final logs = AppScope.storeOf(context).debugLogs;
+    final store = AppScope.storeOf(context, domains: const {});
+    final logs = store.debugLogs;
     return Scaffold(
       appBar: AppBar(title: const Text('顾问调试记录')),
-      body: PageList(
-        children: [
-          if (logs.isEmpty)
-            const EmptyState('暂无调试记录', '本次打开应用的 AI 请求状态会显示在这里。'),
-          ...logs.map(
-            (log) => Padding(
-              padding: const EdgeInsets.only(bottom: 12),
-              child: Panel(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      '${log['type']} · ${log['time']}',
-                      style: const TextStyle(color: muted, fontSize: 11),
-                    ),
-                    const SizedBox(height: 7),
-                    SelectableText(log['text']),
-                  ],
+      body: ListenableBuilder(
+        listenable: store.logUpdates,
+        builder: (context, _) => PageList(
+          children: [
+            if (logs.isEmpty)
+              const EmptyState('暂无调试记录', '本次打开应用的 AI 请求状态会显示在这里。'),
+            ...logs.map(
+              (log) => Padding(
+                padding: const EdgeInsets.only(bottom: 12),
+                child: Panel(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        '${log['type']} · ${log['time']}',
+                        style: const TextStyle(color: muted, fontSize: 11),
+                      ),
+                      const SizedBox(height: 7),
+                      SelectableText(log['text']),
+                    ],
+                  ),
                 ),
               ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }

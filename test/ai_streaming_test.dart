@@ -156,8 +156,8 @@ void main() {
                           'id': 'plan',
                           'type': 'function',
                           'function': {
-                            'name': 'update_plan',
-                            'arguments': '{"description":"储蓄一万元"}',
+                            'name': 'get_app_settings',
+                            'arguments': '{}',
                           },
                         },
                       ],
@@ -175,12 +175,12 @@ void main() {
             );
           }
           expect(jsonDecode(request.body)['messages'].last['role'], 'tool');
-          expect(store.data.goals.length, 1);
+          expect(store.data.goals.length, 0);
           return jsonResponse(
             jsonEncode({
               'choices': [
                 {
-                  'message': {'content': '目标已保存'},
+                  'message': {'content': '已读取设置'},
                 },
               ],
             }),
@@ -188,11 +188,11 @@ void main() {
           );
         }),
       );
-      await ai.send('设定储蓄一万元的目标');
+      await ai.send('读取预算设置');
       expect(ai.error, contains('503'));
       await ai.retryLast();
       expect(ai.error, null);
-      expect(store.data.goals.length, 1);
+      expect(store.data.goals.length, 0);
       expect(store.data.chats.length, 2);
       final history = await ai.executeTool('get_chat_history', {
         'date': dayKey(DateTime.now()),
@@ -333,7 +333,7 @@ void main() {
                   {
                     'index': 1,
                     'id': 'b',
-                    'function': {'name': 'add_memory', 'arguments': '{"fact":"工资'},
+                    'function': {'name': 'search_memories', 'arguments': '{"query":"工资'},
                   },
                 ],
               }))}'
@@ -354,7 +354,7 @@ void main() {
           }
           final messages = body['messages'] as List;
           expect(messages.where((m) => m['role'] == 'tool').length, 2);
-          expect(store.data.agent['memories'].single['fact'], '工资15号发');
+          expect(store.data.agent['memories'], isEmpty);
           expect(
             messages.firstWhere(
               (m) => m['tool_calls'] != null,
@@ -362,15 +362,15 @@ void main() {
             '先核对预算。',
           );
           return sse(
-            '${event(chunk({'content': '已记住。'}))}${event(chunk({}, 'stop'))}data: [DONE]\n\n',
+            '${event(chunk({'content': '已查询。'}))}${event(chunk({}, 'stop'))}data: [DONE]\n\n',
             fragment: true,
           );
         }),
       );
-      await ai.send('记住我的工资15号发，看看预算');
+      await ai.send('看看预算和工资记录');
       expect(ai.error, null);
       final run = store.data.chats.last;
-      expect(run['content'], '已记住。');
+      expect(run['content'], '已查询。');
       expect(run['blocks'].first['text'], '先核对预算。');
       expect(
         (run['blocks'] as List)
@@ -734,16 +734,14 @@ void main() {
           );
         }),
       );
-      final duplicate = await ai.executeTool('add_memory', {
-        'fact': '每月 15号发工资',
-      });
+      final duplicate = await ai.memory.save({'fact': '每月 15号发工资'});
       expect(duplicate['deduplicated'], true);
       expect(store.data.agent['memories'].length, 1);
-      await ai.executeTool('update_memory', {'id': 'old', 'fact': '每月20号发工资'});
+      await ai.memory.save({'id': 'old', 'fact': '每月20号发工资'}, update: true);
       expect(store.data.agent['memories'].single['legacy'], true);
       await ai.send('如何安排工资？');
       expect(ai.error, null);
-      await ai.executeTool('forget_memory', {'id': 'old'});
+      await ai.memory.forget('old');
       expect(store.data.agent['memories'], isEmpty);
     },
   );

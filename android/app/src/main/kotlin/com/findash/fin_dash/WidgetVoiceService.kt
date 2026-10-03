@@ -89,10 +89,15 @@ class WidgetVoiceService : Service() {
                 if (tx == null) finish(id, mapOf("message" to "暂无可撤销账单"))
                 else callRuntime(id, mapOf("operation" to "undo", "transaction" to tx))
             }
-            "confirm", "account" -> {
+            "confirm", "account", "fromAccount", "toAccount" -> {
                 val draft = prefs.getString("draft:$id", null)
                 if (draft == null) finish(id, mapOf("message" to "请先说一笔，生成账单"))
-                else callRuntime(id, mapOf("operation" to operation, "draft" to draft))
+                else callRuntime(id, buildMap {
+                    put("operation", if (operation == "confirm") "confirm" else "account")
+                    put("draft", draft)
+                    if (operation == "fromAccount") put("accountField", "transferFromId")
+                    if (operation == "toAccount") put("accountField", "transferToId")
+                })
             }
             "retry" -> {
                 callRuntime(id, mapOf("operation" to "preview",

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:fin_dash/ui/interaction.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:fin_dash/main.dart';
 import 'package:fin_dash/data/storage_base.dart';
@@ -39,6 +40,85 @@ void returnToApp(WidgetTester tester) {
 }
 
 void main() {
+  testWidgets('review fits a small screen with larger text', (tester) async {
+    tester.view.physicalSize = const Size(320, 568);
+    tester.view.devicePixelRatio = 1;
+    tester.platformDispatcher.textScaleFactorTestValue = 1.3;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+    final store = await emptyStore();
+    await store.change((d) => d.profile['name'] = '测试用户');
+    await store.saveAccount(bank);
+    await tester.pumpWidget(
+      FinDashApp(
+        store: store,
+        ai: AiService(store, TestVault()),
+        notificationBridge: FakeBridge([event()]),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('payment-confirm-batch')), findsOneWidget);
+    expect(tester.takeException(), null);
+  });
+
+  testWidgets(
+    'reminder supports select all, inline details and direct acceptance with retry',
+    (tester) async {
+      tester.view.physicalSize = const Size(390, 844);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final storage = MemoryStorage();
+      final store = await emptyStore(storage);
+      await store.change((d) => d.profile['name'] = '测试用户');
+      await store.saveAccount(bank);
+      await tester.pumpWidget(
+        FinDashApp(
+          store: store,
+          ai: AiService(store, TestVault()),
+          notificationBridge: FakeBridge([
+            event(),
+            differentEvent('b', 200, 10),
+          ]),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('全选'), findsOneWidget);
+      expect(find.text('选择记录后可一起确认'), findsOneWidget);
+      await tester.tap(find.byKey(const Key('payment-select-all')));
+      await tester.pumpAndSettle();
+      final id = 'b' * 64;
+      await tester.tap(find.byKey(ValueKey('payment-details:$id')));
+      await tester.pumpAndSettle();
+      expect(find.text('通知原文'), findsOneWidget);
+      expect(find.byType(TransactionEditor), findsNothing);
+      await tester.tap(find.byKey(ValueKey('payment-details:$id')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byType(WalletSelectField<String>));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('银行卡').last);
+      await tester.pumpAndSettle();
+      storage.failWrites = true;
+      await tester.tap(find.byKey(ValueKey('payment-accept:$id')));
+      await tester.pumpAndSettle();
+      expect(store.data.transactions, isEmpty);
+      expect(find.text('确认未保存，记录已保留，请重试'), findsOneWidget);
+      storage.failWrites = false;
+      await tester.tap(find.byKey(ValueKey('payment-accept:$id')));
+      await tester.pumpAndSettle();
+      expect(store.data.transactions.single.amount, 200);
+      expect(PaymentNotifications(store).pending.length, 1);
+      expect(find.byKey(const Key('payment-entry-review')), findsOneWidget);
+      expect(find.byType(TransactionEditor), findsNothing);
+      await tester.tap(find.byKey(const Key('payment-confirm-batch')));
+      await tester.pumpAndSettle();
+      expect(store.data.transactions.length, 2);
+      expect(find.byKey(const Key('payment-entry-review')), findsNothing);
+      expect(tester.takeException(), null);
+    },
+  );
+
   testWidgets('reentry reminder waits for an open editor to close', (
     tester,
   ) async {
@@ -163,8 +243,8 @@ void main() {
       ];
       await store.change((d) => d.settings['locked'] = true);
       await expectLater(service.acceptMany(items), throwsFormatException);
+      await store.setLocked(false);
       await store.change((d) {
-        d.settings['locked'] = false;
         d.accounts[0] = bank.copyWith(archived: true);
       });
       await expectLater(service.acceptMany(items), throwsFormatException);
@@ -236,7 +316,9 @@ void main() {
       await tester.tap(find.text('去核对'));
       await tester.pumpAndSettle();
       expect(find.byType(PaymentReviewPage), findsOneWidget);
-      await tester.tap(find.byType(DropdownButtonFormField<String>));
+      await tester.tap(find.byKey(const Key('payment-select-all')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byType(WalletSelectField<String>));
       await tester.pumpAndSettle();
       await tester.tap(find.text('银行卡').last);
       await tester.pumpAndSettle();

@@ -8,6 +8,39 @@ import 'helpers.dart';
 
 void main() {
   test(
+    'search index follows committed edits, account renames and failed saves',
+    () async {
+      final storage = MemoryStorage();
+      final store = await emptyStore(storage);
+      await store.saveAccount(bank);
+      await store.saveTx(tx());
+      expect(store.query(search: '银行卡').length, 1);
+      expect(store.query(search: '测试').length, 1);
+      storage.failWrites = true;
+      await expectLater(
+        store.saveAccount(
+          WalletAccount.fromJson({...bank.toJson(), 'name': '新账户'}),
+        ),
+        throwsStateError,
+      );
+      expect(store.query(search: '银行卡').length, 1);
+      expect(store.query(search: '新账户'), isEmpty);
+      storage.failWrites = false;
+      await store.saveAccount(
+        WalletAccount.fromJson({...bank.toJson(), 'name': '新账户'}),
+      );
+      expect(store.query(search: '银行卡'), isEmpty);
+      expect(store.query(search: '新账户').length, 1);
+      await store.saveTx(
+        LedgerTx.fromJson({...tx().toJson(), 'note': 'Coffee'}),
+      );
+      expect(store.query(search: 'coffee').length, 1);
+      await store.deleteTxs({'tx'});
+      expect(store.query(search: 'coffee'), isEmpty);
+    },
+  );
+
+  test(
     'repeated ledger reads stay current across failed saves, edits, deletion and restore',
     () async {
       final storage = MemoryStorage();

@@ -13,7 +13,16 @@
                 android:maxLines="1" android:ellipsize="end" />
             <TextView android:id="@+id/voice_widget_detail" android:layout_width="match_parent"
                 android:layout_height="wrap_content" android:textColor="#17243D" android:textSize="12sp"
-                android:maxLines="1" android:ellipsize="end" android:visibility="gone" />
+                android:maxLines="2" android:ellipsize="end" android:visibility="gone" />
+            <LinearLayout android:id="@+id/voice_widget_transfer_accounts" android:layout_width="match_parent"
+                android:layout_height="48dp" android:orientation="horizontal" android:visibility="gone">
+                <Button android:id="@+id/voice_widget_from" android:layout_width="0dp" android:layout_height="48dp"
+                    android:layout_weight="1" android:minWidth="0dp" android:padding="0dp" android:text="换转出" android:textSize="11sp"
+                    android:contentDescription="切换转出账户" style="?android:attr/borderlessButtonStyle" />
+                <Button android:id="@+id/voice_widget_to" android:layout_width="0dp" android:layout_height="48dp"
+                    android:layout_weight="1" android:minWidth="0dp" android:padding="0dp" android:text="换转入" android:textSize="11sp"
+                    android:contentDescription="切换转入账户" style="?android:attr/borderlessButtonStyle" />
+            </LinearLayout>
             <TextView android:id="@+id/voice_widget_status" android:layout_width="match_parent"
                 android:layout_height="wrap_content" android:layout_marginTop="4dp"
                 android:text="@string/voice_widget_hint" android:textColor="#3478F6"

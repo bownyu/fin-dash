@@ -4,6 +4,7 @@ import 'package:crypto/crypto.dart';
 import 'package:excel/excel.dart';
 import '../data/wallet_store.dart';
 import '../domain/models.dart';
+import '../domain/ledger_operations.dart';
 
 class WechatBillRecord {
   final String id,
@@ -498,7 +499,7 @@ class WechatBillImporter {
             )
             .toList();
       }
-      d.transactions.addAll(added);
+      LedgerOperations.appendTransactions(d, added);
       if (added.isNotEmpty) d.extras.remove('analysisCache');
       count = added.length;
     });

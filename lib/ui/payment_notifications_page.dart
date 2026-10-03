@@ -6,7 +6,8 @@ import 'design.dart';
 import 'payment_review_page.dart';
 
 class PaymentNotificationsPage extends StatefulWidget {
-  const PaymentNotificationsPage({super.key});
+  final PaymentNotifications? notifications;
+  const PaymentNotificationsPage({super.key, this.notifications});
   @override
   State<PaymentNotificationsPage> createState() =>
       _PaymentNotificationsPageState();
@@ -17,7 +18,8 @@ class _PaymentNotificationsPageState extends State<PaymentNotificationsPage>
   PaymentNotifications? service;
   Json status = {};
   String? error;
-  bool busy = false, history = false;
+  bool busy = false, history = false, reconnecting = false;
+  String? connectionMessage;
   @override
   void initState() {
     super.initState();
@@ -28,7 +30,9 @@ class _PaymentNotificationsPageState extends State<PaymentNotificationsPage>
   void didChangeDependencies() {
     super.didChangeDependencies();
     if (service == null) {
-      service = PaymentNotifications(AppScope.storeOf(context));
+      service =
+          widget.notifications ??
+          PaymentNotifications(AppScope.storeOf(context));
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) refresh();
       });
@@ -51,6 +55,7 @@ class _PaymentNotificationsPageState extends State<PaymentNotificationsPage>
     setState(() {
       busy = true;
       error = null;
+      connectionMessage = null;
     });
     try {
       await service!.sync();
@@ -75,6 +80,53 @@ class _PaymentNotificationsPageState extends State<PaymentNotificationsPage>
   Future<void> review(Json record) async {
     await reviewPaymentNotification(context, service!, record);
     if (mounted) refresh();
+  }
+
+  Future<void> reconnect() async {
+    if (busy) return;
+    setState(() {
+      busy = true;
+      reconnecting = true;
+      error = null;
+      connectionMessage = null;
+    });
+    try {
+      await service!.reconnect();
+      for (var attempt = 0; attempt < 6; attempt++) {
+        final next = await service!.status();
+        if (!mounted) return;
+        setState(() => status = next);
+        if (next['connected'] == true ||
+            next['granted'] != true ||
+            next['enabled'] != true) {
+          break;
+        }
+        if (attempt < 5) {
+          await Future<void>.delayed(const Duration(milliseconds: 600));
+        }
+        if (!mounted) return;
+      }
+      if (mounted) {
+        setState(() {
+          connectionMessage = status['enabled'] != true
+              ? '请先开启采集支付通知'
+              : status['granted'] != true
+              ? '请在系统设置中授予通知使用权'
+              : status['connected'] == true
+              ? '监听已连接，可以接收新的支付通知'
+              : '系统暂未连接。可稍后刷新；若仍未连接，请打开系统设置，将 FinDash 通知使用权关闭后重新开启。';
+        });
+      }
+    } catch (_) {
+      if (mounted) setState(() => error = '重新连接失败，请重试或打开系统通知使用权设置');
+    } finally {
+      if (mounted) {
+        setState(() {
+          busy = false;
+          reconnecting = false;
+        });
+      }
+    }
   }
 
   @override
@@ -124,6 +176,35 @@ class _PaymentNotificationsPageState extends State<PaymentNotificationsPage>
                 Text(
                   '通知使用权：${status['granted'] == true ? '已授权' : '未授权'} · 监听：${status['connected'] == true ? '已连接' : '未连接'}',
                 ),
+                if (supported) ...[
+                  const SizedBox(height: 10),
+                  FilledButton.icon(
+                    key: const Key('payment-reconnect'),
+                    onPressed:
+                        busy ||
+                            status['enabled'] != true ||
+                            status['granted'] != true ||
+                            status['connected'] == true
+                        ? null
+                        : reconnect,
+                    icon: const Icon(Icons.sync_rounded),
+                    label: Text(
+                      reconnecting
+                          ? '正在连接…'
+                          : status['connected'] == true
+                          ? '监听已连接'
+                          : '重新连接监听',
+                    ),
+                  ),
+                  if (connectionMessage != null)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 8),
+                      child: Text(
+                        connectionMessage!,
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ),
+                ],
                 Text(
                   '上次收到：${last == 0 ? '暂无记录' : DateFormat('MM-dd HH:mm').format(DateTime.fromMillisecondsSinceEpoch(last))}',
                 ),
@@ -146,7 +227,7 @@ class _PaymentNotificationsPageState extends State<PaymentNotificationsPage>
                     child: const Text('打开系统通知使用权设置'),
                   ),
                 const Text(
-                  '支付不一定产生系统通知。省电限制、撤回授权或强行停止可能中断采集；重新打开后可在此检查状态。',
+                  '进入 App 时会自动尝试恢复已开启且已授权的监听。省电限制或强行停止仍可能中断连接；重连只能接收后续通知，无法补回断开期间的消费。',
                   style: TextStyle(fontSize: 12, color: muted),
                 ),
               ],
@@ -168,6 +249,29 @@ class _PaymentNotificationsPageState extends State<PaymentNotificationsPage>
             onSelectionChanged: (v) => setState(() => history = v.first),
           ),
           const SizedBox(height: 14),
+          if (history)
+            TextButton(
+              onPressed: busy
+                  ? null
+                  : () async {
+                      if (!await confirm(
+                        context,
+                        '清除已忽略通知的原文？',
+                        '这些通知将无法再恢复待确认。已入账账单不受影响。',
+                        action: '清除原文',
+                        destructive: true,
+                      )) {
+                        return;
+                      }
+                      if (!context.mounted) return;
+                      await perform(
+                        context,
+                        service!.clearIgnored,
+                        success: '已清除已忽略通知的原文',
+                      );
+                    },
+              child: const Text('清除已忽略通知原文'),
+            ),
           if (!history && records.isNotEmpty)
             FilledButton.icon(
               onPressed: busy
@@ -191,7 +295,7 @@ class _PaymentNotificationsPageState extends State<PaymentNotificationsPage>
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    '${r['sourcePackage'] == 'com.tencent.mm' ? '微信' : '支付宝'} · ${r['amountCents'] == null ? '金额待补全' : money(r['amountCents'])}',
+                    '${r['sourcePackage'] == 'com.tencent.mm' ? '微信' : '支付宝'} · ${r['amountCents'] == null ? '金额待补全' : privateMoney(context, r['amountCents'])}',
                     style: Theme.of(context).textTheme.titleMedium,
                   ),
                   const SizedBox(height: 8),
@@ -215,11 +319,12 @@ class _PaymentNotificationsPageState extends State<PaymentNotificationsPage>
                     Wrap(
                       spacing: 12,
                       children: [
-                        if (r['kind'] != 'refund')
-                          FilledButton(
-                            onPressed: busy ? null : () => review(r),
-                            child: const Text('核对并记账'),
+                        FilledButton(
+                          onPressed: busy ? null : () => review(r),
+                          child: Text(
+                            r['kind'] == 'refund' ? '关联原消费并核对退款' : '核对并记账',
                           ),
+                        ),
                         TextButton(
                           onPressed: busy
                               ? null
@@ -232,7 +337,26 @@ class _PaymentNotificationsPageState extends State<PaymentNotificationsPage>
                       ],
                     ),
                   ] else
-                    Text(r['status'] == 'applied' ? '已入账，可在账单页修改或删除' : '已忽略'),
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          r['status'] == 'applied' ? '已入账，可在账单页修改或删除' : '已忽略',
+                        ),
+                        if (r['status'] == 'ignored' && r['cleared'] != true)
+                          TextButton.icon(
+                            onPressed: busy
+                                ? null
+                                : () => perform(
+                                    context,
+                                    () => service!.restoreIgnored(r['eventId']),
+                                    success: '已恢复到待确认',
+                                  ),
+                            icon: const Icon(Icons.undo_rounded),
+                            label: const Text('恢复待确认'),
+                          ),
+                      ],
+                    ),
                 ],
               ),
             ),

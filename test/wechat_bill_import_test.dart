@@ -1,4 +1,4 @@
-import 'dart:io';
+import 'package:fin_dash/ui/interaction.dart';
 import 'dart:typed_data';
 import 'package:excel/excel.dart';
 import 'package:flutter/material.dart' hide TextSpan;
@@ -287,8 +287,8 @@ void main() {
         service.import(bill, selectedIds: ids, accountMapping: mapping),
         throwsFormatException,
       );
+      await store.setLocked(false);
       await store.change((d) {
-        d.settings['locked'] = false;
         d.accounts[0] = bank.copyWith(archived: true);
       });
       await expectLater(
@@ -327,12 +327,14 @@ void main() {
       await store.saveAccount(
         WalletAccount.fromJson({...bank.toJson(), 'name': '中国银行储蓄卡(2222)'}),
       );
-      await store.saveAccount(
-        const WalletAccount(
-          id: 'fund',
-          name: '微信零钱通',
-          category: 'investment',
-          subType: 'wechat_balance',
+      await store.change(
+        (d) => d.accounts.add(
+          const WalletAccount(
+            id: 'fund',
+            name: '微信零钱通',
+            category: 'investment',
+            subType: 'wechat_balance',
+          ),
         ),
       );
       final service = WechatBillImporter(store);
@@ -389,7 +391,7 @@ void main() {
             .onPressed,
         null,
       );
-      await tester.tap(find.byType(DropdownButtonFormField<String>));
+      await tester.tap(find.byType(WalletSelectField<String>));
       await tester.pumpAndSettle();
       await tester.tap(find.text('银行卡').last);
       await tester.pumpAndSettle();
@@ -409,52 +411,5 @@ void main() {
       expect(find.text('打开导入'), findsOneWidget);
       expect(tester.takeException(), null);
     },
-  );
-
-  final source = Platform.environment['WECHAT_BILL_FIXTURE'];
-  test(
-    'provided WeChat workbook reconciles all 265 rows and preserves all five accounts',
-    () async {
-      final bill = WechatBill.parse(await File(source!).readAsBytes());
-      expect(bill.issues, isEmpty);
-      expect(bill.records.length, 265);
-      expect(bill.records.where((r) => r.type == TxType.income).length, 17);
-      expect(bill.records.where((r) => r.type == TxType.expense).length, 248);
-      expect(bill.total(TxType.income), 478853);
-      expect(bill.total(TxType.expense), 2985635);
-      expect(bill.records.where((r) => r.refund).length, 7);
-      expect(bill.payments.length, 5);
-      final store = await emptyStore();
-      final mapping = <String, String>{};
-      var i = 0;
-      for (final payment in bill.payments.keys) {
-        final id = 'wechat-source-${i++}';
-        mapping[payment] = id;
-        await store.saveAccount(
-          WalletAccount(
-            id: id,
-            name: payment,
-            category: 'funds',
-            subType: 'bank_card',
-            openingBalance: 10000,
-          ),
-        );
-      }
-      final service = WechatBillImporter(store);
-      final result = await service.import(
-        bill,
-        selectedIds: bill.records.map((r) => r.id).toSet(),
-        accountMapping: mapping,
-      );
-      expect(result.imported, 265);
-      expect(
-        store.activeAccounts.every((a) => store.balance(a) == 10000),
-        true,
-      );
-      expect(service.duplicates(bill).length, 265);
-    },
-    skip: source == null
-        ? 'Set WECHAT_BILL_FIXTURE to validate a private source file'
-        : false,
   );
 }

@@ -46,7 +46,7 @@ class _AgentActionCardState extends State<AgentActionCard> {
           children: [
             Text('变更详情', style: Theme.of(context).textTheme.titleMedium),
             const SizedBox(height: 12),
-            for (final line in _preview(
+            for (final line in agentActionPreview(
               widget.action,
               (id) => store.account(id)?.name ?? id,
             ))
@@ -89,7 +89,7 @@ class _AgentActionCardState extends State<AgentActionCard> {
               ? primary.withValues(alpha: .25)
               : muted.withValues(alpha: .2),
         ),
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: BorderRadius.circular(20),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -143,7 +143,10 @@ class _AgentActionCardState extends State<AgentActionCard> {
   }
 }
 
-List<String> _preview(Json action, String Function(String) accountName) {
+List<String> agentActionPreview(
+  Json action,
+  String Function(String) accountName,
+) {
   final desired = Json.from(action['desired']);
   final before = Json.from(action['before']);
   if (action['kind'] == 'budget') {

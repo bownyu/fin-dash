@@ -153,8 +153,8 @@ void main() {
     final filled = await service.preview('蜜雪冰城十块钱中国银行', entryId: 'partial');
     await store.change((d) => d.settings['locked'] = true);
     await expectLater(service.confirm(filled), throwsFormatException);
+    await store.setLocked(false);
     await store.change((d) {
-      d.settings['locked'] = false;
       d.accounts[0] = boc.copyWith(archived: true);
     });
     await expectLater(service.confirm(filled), throwsFormatException);

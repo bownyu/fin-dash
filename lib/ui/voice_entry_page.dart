@@ -4,6 +4,7 @@ import '../domain/models.dart';
 import '../services/voice_bookkeeping.dart';
 import '../services/voice_input.dart';
 import 'design.dart';
+import 'interaction.dart';
 import 'editors.dart';
 import 'preferences.dart';
 
@@ -18,7 +19,14 @@ Future<void> openVoiceEntry(BuildContext context) =>
 class VoiceEntryPage extends StatefulWidget {
   final bool autoStart;
   final VoiceInput? voice;
-  const VoiceEntryPage({super.key, this.autoStart = false, this.voice});
+  final String? initialText, entryId;
+  const VoiceEntryPage({
+    super.key,
+    this.autoStart = false,
+    this.voice,
+    this.initialText,
+    this.entryId,
+  });
   @override
   State<VoiceEntryPage> createState() => _VoiceEntryPageState();
 }
@@ -27,7 +35,7 @@ class _VoiceEntryPageState extends State<VoiceEntryPage>
     with WidgetsBindingObserver {
   final transcript = TextEditingController();
   late final voice = widget.voice ?? VoiceInput();
-  String? accountId, error;
+  String? accountId, error, pendingEntryId;
   String captureState = 'idle';
   bool initialized = false,
       listening = false,
@@ -50,6 +58,8 @@ class _VoiceEntryPageState extends State<VoiceEntryPage>
     super.didChangeDependencies();
     if (initialized) return;
     initialized = true;
+    pendingEntryId = widget.entryId;
+    transcript.text = widget.initialText ?? '';
     final store = AppScope.storeOf(context);
     final accounts = store.activeAccounts;
     final preferred = store.data.settings['quickEntryAccountId'];
@@ -73,6 +83,7 @@ class _VoiceEntryPageState extends State<VoiceEntryPage>
       setState(() {
         listening = false;
         captureState = 'idle';
+        error = '录音因应用进入后台而中断，本次录音未保存。已有文字仍保留，请重新录音。';
       });
     }
   }
@@ -144,6 +155,7 @@ class _VoiceEntryPageState extends State<VoiceEntryPage>
       return;
     }
     final service = bookkeeping;
+    if (saved != null) pendingEntryId = null;
     FocusManager.instance.primaryFocus?.unfocus();
     setState(() {
       processing = true;
@@ -154,7 +166,7 @@ class _VoiceEntryPageState extends State<VoiceEntryPage>
     try {
       final result = await service.preview(
         transcript.text,
-        entryId: newId(),
+        entryId: pendingEntryId ??= newId(),
         accountId: accountId,
       );
       if (mounted) setState(() => draft = result);
@@ -227,6 +239,7 @@ class _VoiceEntryPageState extends State<VoiceEntryPage>
   Widget build(BuildContext context) {
     final store = AppScope.storeOf(context);
     final busy = processing || saving;
+    final hasText = transcript.text.trim().isNotEmpty;
     final status = listening
         ? switch (captureState) {
             'starting' => '正在启动麦克风…',
@@ -234,7 +247,12 @@ class _VoiceEntryPageState extends State<VoiceEntryPage>
             _ => '正在录音 · 说完请点结束，停顿不会结束录音',
           }
         : processing
-        ? 'AI 正在整理账单…'
+        ? (AppScope.of(
+                    context,
+                  ).ai.voiceQueue.waiting.containsKey(pendingEntryId) &&
+                  AppScope.storeOf(context).aiStatus != '解析语音账单…'
+              ? '已排队，文字草稿已保存…'
+              : 'AI 正在整理账单…')
         : saving
         ? '正在保存…'
         : saved != null
@@ -242,12 +260,23 @@ class _VoiceEntryPageState extends State<VoiceEntryPage>
         : draft != null
         ? '核对下方账单，确认后保存'
         : '点一下开始说话，说完再点一下';
-    return PopScope(
-      canPop: !saving,
+    return EditorGuard(
+      busy: saving,
+      hasChanges: () =>
+          listening ||
+          processing ||
+          draft != null ||
+          (saved == null && transcript.text.trim().isNotEmpty),
       child: Scaffold(
         appBar: AppBar(
           title: const Text('语音记账'),
           actions: [
+            if (processing)
+              TextButton(
+                onPressed: () =>
+                    AppScope.of(context).ai.cancelVoice(pendingEntryId!),
+                child: const Text('停止解析'),
+              ),
             PopupMenuButton<String>(
               tooltip: '更多',
               enabled: !busy && !listening,
@@ -262,8 +291,26 @@ class _VoiceEntryPageState extends State<VoiceEntryPage>
                 }
               },
               itemBuilder: (_) => const [
-                PopupMenuItem(value: 'widget', child: Text('添加桌面小部件')),
-                PopupMenuItem(value: 'settings', child: Text('AI 设置')),
+                PopupMenuItem(
+                  value: 'widget',
+                  child: Row(
+                    children: [
+                      Icon(Icons.widgets_outlined, size: 20),
+                      SizedBox(width: 12),
+                      Text('添加桌面小部件'),
+                    ],
+                  ),
+                ),
+                PopupMenuItem(
+                  value: 'settings',
+                  child: Row(
+                    children: [
+                      Icon(Icons.settings_outlined, size: 20),
+                      SizedBox(width: 12),
+                      Text('AI 设置'),
+                    ],
+                  ),
+                ),
               ],
             ),
           ],
@@ -294,14 +341,21 @@ class _VoiceEntryPageState extends State<VoiceEntryPage>
                 hintText: '本地识别文字会出现在这里，也可以直接输入',
                 counterText: '',
               ),
-              onChanged: (_) => setState(() {
-                draft = null;
-                error = null;
-              }),
+              onChanged: (_) {
+                if (draft == null &&
+                    error == null &&
+                    hasText == transcript.text.trim().isNotEmpty) {
+                  return;
+                }
+                setState(() {
+                  draft = null;
+                  error = null;
+                });
+              },
             ),
             const SizedBox(height: 16),
             if (draft == null && saved == null && !listening)
-              DropdownButtonFormField<String>(
+              WalletSelectField<String>(
                 key: ValueKey('voice-account:$accountId'),
                 initialValue: store.activeAccounts.any((a) => a.id == accountId)
                     ? accountId
@@ -311,11 +365,15 @@ class _VoiceEntryPageState extends State<VoiceEntryPage>
                   labelText: '没说账户时使用',
                   hintText: '选择默认账户（可选）',
                 ),
-                items: store.activeAccounts
-                    .map(
-                      (a) => DropdownMenuItem(value: a.id, child: Text(a.name)),
-                    )
-                    .toList(),
+                items: [
+                  const DropdownMenuItem<String>(
+                    value: null,
+                    child: Text('不指定账户'),
+                  ),
+                  ...store.activeAccounts.map(
+                    (a) => DropdownMenuItem(value: a.id, child: Text(a.name)),
+                  ),
+                ],
                 onChanged: busy
                     ? null
                     : (value) => setState(() => accountId = value),
@@ -351,7 +409,7 @@ class _VoiceEntryPageState extends State<VoiceEntryPage>
                     ),
                     const SizedBox(height: 12),
                     Text(
-                      '${saved!.title} · ${saved!.type.label} ${money(saved!.amount)}',
+                      '${saved!.title} · ${saved!.type.label} ${privateMoney(context, saved!.amount)}',
                       style: const TextStyle(fontSize: 20),
                     ),
                     const SizedBox(height: 6),
@@ -377,10 +435,7 @@ class _VoiceEntryPageState extends State<VoiceEntryPage>
               ),
           ],
         ),
-        bottomNavigationBar: Padding(
-          padding: EdgeInsets.only(
-            bottom: MediaQuery.viewInsetsOf(context).bottom,
-          ),
+        bottomNavigationBar: KeyboardInsetPadding(
           child: SafeArea(
             top: false,
             child: Padding(
@@ -502,7 +557,7 @@ class VoiceDraftCard extends StatelessWidget {
     Widget account(String field, String label) {
       final value = fields[field];
       final exists = store.activeAccounts.any((a) => a.id == value);
-      return DropdownButtonFormField<String>(
+      return WalletSelectField<String>(
         key: ValueKey('$field:$value'),
         initialValue: exists ? value as String : null,
         isExpanded: true,
@@ -620,7 +675,7 @@ class VoiceDraftCard extends StatelessWidget {
             account('accountId', type == TxType.income ? '收款账户' : '付款账户'),
           const SizedBox(height: 12),
           if (type != TxType.transfer)
-            DropdownButtonFormField<String>(
+            WalletSelectField<String>(
               key: ValueKey('category:${fields['category']}:${type?.name}'),
               initialValue: categories.contains(fields['category'])
                   ? fields['category'] as String
@@ -629,6 +684,17 @@ class VoiceDraftCard extends StatelessWidget {
               decoration: const InputDecoration(
                 labelText: '分类',
                 hintText: '选择分类',
+              ),
+              grid: true,
+              optionIcon: (name) => iconOf(
+                store.data.categories
+                    .firstWhere((c) => c.name == name && c.type == type)
+                    .icon,
+              ),
+              optionColor: (name) => colorOf(
+                store.data.categories
+                    .firstWhere((c) => c.name == name && c.type == type)
+                    .color,
               ),
               items: categories
                   .map(

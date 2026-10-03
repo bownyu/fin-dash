@@ -51,6 +51,9 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('Responses').last);
     await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('高级选项'));
+    await tester.tap(find.text('高级选项'));
+    await tester.pumpAndSettle();
     await tester.scrollUntilVisible(
       find.text('请求思考摘要'),
       300,

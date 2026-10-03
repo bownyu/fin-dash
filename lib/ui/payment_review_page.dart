@@ -3,6 +3,7 @@ import 'package:intl/intl.dart';
 import '../domain/models.dart';
 import '../services/payment_notifications.dart';
 import 'design.dart';
+import 'interaction.dart';
 import 'editors.dart';
 
 LedgerTx paymentNotificationDraft(
@@ -11,7 +12,7 @@ LedgerTx paymentNotificationDraft(
   String? accountId,
 }) {
   final type = switch (record['kind']) {
-    'income' => TxType.income,
+    'income' || 'refund' => TxType.income,
     'transfer' || 'repayment' => TxType.transfer,
     _ => TxType.expense,
   };
@@ -44,43 +45,67 @@ Future<void> reviewPaymentNotification(
   PaymentNotifications service,
   Json record,
 ) async {
-  if (record['kind'] == 'refund') {
-    await showDialog<void>(
-      context: context,
-      builder: (c) => AlertDialog(
-        title: const Text('先核对退款对应的原账单'),
-        content: SingleChildScrollView(
-          child: Text(
-            '${record['title']}\n${record['text']}\n\n'
-            '请核对原交易与实际到账金额。退款通知暂不直接转成收入或新消费。',
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(c),
-            child: const Text('知道了'),
-          ),
-        ],
-      ),
-    );
-    return;
-  }
   final store = AppScope.storeOf(context);
+  LedgerTx? original;
+  final refund = record['kind'] == 'refund';
+  if (refund) {
+    final candidates = store
+        .query(type: TxType.expense)
+        .where((t) => t.amount >= (record['amountCents'] as int? ?? 0))
+        .toList();
+    if (candidates.isEmpty) {
+      toast(context, '请先记录或导入退款对应的原消费，再核对退款到账。原通知仍保留。');
+      return;
+    }
+    original = await pickWalletOption<LedgerTx>(
+      context,
+      title: '选择退款对应的原消费',
+      items: [
+        for (final tx in candidates)
+          DropdownMenuItem(value: tx, child: Text(tx.title)),
+      ],
+      label: (tx) => tx.title,
+      subtitle: (tx) =>
+          '${dayKey(tx.date)} · ${privateMoney(context, tx.amount)} · ${store.account(tx.accountId)?.name ?? '未关联账户'}',
+      icon: (_) => Icons.receipt_long_outlined,
+    );
+    if (original == null || !context.mounted) return;
+  }
+  final linked = original;
   await Navigator.of(context).push<void>(
     MaterialPageRoute(
       settings: const RouteSettings(name: '/payment-notification-review'),
       builder: (_) => TransactionEditor(
-        initial: paymentNotificationDraft(record, store.data),
-        pageTitle: '核对通知账单',
+        initial: refund
+            ? LedgerTx.fromJson({
+                ...paymentNotificationDraft(
+                  record,
+                  store.data,
+                  accountId: linked?.accountId,
+                ).toJson(),
+                'category': '退款',
+              })
+            : paymentNotificationDraft(record, store.data),
+        saveLabel: refund ? '确认退款到账' : null,
+        pageTitle: refund ? '核对退款到账' : '核对通知账单',
         reviewNote:
-            '${record['reviewReason']}\n通知时间可能与交易时间不同，请核对金额、时间和实际账户。\n\n${record['title']}\n${record['text']}',
+            '${refund ? '原消费：${linked!.title} · ${privateMoney(context, linked.amount)}\n退款将关联原消费并单独记为退款收入；原消费保留。请确认实际到账账户和金额。\n' : ''}${record['reviewReason']}\n通知时间可能与交易时间不同，请核对金额、时间和实际账户。\n\n${record['title']}\n${record['text']}',
         onSave: (updated) async {
+          if (refund &&
+              !await confirm(
+                context,
+                '确认实际退款已到账？',
+                '${linked!.title}\n退款 ${privateMoney(context, updated.amount)} → ${store.account(updated.accountId)?.name ?? '待选账户'}\n原消费保留，退款单独计入退款分类。',
+                action: '确认到账',
+              )) {
+            throw const FormatException('退款尚未确认，核对内容已保留');
+          }
           final needsReview = service.needsDuplicateReview(
             record,
             transaction: updated,
           );
-          var duplicateReviewed = false;
-          if (needsReview) {
+          var duplicateReviewed = refund;
+          if (needsReview && !refund) {
             if (!context.mounted) throw const FormatException('核对页面已关闭');
             duplicateReviewed = await confirm(
               context,
@@ -96,6 +121,7 @@ Future<void> reviewPaymentNotification(
             record['eventId'],
             updated,
             duplicateReviewed: duplicateReviewed,
+            refundOf: linked?.id,
           );
         },
       ),
@@ -118,6 +144,7 @@ class PaymentReviewPage extends StatefulWidget {
 class _PaymentReviewPageState extends State<PaymentReviewPage> {
   PaymentNotifications? service;
   final selected = <String>{};
+  final expanded = <String>{};
   String? accountId, error;
   bool busy = false;
   @override
@@ -126,11 +153,6 @@ class _PaymentReviewPageState extends State<PaymentReviewPage> {
     if (service != null) return;
     service =
         widget.notifications ?? PaymentNotifications(AppScope.storeOf(context));
-    selected.addAll(
-      service!.pending
-          .where((r) => service!.batchProblem(r) == null)
-          .map((r) => r['eventId'] as String),
-    );
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) refresh();
     });
@@ -144,6 +166,11 @@ class _PaymentReviewPageState extends State<PaymentReviewPage> {
     });
     try {
       await service!.sync();
+      final eligibleIds = service!.pending
+          .where((r) => service!.batchProblem(r) == null)
+          .map((r) => r['eventId'])
+          .toSet();
+      selected.removeWhere((id) => !eligibleIds.contains(id));
     } catch (_) {
       if (mounted) setState(() => error = '同步未完成，已保存的记录仍可核对');
     } finally {
@@ -151,17 +178,37 @@ class _PaymentReviewPageState extends State<PaymentReviewPage> {
     }
   }
 
-  Future<void> acceptSelected() async {
+  Future<void> acceptSelected({Json? only}) async {
     if (busy || accountId == null) return;
     final store = AppScope.storeOf(context);
     final records = service!.pending
         .where(
           (r) =>
-              selected.contains(r['eventId']) &&
+              (only != null
+                  ? r['eventId'] == only['eventId']
+                  : selected.contains(r['eventId'])) &&
               service!.batchProblem(r) == null,
         )
         .toList();
     if (records.isEmpty) return;
+    if (only == null && records.length > 1) {
+      final accountName = store.account(accountId)?.name ?? '所选账户';
+      final expense = records
+          .where((r) => r['kind'] == 'expense')
+          .fold<int>(0, (sum, r) => sum + (r['amountCents'] as int));
+      final income = records
+          .where((r) => r['kind'] == 'income')
+          .fold<int>(0, (sum, r) => sum + (r['amountCents'] as int));
+      if (!await confirm(
+        context,
+        '将 ${records.length} 笔全部记入 $accountName？',
+        '支出 ${privateMoney(context, expense)} · 收入 ${privateMoney(context, income)}\n请确认每笔都属于这个账户；其他账户的记录请分开处理。',
+        action: '确认入账',
+      )) {
+        return;
+      }
+      if (!mounted || busy) return;
+    }
     setState(() {
       busy = true;
       error = null;
@@ -190,6 +237,22 @@ class _PaymentReviewPageState extends State<PaymentReviewPage> {
     }
   }
 
+  Future<void> dismissRecord(Json record) async {
+    if (busy) return;
+    setState(() {
+      busy = true;
+      error = null;
+    });
+    try {
+      await service!.dismiss(record['eventId']);
+      selected.remove(record['eventId']);
+    } catch (_) {
+      if (mounted) setState(() => error = '忽略未保存，请重试');
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final store = AppScope.storeOf(context);
@@ -200,34 +263,40 @@ class _PaymentReviewPageState extends State<PaymentReviewPage> {
       );
     }
     final records = service?.pending ?? <Json>[];
-    final chosen = records
-        .where(
-          (r) =>
-              selected.contains(r['eventId']) &&
-              service!.batchProblem(r) == null,
-        )
+    final eligible = records
+        .where((r) => service!.batchProblem(r) == null)
         .toList();
+    final chosen = eligible
+        .where((r) => selected.contains(r['eventId']))
+        .toList();
+    final allSelected = eligible.isNotEmpty && chosen.length == eligible.length;
     final validAccount = store.activeAccounts.any((a) => a.id == accountId);
+    final colors = Theme.of(context).colorScheme;
+    final reduceMotion = MediaQuery.disableAnimationsOf(context);
+    final duration = Duration(milliseconds: reduceMotion ? 0 : 220);
+    final expense = chosen
+        .where((r) => r['kind'] == 'expense')
+        .fold<int>(0, (sum, r) => sum + (r['amountCents'] as int));
+    final income = chosen
+        .where((r) => r['kind'] == 'income')
+        .fold<int>(0, (sum, r) => sum + (r['amountCents'] as int));
     return PopScope(
       canPop: !busy,
       child: Scaffold(
         key: widget.reminder ? const Key('payment-entry-review') : null,
+        backgroundColor: Theme.of(context).canvasColor,
         appBar: AppBar(
-          title: Text(
-            '支付记录待确认（${records.length}）',
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-          ),
+          title: const Text('确认消费'),
           leading: IconButton(
             tooltip: '稍后处理',
             onPressed: busy ? null : () => Navigator.pop(context),
-            icon: const Icon(Icons.close),
+            icon: const Icon(Icons.close_rounded),
           ),
           actions: [
             IconButton(
               tooltip: '刷新记录',
               onPressed: busy ? null : refresh,
-              icon: const Icon(Icons.refresh),
+              icon: const Icon(Icons.refresh_rounded),
             ),
           ],
         ),
@@ -239,60 +308,64 @@ class _PaymentReviewPageState extends State<PaymentReviewPage> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Text('后台发现这些支付记录。核对金额、时间和扣款账户后，再确认入账。'),
+                    Text(
+                      records.isEmpty ? '都处理好了' : '${records.length} 笔支付，等你确认',
+                      style: Theme.of(context).textTheme.headlineSmall,
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      '在这里直接入账，详情按需展开',
+                      style: TextStyle(color: colors.onSurfaceVariant),
+                    ),
                     const SizedBox(height: 12),
-                    DropdownButtonFormField<String>(
-                      key: ValueKey('payment-batch-account:$accountId'),
-                      initialValue: validAccount ? accountId : null,
-                      isExpanded: true,
-                      decoration: const InputDecoration(
-                        labelText: '选中记录使用的账户',
-                        hintText: '请选择实际扣款或收款账户',
-                      ),
-                      items: store.activeAccounts
-                          .map(
-                            (a) => DropdownMenuItem(
-                              value: a.id,
-                              child: Text(
-                                a.name,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ),
-                          )
-                          .toList(),
-                      onChanged: busy
-                          ? null
-                          : (id) => setState(() => accountId = id),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            '已选 ${chosen.length} 笔 · 可快捷确认 ${eligible.length} 笔',
+                            style: Theme.of(context).textTheme.bodySmall,
+                          ),
+                        ),
+                        TextButton.icon(
+                          key: const Key('payment-select-all'),
+                          onPressed: busy || eligible.isEmpty
+                              ? null
+                              : () => setState(() {
+                                  if (allSelected) {
+                                    selected.clear();
+                                  } else {
+                                    selected.addAll(
+                                      eligible.map(
+                                        (r) => r['eventId'] as String,
+                                      ),
+                                    );
+                                  }
+                                }),
+                          icon: Icon(
+                            allSelected
+                                ? Icons.deselect_rounded
+                                : Icons.done_all_rounded,
+                            size: 18,
+                          ),
+                          label: Text(allSelected ? '取消全选' : '全选'),
+                        ),
+                      ],
                     ),
-                    const SizedBox(height: 8),
-                    if (store.activeAccounts.isEmpty)
-                      TextButton.icon(
-                        onPressed: busy
-                            ? null
-                            : () => openPage(context, const AccountEditor()),
-                        icon: const Icon(Icons.add),
-                        label: const Text('先添加实际记账账户'),
-                      ),
-                    const Text(
-                      '同一账户可一起确认；使用不同账户的记录请逐笔核对。退款、疑似重复或信息不全的记录不参加批量确认。',
-                      style: TextStyle(color: muted, fontSize: 12),
-                    ),
-                    if (busy)
-                      const Padding(
-                        padding: EdgeInsets.only(top: 12),
-                        child: LinearProgressIndicator(),
-                      ),
+                    if (busy) const LinearProgressIndicator(),
                     if (error != null)
                       Padding(
-                        padding: const EdgeInsets.only(top: 12),
+                        padding: const EdgeInsets.only(top: 8),
                         child: Text(
                           error!,
-                          style: const TextStyle(color: coral),
+                          style: TextStyle(color: colors.error),
                         ),
                       ),
                     if (records.isEmpty)
-                      const EmptyState('全部处理完成', '已确认的记录可在账单页查看。'),
+                      const EmptyState(
+                        '全部处理完成',
+                        '已确认的记录可在账单页查看。',
+                        icon: Icons.task_alt_rounded,
+                      ),
                   ],
                 ),
               ),
@@ -300,83 +373,225 @@ class _PaymentReviewPageState extends State<PaymentReviewPage> {
             SliverList(
               delegate: SliverChildBuilderDelegate((context, index) {
                 final record = records[index];
+                final id = record['eventId'] as String;
                 final problem = service!.batchProblem(record);
+                final checked = problem == null && selected.contains(id);
+                final wechat = record['sourcePackage'] == 'com.tencent.mm';
+                final sourceColor = wechat ? mint : primary;
+                final kind = switch (record['kind']) {
+                  'income' => '收入',
+                  'refund' => '退款',
+                  'transfer' => '转账',
+                  'repayment' => '还款',
+                  _ => '支出',
+                };
                 return Padding(
+                  key: ValueKey(id),
                   padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
-                  child: Panel(
+                  child: AnimatedContainer(
+                    duration: duration,
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: checked
+                          ? Color.alphaBlend(
+                              colors.primary.withValues(alpha: .045),
+                              colors.surface,
+                            )
+                          : colors.surface,
+                      borderRadius: BorderRadius.circular(24),
+                      border: Border.all(
+                        color: checked
+                            ? colors.primary.withValues(alpha: .4)
+                            : colors.outlineVariant,
+                      ),
+                    ),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        CheckboxListTile(
-                          key: ValueKey('payment-select:${record['eventId']}'),
-                          contentPadding: EdgeInsets.zero,
-                          value:
-                              problem == null &&
-                              selected.contains(record['eventId']),
-                          onChanged: busy || problem != null
-                              ? null
-                              : (v) => setState(() {
-                                  if (v == true) {
-                                    selected.add(record['eventId']);
-                                  } else {
-                                    selected.remove(record['eventId']);
-                                  }
-                                }),
-                          title: Text(
-                            '${record['sourcePackage'] == 'com.tencent.mm' ? '微信' : '支付宝'} · '
-                            '${record['kind'] == 'income'
-                                ? '收入'
-                                : record['kind'] == 'refund'
-                                ? '退款'
-                                : '支出'} '
-                            '${record['amountCents'] == null ? '金额待核对' : money(record['amountCents'])}',
-                          ),
-                          subtitle: Text(
-                            '${record['merchant'] ?? ''}\n${DateFormat('yyyy-MM-dd HH:mm').format(DateTime.fromMillisecondsSinceEpoch(record['postedAt']))}',
-                          ),
-                        ),
-                        if (problem != null)
-                          Text(
-                            problem,
-                            style: const TextStyle(color: coral, fontSize: 12),
-                          ),
-                        ExpansionTile(
-                          tilePadding: EdgeInsets.zero,
-                          title: const Text('查看通知原文'),
+                        Row(
                           children: [
-                            SelectableText(
-                              '${record['title']}\n${record['text']}',
+                            Container(
+                              padding: const EdgeInsets.all(10),
+                              decoration: BoxDecoration(
+                                color: sourceColor.withValues(alpha: .12),
+                                borderRadius: BorderRadius.circular(14),
+                              ),
+                              child: Icon(
+                                wechat
+                                    ? Icons.chat_bubble_rounded
+                                    : Icons.account_balance_wallet_rounded,
+                                color: sourceColor,
+                                size: 22,
+                              ),
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Text(
+                                '${wechat ? '微信' : '支付宝'} · $kind',
+                                style: Theme.of(context).textTheme.titleMedium,
+                              ),
+                            ),
+                            Checkbox(
+                              key: ValueKey('payment-select:$id'),
+                              value: checked,
+                              semanticLabel:
+                                  '选择${wechat ? '微信' : '支付宝'}$kind记录',
+                              onChanged: busy || problem != null
+                                  ? null
+                                  : (value) => setState(() {
+                                      if (value == true) {
+                                        selected.add(id);
+                                      } else {
+                                        selected.remove(id);
+                                      }
+                                    }),
                             ),
                           ],
                         ),
-                        Wrap(
-                          spacing: 12,
-                          children: [
-                            TextButton(
-                              key: ValueKey(
-                                'payment-review:${record['eventId']}',
+                        const SizedBox(height: 10),
+                        Text(
+                          record['amountCents'] == null
+                              ? '金额待核对'
+                              : privateMoney(context, record['amountCents']),
+                          style: Theme.of(context).textTheme.headlineLarge
+                              ?.copyWith(
+                                fontSize: 30,
+                                color: record['kind'] == 'income' ? mint : null,
                               ),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          DateFormat('yyyy年M月d日 HH:mm').format(
+                            DateTime.fromMillisecondsSinceEpoch(
+                              record['postedAt'],
+                            ),
+                          ),
+                          style: Theme.of(context).textTheme.bodySmall,
+                        ),
+                        if ((record['merchant'] as String? ?? '').isNotEmpty)
+                          Text(
+                            record['merchant'],
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(color: colors.onSurfaceVariant),
+                          ),
+                        if (problem != null)
+                          Padding(
+                            padding: const EdgeInsets.only(top: 8),
+                            child: Text(
+                              problem,
+                              style: TextStyle(
+                                color: colors.error,
+                                fontSize: 12,
+                              ),
+                            ),
+                          ),
+                        const SizedBox(height: 10),
+                        Wrap(
+                          spacing: 8,
+                          runSpacing: 4,
+                          crossAxisAlignment: WrapCrossAlignment.center,
+                          children: [
+                            FilledButton.icon(
+                              key: ValueKey('payment-accept:$id'),
                               onPressed: busy
                                   ? null
-                                  : () => reviewPaymentNotification(
+                                  : problem != null
+                                  ? () => reviewPaymentNotification(
                                       context,
                                       service!,
                                       record,
+                                    )
+                                  : () {
+                                      if (!validAccount) {
+                                        toast(context, '请先在底部选择实际记账账户');
+                                        return;
+                                      }
+                                      acceptSelected(only: record);
+                                    },
+                              icon: Icon(
+                                problem == null
+                                    ? Icons.check_rounded
+                                    : Icons.edit_outlined,
+                                size: 18,
+                              ),
+                              label: Text(problem == null ? '确认入账' : '核对处理'),
+                            ),
+                            TextButton(
+                              key: ValueKey('payment-details:$id'),
+                              onPressed: () => setState(() {
+                                if (!expanded.add(id)) expanded.remove(id);
+                              }),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Text(expanded.contains(id) ? '收起' : '详情'),
+                                  AnimatedRotation(
+                                    turns: expanded.contains(id) ? .5 : 0,
+                                    duration: duration,
+                                    child: const Icon(
+                                      Icons.expand_more_rounded,
+                                      size: 18,
                                     ),
-                              child: Text(
-                                record['kind'] == 'refund' ? '核对退款' : '逐笔核对',
+                                  ),
+                                ],
                               ),
                             ),
                             TextButton(
                               onPressed: busy
                                   ? null
-                                  : () => perform(
-                                      context,
-                                      () => service!.dismiss(record['eventId']),
-                                    ),
+                                  : () => dismissRecord(record),
                               child: const Text('忽略'),
                             ),
                           ],
+                        ),
+                        AnimatedSize(
+                          duration: duration,
+                          alignment: Alignment.topCenter,
+                          child: expanded.contains(id)
+                              ? SizedBox(
+                                  width: double.infinity,
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      const Divider(height: 24),
+                                      Text(
+                                        '通知原文',
+                                        style: Theme.of(
+                                          context,
+                                        ).textTheme.labelLarge,
+                                      ),
+                                      const SizedBox(height: 6),
+                                      SelectableText(
+                                        '${record['title']}\n${record['text']}',
+                                      ),
+                                      const SizedBox(height: 8),
+                                      Text(
+                                        '通知时间可能与交易时间不同；快捷入账分类：${paymentNotificationDraft(record, store.data).category}，可在此修改。',
+                                        style: Theme.of(
+                                          context,
+                                        ).textTheme.bodySmall,
+                                      ),
+                                      TextButton.icon(
+                                        key: ValueKey('payment-review:$id'),
+                                        onPressed: busy
+                                            ? null
+                                            : () => reviewPaymentNotification(
+                                                context,
+                                                service!,
+                                                record,
+                                              ),
+                                        icon: const Icon(
+                                          Icons.edit_outlined,
+                                          size: 18,
+                                        ),
+                                        label: const Text('修改分类、账户或时间'),
+                                      ),
+                                    ],
+                                  ),
+                                )
+                              : const SizedBox(width: double.infinity),
                         ),
                       ],
                     ),
@@ -386,23 +601,88 @@ class _PaymentReviewPageState extends State<PaymentReviewPage> {
             ),
           ],
         ),
-        bottomNavigationBar: SafeArea(
-          top: false,
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(20, 8, 20, 16),
-            child: FilledButton(
-              key: const Key('payment-confirm-batch'),
-              onPressed: busy || !validAccount || chosen.isEmpty
-                  ? null
-                  : acceptSelected,
-              child: Text(
-                !validAccount && chosen.isNotEmpty
-                    ? '先选择账户，再确认'
-                    : '一键确认选中 ${chosen.length} 笔',
+        bottomNavigationBar: records.isEmpty
+            ? null
+            : Material(
+                color: colors.surface,
+                child: SafeArea(
+                  top: false,
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(20, 12, 20, 12),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        WalletSelectField<String>(
+                          key: ValueKey('payment-batch-account:$accountId'),
+                          initialValue: validAccount ? accountId : null,
+                          isExpanded: true,
+                          decoration: const InputDecoration(
+                            labelText: '记入账户',
+                            hintText: '选择实际扣款或收款账户',
+                            prefixIcon: Icon(
+                              Icons.account_balance_wallet_outlined,
+                            ),
+                          ),
+                          items: store.activeAccounts
+                              .map(
+                                (a) => DropdownMenuItem(
+                                  value: a.id,
+                                  child: Text(
+                                    a.name,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
+                              )
+                              .toList(),
+                          onChanged: busy
+                              ? null
+                              : (id) => setState(() => accountId = id),
+                        ),
+                        if (store.activeAccounts.isEmpty)
+                          TextButton.icon(
+                            onPressed: busy
+                                ? null
+                                : () =>
+                                      openPage(context, const AccountEditor()),
+                            icon: const Icon(Icons.add),
+                            label: const Text('先添加实际记账账户'),
+                          ),
+                        const SizedBox(height: 8),
+                        Text(
+                          chosen.isEmpty
+                              ? '选择记录后可一起确认'
+                              : '已选 ${chosen.length} 笔 · 支出 ${privateMoney(context, expense)}${income > 0 ? ' · 收入 ${privateMoney(context, income)}' : ''}',
+                          style: Theme.of(context).textTheme.bodySmall,
+                        ),
+                        const SizedBox(height: 8),
+                        FilledButton(
+                          key: const Key('payment-confirm-batch'),
+                          onPressed: busy || !validAccount || chosen.isEmpty
+                              ? null
+                              : () => acceptSelected(),
+                          child: AnimatedSwitcher(
+                            duration: duration,
+                            child: Text(
+                              !validAccount
+                                  ? '先选择账户，再确认'
+                                  : '确认 ${chosen.length} 笔 → ${store.account(accountId)?.name ?? '所选账户'}',
+                              key: ValueKey('$validAccount:${chosen.length}'),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          '仅将同一账户的记录一起确认',
+                          textAlign: TextAlign.center,
+                          style: Theme.of(context).textTheme.bodySmall,
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
               ),
-            ),
-          ),
-        ),
       ),
     );
   }

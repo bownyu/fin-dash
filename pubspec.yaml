@@ -1,7 +1,7 @@
 name: fin_dash
 description: 本地优先的个人记账与资产管理应用
 publish_to: none
-version: 1.1.0+2
+version: 0.4.1+8
 environment:
   sdk: ^3.11.0
 dependencies:
@@ -19,6 +19,7 @@ dependencies:
   crypto: ^3.0.7
   flutter_markdown: ^0.7.7+1
   excel: ^4.0.6
+  sqlite3: ^3.5.2
 dev_dependencies:
   flutter_test:
     sdk: flutter

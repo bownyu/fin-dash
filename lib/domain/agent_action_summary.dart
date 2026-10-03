@@ -20,7 +20,40 @@ String agentActionSummary(Json action, String Function(String) accountName) {
     final route = next.type == TxType.transfer
         ? '${accountName(next.fromId!)} → ${accountName(next.toId!)}'
         : accountName(next.accountId!);
-    return '${old.isEmpty ? '新增' : '修改'}「${next.title}」：${next.type.label} $amount\n$route · ${DateFormat('yyyy-MM-dd HH:mm').format(next.date.toLocal())}';
+    final changes = <String>[];
+    if (old.isNotEmpty) {
+      if (old['category'] != desired['category']) {
+        changes.add('分类：${old['category']} → ${desired['category']}');
+      }
+      if (old['date'] != desired['date']) {
+        changes.add(
+          '时间：${DateFormat('yyyy-MM-dd HH:mm').format(DateTime.parse(old['date']).toLocal())} → ${DateFormat('yyyy-MM-dd HH:mm').format(next.date.toLocal())}',
+        );
+      }
+      if (old['accountId'] != desired['accountId'] ||
+          old['transferFromId'] != desired['transferFromId'] ||
+          old['transferToId'] != desired['transferToId']) {
+        final previous = LedgerTx.fromJson(old);
+        final oldRoute = previous.type == TxType.transfer
+            ? '${accountName(previous.fromId!)} → ${accountName(previous.toId!)}'
+            : accountName(previous.accountId!);
+        changes.add('账户：$oldRoute → $route');
+      }
+      if (old['type'] != desired['type']) {
+        changes.add(
+          '收支：${LedgerTx.fromJson(old).type.label} → ${next.type.label}',
+        );
+      }
+      if (old['title'] != desired['title']) {
+        changes.add('名称：${old['title']} → ${next.title}');
+      }
+      if (old['note'] != desired['note']) {
+        changes.add(
+          '备注：${old['note'] == '' ? '未设置' : old['note']} → ${next.note.isEmpty ? '未设置' : next.note}',
+        );
+      }
+    }
+    return '${old.isEmpty ? '新增' : '修改'}「${next.title}」：${next.type.label} $amount\n$route · ${DateFormat('yyyy-MM-dd HH:mm').format(next.date.toLocal())}${changes.isEmpty ? '' : '\n${changes.join('\n')}'}';
   }
   final parts = <String>[];
   if (old.isEmpty) {

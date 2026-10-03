@@ -3,25 +3,24 @@ package com.findash.fin_dash
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
-import android.content.ComponentName
 import android.content.Intent
 import android.content.Context
 import android.provider.Settings
-import android.service.notification.NotificationListenerService
 import java.util.concurrent.Executors
 
 class MainActivity : FlutterActivity() {
     private var voiceBridge: VoiceBridge? = null
+    private var otaBridge: OtaBridge? = null
     private val ioWorker = Executors.newSingleThreadExecutor()
     override fun provideFlutterEngine(context: Context): FlutterEngine = FinDashEngine.get(context, showApp = true)
     override fun shouldDestroyEngineWithHost(): Boolean = false
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         voiceBridge = VoiceBridge(this, flutterEngine.dartExecutor.binaryMessenger)
+        otaBridge = OtaBridge(this, flutterEngine.dartExecutor.binaryMessenger)
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "findash/payment_notifications")
             .setMethodCallHandler { call, result ->
                 val prefs = getSharedPreferences("payment_capture", MODE_PRIVATE)
-                val component = ComponentName(this, PaymentNotificationListener::class.java)
                 if (call.method == "openSettings") {
                     try {
                         startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
@@ -34,8 +33,7 @@ class MainActivity : FlutterActivity() {
                         val inbox = NotificationInbox.get(this)
                         val value: Any? = when (call.method) {
                             "status" -> {
-                                val listeners = Settings.Secure.getString(contentResolver, "enabled_notification_listeners") ?: ""
-                                val granted = listeners.split(':').any { ComponentName.unflattenFromString(it) == component }
+                                val granted = PaymentListenerConnection.granted(this)
                                 mapOf("enabled" to prefs.getBoolean("enabled", false), "granted" to granted,
                                     "connected" to PaymentNotificationListener.connected, "queued" to inbox.count(),
                                     "lastReceived" to prefs.getLong("lastReceived", 0),
@@ -46,9 +44,10 @@ class MainActivity : FlutterActivity() {
                                 synchronized(inbox) {
                                     check(prefs.edit().putBoolean("enabled", enabled).commit())
                                 }
-                                if (enabled) NotificationListenerService.requestRebind(component)
+                                if (enabled) PaymentListenerConnection.reconnect(this, manual = true)
                                 null
                             }
+                            "reconnect" -> PaymentListenerConnection.reconnect(this, manual = true)
                             "peek" -> inbox.peek()
                             "ack" -> { inbox.acknowledge(call.argument<List<String>>("ids") ?: emptyList()); null }
                             "clear" -> {
@@ -65,9 +64,14 @@ class MainActivity : FlutterActivity() {
                 }
             }
     }
+    override fun onResume() {
+        super.onResume()
+        // Best effort only: OEM restrictions must not prevent the app from opening.
+        try { PaymentListenerConnection.reconnect(this) } catch (_: Exception) { }
+    }
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         voiceBridge?.onPermission(requestCode, grantResults)
     }
-    override fun onDestroy() { voiceBridge?.destroy(); ioWorker.shutdown(); super.onDestroy() }
+    override fun onDestroy() { otaBridge?.destroy(); voiceBridge?.destroy(); ioWorker.shutdown(); super.onDestroy() }
 }

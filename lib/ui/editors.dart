@@ -2,7 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
 import '../domain/models.dart';
+import '../application/ledger_commands.dart';
 import 'design.dart';
+import 'interaction.dart';
 
 class TransactionEditor extends StatefulWidget {
   final LedgerTx? initial;
@@ -11,7 +13,8 @@ class TransactionEditor extends StatefulWidget {
   final TxType initialType;
   final String? initialAccount;
   final Future<void> Function(LedgerTx)? onSave;
-  final String? pageTitle, reviewNote;
+  final String? pageTitle, reviewNote, successMessage, saveLabel;
+  final List<WalletAccount>? availableAccounts;
   const TransactionEditor({
     super.key,
     this.initial,
@@ -22,6 +25,9 @@ class TransactionEditor extends StatefulWidget {
     this.onSave,
     this.pageTitle,
     this.reviewNote,
+    this.successMessage,
+    this.saveLabel,
+    this.availableAccounts,
   });
   @override
   State<TransactionEditor> createState() => _TransactionEditorState();
@@ -35,13 +41,31 @@ class _TransactionEditorState extends State<TransactionEditor> {
   late TxType type;
   String? category, accountId, fromId, toId;
   DateTime date = DateTime.now();
-  bool initialized = false, saving = false, changedDate = false;
+  bool initialized = false,
+      saving = false,
+      changedDate = false,
+      keypadExpanded = true;
+  String? baseline;
+  final operationId = newId(), transactionId = newId();
+  late String ledgerEpoch;
+  String get snapshot => formSnapshot([
+    amount.text,
+    title.text,
+    note.text,
+    type.name,
+    category,
+    accountId,
+    fromId,
+    toId,
+    date.toIso8601String(),
+  ]);
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
     if (initialized) return;
     initialized = true;
     final store = AppScope.storeOf(context);
+    ledgerEpoch = store.ledgerEpoch;
     final tx = widget.initial, q = widget.quick;
     type = tx?.type ?? q?.type ?? widget.initialType;
     category =
@@ -53,7 +77,9 @@ class _TransactionEditorState extends State<TransactionEditor> {
     title.text = tx?.title ?? q?.title ?? '';
     note.text = tx?.note ?? '';
     date = tx?.date ?? DateTime.now();
-    final ids = store.activeAccounts.map((a) => a.id).toList();
+    final ids = (widget.availableAccounts ?? store.activeAccounts)
+        .map((a) => a.id)
+        .toList();
     String? valid(String? id) => ids.contains(id) ? id : null;
     accountId =
         valid(
@@ -65,11 +91,14 @@ class _TransactionEditorState extends State<TransactionEditor> {
         (widget.saveAsQuick || tx != null || q != null
             ? null
             : ids.firstOrNull);
+    final repaymentTarget = type == TxType.transfer
+        ? valid(widget.initialAccount)
+        : null;
     fromId =
         valid(tx?.fromId ?? q?.fromId) ??
         (widget.saveAsQuick || tx != null || q != null
             ? null
-            : ids.firstOrNull);
+            : ids.where((id) => id != repaymentTarget).firstOrNull);
     toId =
         valid(
           tx?.toId ??
@@ -79,6 +108,8 @@ class _TransactionEditorState extends State<TransactionEditor> {
         (widget.saveAsQuick || tx != null || q != null
             ? null
             : ids.where((id) => id != fromId).firstOrNull);
+    keypadExpanded = MediaQuery.sizeOf(context).height >= 740;
+    baseline = snapshot;
   }
 
   @override
@@ -107,7 +138,8 @@ class _TransactionEditorState extends State<TransactionEditor> {
       toast(context, '金额必须大于 0，也可以留空');
       return;
     }
-    if (!widget.saveAsQuick && store.activeAccounts.isEmpty) {
+    if (!widget.saveAsQuick &&
+        (widget.availableAccounts ?? store.activeAccounts).isEmpty) {
       toast(context, '请先在资产管理中添加账户');
       return;
     }
@@ -143,7 +175,7 @@ class _TransactionEditorState extends State<TransactionEditor> {
         );
       } else {
         final transaction = LedgerTx(
-          id: widget.initial?.id ?? newId(),
+          id: widget.initial?.id ?? transactionId,
           title: name,
           amount: cents!,
           date: changedDate || widget.initial != null ? date : DateTime.now(),
@@ -153,17 +185,34 @@ class _TransactionEditorState extends State<TransactionEditor> {
               ? 'swap_horiz'
               : cat?.icon ?? 'receipt_long',
           note: note.text.trim(),
+          categoryId: cat?.id,
+          sourceType: widget.initial?.sourceType ?? 'manual',
+          sourceId: widget.initial?.sourceId,
+          originalTransactionId: widget.initial?.originalTransactionId,
+          timePrecision: widget.initial?.timePrecision ?? 'second',
           accountId: type == TxType.transfer ? null : accountId,
           fromId: type == TxType.transfer ? fromId : null,
           toId: type == TxType.transfer ? toId : null,
         );
-        await (widget.onSave ?? store.saveTx)(transaction);
+        if (widget.onSave != null) {
+          await widget.onSave!(transaction);
+        } else {
+          await LedgerCommands(store).saveTransaction(
+            transaction,
+            operationId: operationId,
+            ledgerEpoch: ledgerEpoch,
+            expected: widget.initial,
+          );
+        }
       }
     });
     if (!mounted) return;
     if (success) {
       Navigator.pop(context, true);
-      toast(context, widget.saveAsQuick ? '快捷交易已保存' : '账单已保存');
+      toast(
+        context,
+        widget.successMessage ?? (widget.saveAsQuick ? '快捷交易已保存' : '账单已保存'),
+      );
     } else {
       setState(() => saving = false);
     }
@@ -174,31 +223,39 @@ class _TransactionEditorState extends State<TransactionEditor> {
     String? value,
     ValueChanged<String?> onChange,
   ) {
-    final accounts = AppScope.storeOf(context).activeAccounts;
-    return DropdownButtonFormField<String>(
+    final all =
+        widget.availableAccounts ?? AppScope.storeOf(context).activeAccounts;
+    final excluded = label == '转出账户'
+        ? toId
+        : label == '转入账户'
+        ? fromId
+        : null;
+    final accounts = all.where((a) => a.id != excluded).toList();
+    WalletAccount? account(String id) =>
+        accounts.where((a) => a.id == id).firstOrNull;
+    return WalletSelectField<String>(
       initialValue: accounts.any((a) => a.id == value) ? value : null,
       key: ValueKey('$label-$value'),
-      isExpanded: true,
       decoration: InputDecoration(labelText: label),
       items: [
         if (widget.saveAsQuick)
           const DropdownMenuItem(value: '', child: Text('记账时选择')),
-        ...accounts.map(
-          (a) => DropdownMenuItem(
-            value: a.id,
-            child: Row(
-              children: [
-                Icon(iconOf(a.icon), size: 18, color: colorOf(a.color)),
-                const SizedBox(width: 10),
-                Expanded(child: Text(a.name, overflow: TextOverflow.ellipsis)),
-              ],
-            ),
-          ),
-        ),
+        ...accountOptions(accounts),
       ],
+      optionLabel: (id) => account(id)?.name ?? '记账时选择',
+      optionSubtitle: (id) => account(id) == null
+          ? null
+          : accountOptionDetail(context, account(id)!),
+      optionIcon: (id) =>
+          account(id) == null ? null : iconOf(account(id)!.icon),
+      optionColor: (id) =>
+          account(id) == null ? null : colorOf(account(id)!.color),
+      validator: (id) => !widget.saveAsQuick && !accounts.any((a) => a.id == id)
+          ? '请选择$label'
+          : null,
       onChanged: saving
           ? null
-          : (value) => setState(() => onChange(value == '' ? null : value)),
+          : (v) => setState(() => onChange(v == '' ? null : v)),
     );
   }
 
@@ -223,275 +280,307 @@ class _TransactionEditorState extends State<TransactionEditor> {
     final categories = store.data.categories
         .where((c) => c.type == type)
         .toList();
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(
-          widget.pageTitle ??
-              (widget.saveAsQuick
-                  ? widget.quick == null
-                        ? '添加快捷交易'
-                        : '编辑快捷交易'
-                  : widget.initial == null
-                  ? '记一笔'
-                  : '编辑账单'),
+    if (type == TxType.income &&
+        category == '退款' &&
+        !categories.any((c) => c.name == '退款')) {
+      categories.add(
+        const WalletCategory(
+          'refund-preview',
+          '退款',
+          'currency_exchange',
+          '#58C5AB',
+          TxType.income,
         ),
-        leading: IconButton(
-          tooltip: '关闭',
-          icon: const Icon(Icons.close_rounded),
-          onPressed: saving ? null : () => Navigator.pop(context),
-        ),
-      ),
-      body: Form(
-        key: form,
-        child: PageList(
-          children: [
-            if (widget.reviewNote != null) ...[
-              Panel(child: Text(widget.reviewNote!)),
-              const SizedBox(height: 16),
-            ],
-            SegmentedButton<TxType>(
-              segments: TxType.values
-                  .map((t) => ButtonSegment(value: t, label: Text(t.label)))
-                  .toList(),
-              selected: {type},
-              onSelectionChanged: saving
-                  ? null
-                  : (v) => setState(() {
-                      type = v.first;
-                      category = store.data.categories
-                          .where((c) => c.type == type)
-                          .firstOrNull
-                          ?.name;
-                    }),
+      );
+    }
+    return EditorGuard(
+      busy: saving,
+      hasChanges: () => baseline != null && baseline != snapshot,
+      child: Builder(
+        builder: (context) => Scaffold(
+          appBar: AppBar(
+            title: Text(
+              widget.pageTitle ??
+                  (widget.saveAsQuick
+                      ? widget.quick == null
+                            ? '添加快捷交易'
+                            : '编辑快捷交易'
+                      : widget.initial == null
+                      ? '记一笔'
+                      : '编辑账单'),
             ),
-            const SizedBox(height: 12),
-            Panel(
-              padding: const EdgeInsets.all(14),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    widget.saveAsQuick ? '预设金额 · 可选' : '${type.label}金额',
-                    style: Theme.of(context).textTheme.bodySmall,
-                  ),
-                  const SizedBox(height: 8),
-                  TextFormField(
-                    key: const Key('amount-input'),
-                    controller: amount,
-                    keyboardType: TextInputType.none,
-                    inputFormatters: [
-                      FilteringTextInputFormatter.allow(RegExp(r'[0-9.]')),
-                    ],
-                    style: TextStyle(
-                      fontSize: 36,
-                      fontWeight: FontWeight.w700,
-                      color: txColor(type),
-                    ),
-                    decoration: const InputDecoration(
-                      prefixText: '¥ ',
-                      hintText: '0.00',
-                      filled: false,
-                      contentPadding: EdgeInsets.zero,
-                    ),
-                    validator: (v) =>
-                        v!.isEmpty && !widget.saveAsQuick ? '请输入金额' : null,
-                  ),
-                  if (widget.saveAsQuick)
-                    const Text(
-                      '留空时，每次使用快捷交易都可以输入金额',
-                      style: TextStyle(color: muted, fontSize: 12),
-                    ),
-                ],
-              ),
+            leading: IconButton(
+              tooltip: '关闭',
+              icon: const Icon(Icons.close_rounded),
+              onPressed: saving ? null : () => EditorGuard.close(context),
             ),
-            const SizedBox(height: 12),
-            if (type != TxType.transfer)
-              accountField('使用账户', accountId, (v) => accountId = v)
-            else ...[
-              accountField('转出账户', fromId, (v) => fromId = v),
-              const SizedBox(height: 10),
-              accountField('转入账户', toId, (v) => toId = v),
-            ],
-            const SizedBox(height: 12),
-            TextFormField(
-              controller: title,
-              maxLength: 40,
-              decoration: const InputDecoration(
-                labelText: '名称 / 商户',
-                hintText: '如：午餐、月薪',
-              ),
-            ),
-            if (type != TxType.transfer) ...[
-              const SizedBox(height: 8),
-              DropdownButtonFormField<String>(
-                key: ValueKey('transaction-category:$type:$category'),
-                initialValue: categories.any((c) => c.name == category)
-                    ? category
-                    : null,
-                isExpanded: true,
-                decoration: const InputDecoration(labelText: '选择分类'),
-                items: categories
-                    .map(
-                      (c) =>
-                          DropdownMenuItem(value: c.name, child: Text(c.name)),
-                    )
-                    .toList(),
-                onChanged: saving
+            actions: [
+              IconButton(
+                tooltip: keypadExpanded ? '收起金额键盘' : '展开金额键盘',
+                onPressed: saving
                     ? null
-                    : (value) => setState(() => category = value),
-              ),
-            ] else ...[
-              const SizedBox(height: 12),
-              const Text(
-                '账户之间的转账不计入收入或支出。还信用卡也可使用转账。',
-                style: TextStyle(fontSize: 12, color: muted),
+                    : () => setState(() => keypadExpanded = !keypadExpanded),
+                icon: Icon(
+                  keypadExpanded
+                      ? Icons.keyboard_hide_rounded
+                      : Icons.keyboard_rounded,
+                ),
               ),
             ],
-            if (!widget.saveAsQuick) ...[
-              ExpansionTile(
-                tilePadding: EdgeInsets.zero,
-                title: const Text('日期和备注（可选）', style: TextStyle(fontSize: 14)),
+          ),
+          body: AbsorbPointer(
+            absorbing: saving,
+            child: Form(
+              key: form,
+              child: PageList(
                 children: [
-                  Row(
-                    children: [
-                      Expanded(
-                        child: OutlinedButton.icon(
-                          icon: const Icon(
-                            Icons.calendar_month_rounded,
-                            size: 18,
+                  if ((widget.availableAccounts ?? store.activeAccounts)
+                      .isEmpty) ...[
+                    Panel(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text('先添加一个账户，再开始记账'),
+                          TextButton.icon(
+                            onPressed: saving
+                                ? null
+                                : () =>
+                                      openPage(context, const AccountEditor()),
+                            icon: const Icon(Icons.add_rounded),
+                            label: const Text('添加账户'),
                           ),
-                          label: Text(DateFormat('yyyy/MM/dd').format(date)),
-                          onPressed: () async {
-                            final picked = await showDatePicker(
-                              context: context,
-                              initialDate: date,
-                              firstDate: DateTime(2000),
-                              lastDate: DateTime(2100),
-                            );
-                            if (picked != null) {
-                              setState(() {
-                                changedDate = true;
-                                date = DateTime(
-                                  picked.year,
-                                  picked.month,
-                                  picked.day,
-                                  date.hour,
-                                  date.minute,
-                                  date.second,
-                                );
-                              });
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                  ],
+                  if (widget.reviewNote != null) ...[
+                    Panel(child: Text(widget.reviewNote!)),
+                    const SizedBox(height: 16),
+                  ],
+                  SegmentedButton<TxType>(
+                    segments: TxType.values
+                        .map(
+                          (t) => ButtonSegment(value: t, label: Text(t.label)),
+                        )
+                        .toList(),
+                    selected: {type},
+                    onSelectionChanged: saving
+                        ? null
+                        : (v) => setState(() {
+                            type = v.first;
+                            category = store.data.categories
+                                .where((c) => c.type == type)
+                                .firstOrNull
+                                ?.name;
+                          }),
+                  ),
+                  const SizedBox(height: 12),
+                  Panel(
+                    padding: const EdgeInsets.all(14),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          widget.saveAsQuick ? '预设金额 · 可选' : '${type.label}金额',
+                          style: Theme.of(context).textTheme.bodySmall,
+                        ),
+                        const SizedBox(height: 8),
+                        TextFormField(
+                          key: const Key('amount-input'),
+                          controller: amount,
+                          keyboardType: TextInputType.none,
+                          onTap: () => setState(() => keypadExpanded = true),
+                          inputFormatters: [
+                            FilteringTextInputFormatter.allow(
+                              RegExp(r'[0-9.]'),
+                            ),
+                          ],
+                          style: TextStyle(
+                            fontSize: 36,
+                            fontWeight: FontWeight.w700,
+                            color: txColor(type),
+                          ),
+                          decoration: const InputDecoration(
+                            prefixText: '¥ ',
+                            hintText: '0.00',
+                            filled: false,
+                            contentPadding: EdgeInsets.zero,
+                          ),
+                          validator: (v) {
+                            if (v == null || v.isEmpty) {
+                              return widget.saveAsQuick ? null : '请输入金额';
+                            }
+                            try {
+                              return parseMoney(v) > 0 ? null : '请输入大于 0 的金额';
+                            } on FormatException catch (e) {
+                              return e.message;
                             }
                           },
                         ),
-                      ),
-                      const SizedBox(width: 10),
-                      OutlinedButton(
-                        onPressed: () async {
-                          final picked = await showTimePicker(
-                            context: context,
-                            initialTime: TimeOfDay.fromDateTime(date),
-                          );
-                          if (picked != null) {
-                            setState(() {
-                              changedDate = true;
-                              date = DateTime(
-                                date.year,
-                                date.month,
-                                date.day,
-                                picked.hour,
-                                picked.minute,
-                              );
-                            });
-                          }
-                        },
-                        child: Text(DateFormat('HH:mm').format(date)),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 16),
-                  TextFormField(
-                    controller: note,
-                    maxLines: 2,
-                    maxLength: 300,
-                    decoration: const InputDecoration(labelText: '备注（可选）'),
-                  ),
-                ],
-              ),
-            ],
-          ],
-        ),
-      ),
-      bottomNavigationBar: Padding(
-        padding: EdgeInsets.only(
-          bottom: MediaQuery.viewInsetsOf(context).bottom,
-        ),
-        child: SafeArea(
-          top: false,
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (MediaQuery.viewInsetsOf(context).bottom == 0)
-                  LayoutBuilder(
-                    builder: (context, box) => SizedBox(
-                      height: 194,
-                      child: GridView.count(
-                        crossAxisCount: 3,
-                        childAspectRatio: (box.maxWidth - 12) / 3 / 44,
-                        physics: const NeverScrollableScrollPhysics(),
-                        mainAxisSpacing: 6,
-                        crossAxisSpacing: 6,
-                        children:
-                            [
-                                  '1',
-                                  '2',
-                                  '3',
-                                  '4',
-                                  '5',
-                                  '6',
-                                  '7',
-                                  '8',
-                                  '9',
-                                  '.',
-                                  '0',
-                                  '⌫',
-                                ]
-                                .map(
-                                  (s) => TextButton(
-                                    onPressed: saving ? null : () => key(s),
-                                    style: TextButton.styleFrom(
-                                      padding: EdgeInsets.zero,
-                                      backgroundColor: Theme.of(
-                                        context,
-                                      ).colorScheme.surface,
-                                    ),
-                                    child: Text(
-                                      s,
-                                      style: const TextStyle(fontSize: 22),
-                                    ),
-                                  ),
-                                )
-                                .toList(),
-                      ),
+                        if (widget.saveAsQuick)
+                          const Text(
+                            '留空时，每次使用快捷交易都可以输入金额',
+                            style: TextStyle(color: muted, fontSize: 12),
+                          ),
+                      ],
                     ),
                   ),
-                const SizedBox(height: 8),
-                SizedBox(
-                  width: double.infinity,
-                  child: FilledButton.icon(
-                    key: const Key('save-transaction'),
-                    onPressed: saving ? null : save,
-                    icon: saving
-                        ? const SizedBox.square(
-                            dimension: 18,
-                            child: CircularProgressIndicator(strokeWidth: 2),
+                  const SizedBox(height: 12),
+                  if (type != TxType.transfer)
+                    accountField('使用账户', accountId, (v) => accountId = v)
+                  else ...[
+                    accountField('转出账户', fromId, (v) => fromId = v),
+                    const SizedBox(height: 10),
+                    accountField('转入账户', toId, (v) => toId = v),
+                  ],
+                  const SizedBox(height: 12),
+                  if (type != TxType.transfer) ...[
+                    const SizedBox(height: 8),
+                    WalletSelectField<String>(
+                      key: ValueKey('transaction-category:$type:$category'),
+                      initialValue: categories.any((c) => c.name == category)
+                          ? category
+                          : null,
+                      isExpanded: true,
+                      decoration: const InputDecoration(labelText: '选择分类'),
+                      grid: true,
+                      optionIcon: (name) => iconOf(
+                        categories.firstWhere((c) => c.name == name).icon,
+                      ),
+                      optionColor: (name) => colorOf(
+                        categories.firstWhere((c) => c.name == name).color,
+                      ),
+                      items: categories
+                          .map(
+                            (c) => DropdownMenuItem(
+                              value: c.name,
+                              child: Text(c.name),
+                            ),
                           )
-                        : const Icon(Icons.check_rounded),
-                    label: Text(widget.saveAsQuick ? '保存快捷交易' : '保存账单'),
+                          .toList(),
+                      onChanged: saving
+                          ? null
+                          : (value) => setState(() => category = value),
+                    ),
+                  ] else ...[
+                    const SizedBox(height: 12),
+                    const Text(
+                      '账户之间的转账不计入收入或支出。还信用卡也可使用转账。',
+                      style: TextStyle(fontSize: 12, color: muted),
+                    ),
+                  ],
+                  TextFormField(
+                    key: const Key('transaction-title'),
+                    controller: title,
+                    maxLength: 40,
+                    decoration: const InputDecoration(
+                      labelText: '名称 / 商户',
+                      hintText: '如：午餐、月薪',
+                    ),
                   ),
+                  if (!widget.saveAsQuick) ...[
+                    ExpansionTile(
+                      tilePadding: EdgeInsets.zero,
+                      title: const Text(
+                        '日期和备注（可选）',
+                        style: TextStyle(fontSize: 14),
+                      ),
+                      children: [
+                        Row(
+                          children: [
+                            Expanded(
+                              child: OutlinedButton.icon(
+                                icon: const Icon(
+                                  Icons.calendar_month_rounded,
+                                  size: 18,
+                                ),
+                                label: Text(
+                                  DateFormat('yyyy/MM/dd').format(date),
+                                ),
+                                onPressed: () async {
+                                  final picked = await showDatePicker(
+                                    context: context,
+                                    initialDate: date,
+                                    firstDate: DateTime(2000),
+                                    lastDate: DateTime(2100),
+                                  );
+                                  if (picked != null) {
+                                    setState(() {
+                                      changedDate = true;
+                                      date = DateTime(
+                                        picked.year,
+                                        picked.month,
+                                        picked.day,
+                                        date.hour,
+                                        date.minute,
+                                        date.second,
+                                      );
+                                    });
+                                  }
+                                },
+                              ),
+                            ),
+                            const SizedBox(width: 10),
+                            OutlinedButton(
+                              onPressed: () async {
+                                final picked = await showTimePicker(
+                                  context: context,
+                                  initialTime: TimeOfDay.fromDateTime(date),
+                                );
+                                if (picked != null) {
+                                  setState(() {
+                                    changedDate = true;
+                                    date = DateTime(
+                                      date.year,
+                                      date.month,
+                                      date.day,
+                                      picked.hour,
+                                      picked.minute,
+                                    );
+                                  });
+                                }
+                              },
+                              child: Text(DateFormat('HH:mm').format(date)),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 16),
+                        TextFormField(
+                          key: const Key('transaction-note'),
+                          controller: note,
+                          maxLines: 2,
+                          maxLength: 300,
+                          decoration: const InputDecoration(
+                            labelText: '备注（可选）',
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ),
+          bottomNavigationBar: _TransactionKeyboardDock(
+            keypad: keypadExpanded
+                ? _AmountKeypad(onKey: saving ? null : key)
+                : const SizedBox.shrink(),
+            saveButton: SizedBox(
+              width: double.infinity,
+              child: FilledButton.icon(
+                key: const Key('save-transaction'),
+                onPressed: saving ? null : save,
+                icon: saving
+                    ? const SizedBox.square(
+                        dimension: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.check_rounded),
+                label: Text(
+                  widget.saveLabel ?? (widget.saveAsQuick ? '保存快捷交易' : '保存账单'),
                 ),
-              ],
+              ),
             ),
           ),
         ),
@@ -500,9 +589,98 @@ class _TransactionEditorState extends State<TransactionEditor> {
   }
 }
 
+/// Only this small subtree subscribes to the IME's per-frame inset changes.
+/// The form and the button widgets are reused throughout the keyboard animation.
+class _TransactionKeyboardDock extends StatelessWidget {
+  final Widget keypad, saveButton;
+  const _TransactionKeyboardDock({
+    required this.keypad,
+    required this.saveButton,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final keyboardHeight = MediaQuery.viewInsetsOf(context).bottom;
+    return Padding(
+      padding: EdgeInsets.only(bottom: keyboardHeight),
+      child: SafeArea(
+        top: false,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Visibility(
+                visible: keyboardHeight == 0,
+                maintainState: true,
+                child: RepaintBoundary(child: keypad),
+              ),
+              const SizedBox(height: 8),
+              saveButton,
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Twelve fixed keys need neither a scroll viewport nor a grid layout delegate.
+class _AmountKeypad extends StatelessWidget {
+  final ValueChanged<String>? onKey;
+  const _AmountKeypad({this.onKey});
+  static const rows = [
+    ['1', '2', '3'],
+    ['4', '5', '6'],
+    ['7', '8', '9'],
+    ['.', '0', '⌫'],
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    final style = TextButton.styleFrom(
+      padding: EdgeInsets.zero,
+      backgroundColor: Theme.of(context).colorScheme.surface,
+    );
+    return Column(
+      key: const Key('transaction-keypad'),
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        for (var row = 0; row < rows.length; row++) ...[
+          if (row > 0) const SizedBox(height: 6),
+          SizedBox(
+            height: 44,
+            child: Row(
+              children: [
+                for (var column = 0; column < 3; column++) ...[
+                  if (column > 0) const SizedBox(width: 6),
+                  Expanded(
+                    child: TextButton(
+                      onPressed: onKey == null
+                          ? null
+                          : () => onKey!(rows[row][column]),
+                      style: style,
+                      child: Text(
+                        rows[row][column],
+                        style: const TextStyle(fontSize: 22),
+                      ),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+}
+
 class AccountEditor extends StatefulWidget {
   final WalletAccount? initial;
-  const AccountEditor({super.key, this.initial});
+  final Future<void> Function(WalletAccount, int)? onSave;
+  final String? pageTitle;
+  const AccountEditor({super.key, this.initial, this.onSave, this.pageTitle});
   @override
   State<AccountEditor> createState() => _AccountEditorState();
 }
@@ -522,6 +700,21 @@ class _AccountEditorState extends State<AccountEditor> {
       billingPrevious = false,
       initialized = false,
       saving = false;
+  String? baseline;
+  String get snapshot => formSnapshot([
+    name.text,
+    balance.text,
+    limit.text,
+    note.text,
+    group,
+    subType,
+    icon,
+    color,
+    billingDay,
+    repaymentDay,
+    include,
+    billingPrevious,
+  ]);
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
@@ -546,6 +739,7 @@ class _AccountEditorState extends State<AccountEditor> {
       balance.text = '0.00';
       limit.text = '0.00';
     }
+    baseline = snapshot;
   }
 
   @override
@@ -568,272 +762,337 @@ class _AccountEditorState extends State<AccountEditor> {
       return;
     }
     setState(() => saving = true);
-    final ok = await perform(
-      context,
-      () => AppScope.storeOf(context).saveAccount(
-        WalletAccount(
-          id: widget.initial?.id ?? newId(),
-          name: name.text.trim(),
-          category: group,
-          subType: subType,
-          icon: icon,
-          color: color,
-          note: note.text.trim(),
-          includeInTotal: include,
-          creditLimit: group == 'credit' ? creditLimit : 0,
-          billingDay: group == 'credit' ? billingDay : null,
-          repaymentDay: group == 'credit' ? repaymentDay : null,
-          countBillingDayInPrevious: billingPrevious,
-          archived: widget.initial?.archived ?? false,
-        ),
-        currentBalance: current,
-      ),
-    );
+    final ok = await perform(context, () async {
+      final account = WalletAccount(
+        id: widget.initial?.id ?? newId(),
+        name: name.text.trim(),
+        category: group,
+        subType: subType,
+        icon: icon,
+        color: color,
+        note: note.text.trim(),
+        includeInTotal: include,
+        creditLimit: group == 'credit' ? creditLimit : 0,
+        billingDay: group == 'credit' ? billingDay : null,
+        repaymentDay: group == 'credit' ? repaymentDay : null,
+        countBillingDayInPrevious: billingPrevious,
+        archived: widget.initial?.archived ?? false,
+      );
+      if (widget.onSave != null) {
+        await widget.onSave!(account, current);
+      } else {
+        await AppScope.storeOf(
+          context,
+        ).saveAccount(account, currentBalance: current);
+      }
+    });
     if (!mounted) return;
     if (ok) {
       Navigator.pop(context, true);
-      toast(context, '账户已保存');
+      toast(context, widget.onSave == null ? '账户已保存' : '方案已更新，确认后才会写入账本');
     } else {
       setState(() => saving = false);
     }
   }
 
   @override
-  Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(title: Text(widget.initial == null ? '添加账户' : '编辑账户')),
-    body: Form(
-      key: form,
-      child: PageList(
-        children: [
-          if (widget.initial == null) ...[
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: accountGroups.entries
-                  .map(
-                    (g) => ChoiceChip(
-                      label: Text(g.value),
-                      selected: group == g.key,
-                      onSelected: (_) => setState(() {
-                        group = g.key;
-                        final preset = accountPresets[group]!.first;
-                        subType = preset.$1;
-                        name.text = preset.$2;
-                        icon = preset.$3;
-                      }),
-                    ),
-                  )
-                  .toList(),
-            ),
-            const SectionTitle('账户类型'),
-            LayoutBuilder(
-              builder: (context, box) => Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                children: accountPresets[group]!
-                    .map(
-                      (p) => SizedBox(
-                        width: (box.maxWidth - 16) / 3,
-                        child: Material(
-                          color: subType == p.$1
-                              ? primary.withValues(alpha: .15)
-                              : Theme.of(context).colorScheme.surface,
-                          borderRadius: BorderRadius.circular(14),
-                          child: InkWell(
-                            borderRadius: BorderRadius.circular(14),
-                            onTap: () => setState(() {
-                              subType = p.$1;
-                              icon = p.$3;
-                              name.text = p.$2;
-                            }),
-                            child: Padding(
-                              padding: const EdgeInsets.all(14),
-                              child: Column(
-                                children: [
-                                  Icon(
-                                    iconOf(p.$3),
-                                    color: subType == p.$1 ? primary : muted,
+  Widget build(BuildContext context) => EditorGuard(
+    busy: saving,
+    hasChanges: () => baseline != null && baseline != snapshot,
+    child: Builder(
+      builder: (context) => Scaffold(
+        appBar: AppBar(
+          title: Text(
+            widget.pageTitle ?? (widget.initial == null ? '添加账户' : '编辑账户'),
+          ),
+        ),
+        body: Form(
+          key: form,
+          child: PageList(
+            children: [
+              if (widget.initial == null) ...[
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: accountGroups.entries
+                      .map(
+                        (g) => ChoiceChip(
+                          label: Text(g.value),
+                          selected: group == g.key,
+                          onSelected: (_) => setState(() {
+                            group = g.key;
+                            final preset = accountPresets[group]!.first;
+                            subType = preset.$1;
+                            name.text = preset.$2;
+                            icon = preset.$3;
+                          }),
+                        ),
+                      )
+                      .toList(),
+                ),
+                const SectionTitle('账户类型'),
+                LayoutBuilder(
+                  builder: (context, box) => Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: accountPresets[group]!
+                        .map(
+                          (p) => SizedBox(
+                            width: (box.maxWidth - 16) / 3,
+                            child: Material(
+                              color: subType == p.$1
+                                  ? primary.withValues(alpha: .15)
+                                  : Theme.of(context).colorScheme.surface,
+                              borderRadius: BorderRadius.circular(14),
+                              child: InkWell(
+                                borderRadius: BorderRadius.circular(14),
+                                onTap: () => setState(() {
+                                  subType = p.$1;
+                                  icon = p.$3;
+                                  name.text = p.$2;
+                                }),
+                                child: Padding(
+                                  padding: const EdgeInsets.all(14),
+                                  child: Column(
+                                    children: [
+                                      Icon(
+                                        iconOf(p.$3),
+                                        color: subType == p.$1
+                                            ? primary
+                                            : muted,
+                                      ),
+                                      const SizedBox(height: 8),
+                                      Text(
+                                        p.$2,
+                                        style: const TextStyle(fontSize: 12),
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                    ],
                                   ),
-                                  const SizedBox(height: 8),
-                                  Text(
-                                    p.$2,
-                                    style: const TextStyle(fontSize: 12),
-                                    overflow: TextOverflow.ellipsis,
-                                  ),
-                                ],
+                                ),
                               ),
                             ),
                           ),
+                        )
+                        .toList(),
+                  ),
+                ),
+                const SizedBox(height: 24),
+              ],
+              TextFormField(
+                key: const Key('account-name'),
+                controller: name,
+                maxLength: 30,
+                decoration: const InputDecoration(labelText: '账户名称'),
+                validator: (v) => v!.trim().isEmpty ? '请输入名称' : null,
+              ),
+              const SizedBox(height: 12),
+              TextFormField(
+                key: const Key('account-balance'),
+                controller: balance,
+                keyboardType: const TextInputType.numberWithOptions(
+                  decimal: true,
+                  signed: true,
+                ),
+                decoration: InputDecoration(
+                  labelText: '当前余额',
+                  prefixText: '¥ ',
+                  helperText: group == 'credit'
+                      ? '欠款请输入负数，如 -200.00'
+                      : '支持负数余额',
+                ),
+                validator: (v) => v!.isEmpty ? '请输入余额' : null,
+              ),
+              if (group == 'credit') ...[
+                const SizedBox(height: 18),
+                TextFormField(
+                  controller: limit,
+                  keyboardType: const TextInputType.numberWithOptions(
+                    decimal: true,
+                  ),
+                  decoration: const InputDecoration(
+                    labelText: '信用额度',
+                    prefixText: '¥ ',
+                  ),
+                ),
+                const SizedBox(height: 18),
+                Row(
+                  children: [
+                    Expanded(
+                      child: WalletSelectField<int>(
+                        isExpanded: true,
+                        initialValue: billingDay ?? 0,
+                        decoration: const InputDecoration(labelText: '账单日'),
+                        items: [
+                          const DropdownMenuItem(value: 0, child: Text('不设置')),
+                          for (var i = 1; i <= 31; i++)
+                            DropdownMenuItem(value: i, child: Text('$i 日')),
+                        ],
+                        onChanged: (v) => billingDay = v == 0 ? null : v,
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: WalletSelectField<int>(
+                        isExpanded: true,
+                        initialValue: repaymentDay ?? 0,
+                        decoration: const InputDecoration(labelText: '还款日'),
+                        items: [
+                          const DropdownMenuItem(value: 0, child: Text('不设置')),
+                          for (var i = 1; i <= 31; i++)
+                            DropdownMenuItem(value: i, child: Text('$i 日')),
+                        ],
+                        onChanged: (v) => repaymentDay = v == 0 ? null : v,
+                      ),
+                    ),
+                  ],
+                ),
+                SwitchListTile.adaptive(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('账单日交易计入上一期'),
+                  value: billingPrevious,
+                  onChanged: (v) => setState(() => billingPrevious = v),
+                ),
+              ],
+              if (group == 'credit')
+                const Text(
+                  '29、30、31 日在较短月份按当月最后一天计算。',
+                  style: TextStyle(color: muted, fontSize: 12),
+                ),
+              const SectionTitle('账户颜色'),
+              Wrap(
+                spacing: 14,
+                runSpacing: 14,
+                children: palette
+                    .map(
+                      (c) => InkWell(
+                        borderRadius: BorderRadius.circular(30),
+                        onTap: () => setState(() => color = c),
+                        child: Container(
+                          width: 38,
+                          height: 38,
+                          decoration: BoxDecoration(
+                            color: colorOf(c),
+                            shape: BoxShape.circle,
+                          ),
+                          child: color == c
+                              ? const Icon(
+                                  Icons.check_rounded,
+                                  color: Colors.white,
+                                  size: 20,
+                                )
+                              : null,
                         ),
                       ),
                     )
                     .toList(),
               ),
-            ),
-            const SizedBox(height: 24),
-          ],
-          TextFormField(
-            key: const Key('account-name'),
-            controller: name,
-            maxLength: 30,
-            decoration: const InputDecoration(labelText: '账户名称'),
-            validator: (v) => v!.trim().isEmpty ? '请输入名称' : null,
-          ),
-          const SizedBox(height: 12),
-          TextFormField(
-            key: const Key('account-balance'),
-            controller: balance,
-            keyboardType: const TextInputType.numberWithOptions(
-              decimal: true,
-              signed: true,
-            ),
-            decoration: InputDecoration(
-              labelText: '当前余额',
-              prefixText: '¥ ',
-              helperText: group == 'credit' ? '欠款请输入负数，如 -200.00' : '支持负数余额',
-            ),
-            validator: (v) => v!.isEmpty ? '请输入余额' : null,
-          ),
-          if (group == 'credit') ...[
-            const SizedBox(height: 18),
-            TextFormField(
-              controller: limit,
-              keyboardType: const TextInputType.numberWithOptions(
-                decimal: true,
+              const SizedBox(height: 20),
+              SwitchListTile.adaptive(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('计入总资产'),
+                subtitle: const Text('关闭后，该账户不会影响首页资产总额'),
+                value: include,
+                onChanged: (v) => setState(() => include = v),
               ),
-              decoration: const InputDecoration(
-                labelText: '信用额度',
-                prefixText: '¥ ',
+              const SizedBox(height: 12),
+              TextFormField(
+                controller: note,
+                maxLength: 300,
+                maxLines: 2,
+                decoration: const InputDecoration(labelText: '备注（可选）'),
               ),
-            ),
-            const SizedBox(height: 18),
-            Row(
-              children: [
-                Expanded(
-                  child: DropdownButtonFormField<int>(
-                    isExpanded: true,
-                    initialValue: billingDay,
-                    decoration: const InputDecoration(labelText: '账单日'),
-                    items: [
-                      const DropdownMenuItem(value: 0, child: Text('不设置')),
-                      for (var i = 1; i <= 28; i++)
-                        DropdownMenuItem(value: i, child: Text('$i 日')),
-                    ],
-                    onChanged: (v) => billingDay = v == 0 ? null : v,
-                  ),
+              const SizedBox(height: 20),
+              FilledButton(
+                key: const Key('save-account'),
+                onPressed: saving ? null : save,
+                child: Text(
+                  saving
+                      ? '保存中…'
+                      : widget.onSave == null
+                      ? '保存账户'
+                      : '更新方案',
                 ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: DropdownButtonFormField<int>(
-                    isExpanded: true,
-                    initialValue: repaymentDay,
-                    decoration: const InputDecoration(labelText: '还款日'),
-                    items: [
-                      const DropdownMenuItem(value: 0, child: Text('不设置')),
-                      for (var i = 1; i <= 28; i++)
-                        DropdownMenuItem(value: i, child: Text('$i 日')),
-                    ],
-                    onChanged: (v) => repaymentDay = v == 0 ? null : v,
-                  ),
-                ),
-              ],
-            ),
-            SwitchListTile.adaptive(
-              contentPadding: EdgeInsets.zero,
-              title: const Text('账单日交易计入上一期'),
-              value: billingPrevious,
-              onChanged: (v) => setState(() => billingPrevious = v),
-            ),
-          ],
-          const SectionTitle('账户颜色'),
-          Wrap(
-            spacing: 14,
-            runSpacing: 14,
-            children: palette
-                .map(
-                  (c) => InkWell(
-                    borderRadius: BorderRadius.circular(30),
-                    onTap: () => setState(() => color = c),
-                    child: Container(
-                      width: 38,
-                      height: 38,
-                      decoration: BoxDecoration(
-                        color: colorOf(c),
-                        shape: BoxShape.circle,
-                      ),
-                      child: color == c
-                          ? const Icon(
-                              Icons.check_rounded,
-                              color: Colors.white,
-                              size: 20,
-                            )
-                          : null,
-                    ),
-                  ),
-                )
-                .toList(),
+              ),
+            ],
           ),
-          const SizedBox(height: 20),
-          SwitchListTile.adaptive(
-            contentPadding: EdgeInsets.zero,
-            title: const Text('计入总资产'),
-            subtitle: const Text('关闭后，该账户不会影响首页资产总额'),
-            value: include,
-            onChanged: (v) => setState(() => include = v),
-          ),
-          const SizedBox(height: 12),
-          TextFormField(
-            controller: note,
-            maxLength: 300,
-            maxLines: 2,
-            decoration: const InputDecoration(labelText: '备注（可选）'),
-          ),
-          const SizedBox(height: 20),
-          FilledButton(
-            key: const Key('save-account'),
-            onPressed: saving ? null : save,
-            child: Text(saving ? '保存中…' : '保存账户'),
-          ),
-        ],
+        ),
       ),
     ),
   );
 }
 
 Future<void> transactionActions(BuildContext context, LedgerTx tx) async {
+  final store = AppScope.storeOf(context);
+  final account = tx.type == TxType.transfer
+      ? '${store.account(tx.fromId)?.name ?? '未关联'} → ${store.account(tx.toId)?.name ?? '未关联'}'
+      : store.account(tx.accountId)?.name ?? '未关联账户';
   final result = await showModalBottomSheet<String>(
     context: context,
     useSafeArea: true,
     showDragHandle: true,
-    builder: (c) => Padding(
-      padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          TransactionRow(tx),
-          if (tx.note.isNotEmpty)
-            Padding(padding: const EdgeInsets.all(12), child: Text(tx.note)),
-          const SizedBox(height: 14),
-          Row(
-            children: [
-              Expanded(
-                child: FilledButton.icon(
-                  onPressed: () => Navigator.pop(c, 'edit'),
-                  icon: const Icon(Icons.edit_rounded),
-                  label: const Text('修改'),
+    isScrollControlled: true,
+    builder: (c) => FractionallySizedBox(
+      heightFactor: .7,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
+        child: Column(
+          children: [
+            Expanded(
+              child: SingleChildScrollView(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(tx.title, style: Theme.of(c).textTheme.titleLarge),
+                    const SizedBox(height: 14),
+                    MoneyText(tx.amount, size: 34, color: txColor(tx.type)),
+                    const SizedBox(height: 16),
+                    Text(
+                      '${tx.type.label} · ${tx.category}',
+                      style: Theme.of(c).textTheme.bodyMedium,
+                    ),
+                    const SizedBox(height: 8),
+                    Text(account),
+                    const SizedBox(height: 8),
+                    Text(DateFormat('yyyy/MM/dd HH:mm').format(tx.date)),
+                    if (tx.note.isNotEmpty) ...[
+                      const Divider(height: 28),
+                      const Text(
+                        '备注与来源',
+                        style: TextStyle(fontWeight: FontWeight.w600),
+                      ),
+                      const SizedBox(height: 8),
+                      SelectableText(tx.note),
+                    ],
+                  ],
                 ),
               ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: OutlinedButton.icon(
-                  onPressed: () => Navigator.pop(c, 'delete'),
-                  icon: const Icon(Icons.delete_outline_rounded, color: coral),
-                  label: const Text('删除', style: TextStyle(color: coral)),
+            ),
+            const SizedBox(height: 14),
+            Row(
+              children: [
+                Expanded(
+                  child: FilledButton.icon(
+                    onPressed: () => Navigator.pop(c, 'edit'),
+                    icon: const Icon(Icons.edit_rounded),
+                    label: const Text('修改'),
+                  ),
                 ),
-              ),
-            ],
-          ),
-        ],
+                const SizedBox(width: 12),
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: () => Navigator.pop(c, 'delete'),
+                    icon: const Icon(
+                      Icons.delete_outline_rounded,
+                      color: coral,
+                    ),
+                    label: const Text('删除', style: TextStyle(color: coral)),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
       ),
     ),
   );

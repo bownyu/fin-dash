@@ -16,6 +16,8 @@ class VoiceWidget : AppWidgetProvider() {
         const val ACTION_RETRY = "com.findash.fin_dash.widget.RETRY"
         const val ACTION_UNDO = "com.findash.fin_dash.widget.UNDO"
         const val ACTION_ACCOUNT = "com.findash.fin_dash.widget.ACCOUNT"
+        const val ACTION_FROM_ACCOUNT = "com.findash.fin_dash.widget.FROM_ACCOUNT"
+        const val ACTION_TO_ACCOUNT = "com.findash.fin_dash.widget.TO_ACCOUNT"
     }
     override fun onUpdate(context: Context, manager: AppWidgetManager, ids: IntArray) {
         ids.forEach { VoiceWidgetState.recover(context, it) }
@@ -35,6 +37,8 @@ class VoiceWidget : AppWidgetProvider() {
             ACTION_RETRY -> "retry"
             ACTION_UNDO -> "undo"
             ACTION_ACCOUNT -> "account"
+            ACTION_FROM_ACCOUNT -> "fromAccount"
+            ACTION_TO_ACCOUNT -> "toAccount"
             else -> return
         }
         if (operation == "stop") { WidgetVoiceService.stopRecording(id); return }

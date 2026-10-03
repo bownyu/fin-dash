@@ -4,6 +4,26 @@ import 'package:fin_dash/data/storage_native.dart';
 
 void main() {
   test(
+    'large Unicode snapshots remain compatible with backup recovery',
+    () async {
+      final dir = await Directory.systemTemp.createTemp(
+        'findash-large-storage-',
+      );
+      try {
+        final storage = LocalWalletStorage(directory: dir);
+        final payload = List.filled(100000, '午餐😀').join();
+        await storage.save(payload);
+        await storage.save('$payload-new');
+        expect(await storage.load(), '$payload-new');
+        await File('${dir.path}/findash_ledger.json').writeAsString('damaged');
+        expect(await storage.load(), payload);
+      } finally {
+        await dir.delete(recursive: true);
+      }
+    },
+  );
+
+  test(
     'native writes persist and recover the previous verified snapshot',
     () async {
       final dir = await Directory.systemTemp.createTemp(

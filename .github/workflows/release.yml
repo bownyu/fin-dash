@@ -1,0 +1,70 @@
+name: Publish Android release
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: windows-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      ANDROID_STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
+      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.41.1'
+          cache: true
+      - name: Prepare private signing and local caches
+        shell: pwsh
+        run: |
+          foreach ($name in @('ANDROID_KEYSTORE_BASE64','ANDROID_STORE_PASSWORD','ANDROID_KEY_PASSWORD','ANDROID_KEY_ALIAS')) {
+            if (![Environment]::GetEnvironmentVariable($name)) { throw 'Configure all Android signing secrets before publishing.' }
+          }
+          $keyPath = Join-Path $pwd 'android/release.jks'
+          [IO.File]::WriteAllBytes($keyPath, [Convert]::FromBase64String($env:ANDROID_KEYSTORE_BASE64))
+          "FINDASH_KEYSTORE_FILE=$keyPath" >> $env:GITHUB_ENV
+          "PUB_CACHE=$(Join-Path $pwd '.pub-cache')" >> $env:GITHUB_ENV
+          "GRADLE_USER_HOME=$(Join-Path $pwd '.gradle-home')" >> $env:GITHUB_ENV
+      - name: Dependencies, tests and assets
+        shell: pwsh
+        run: |
+          flutter pub get
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          flutter analyze --no-pub
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          flutter test --no-pub
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./scripts/prepare-offline-voice.ps1
+      - name: Build signed update
+        shell: pwsh
+        run: |
+          $manifestUrl = "https://github.com/$env:GITHUB_REPOSITORY/releases/latest/download/ota-manifest.json"
+          flutter build apk --release --target-platform android-arm64 --no-pub "--dart-define=OTA_MANIFEST_URL=$manifestUrl"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./android/gradlew.bat -p android :app:testDebugUnitTest --console=plain --no-daemon
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./scripts/prepare-github-release.ps1 -Repository $env:GITHUB_REPOSITORY
+      - name: Publish verified assets
+        shell: pwsh
+        run: |
+          $manifest = Get-Content output/github-publication/assets/ota-manifest.json -Raw | ConvertFrom-Json
+          $tag = "v$($manifest.version)"
+          gh release view $tag --repo $env:GITHUB_REPOSITORY --json tagName 2>$null
+          if ($LASTEXITCODE -eq 0) { throw 'Release already exists. Increment the application version.' }
+          $apk = "output/github-publication/assets/FinDash-$($manifest.version)+$($manifest.buildNumber)-arm64.apk"
+          gh release create $tag $apk output/github-publication/assets/ota-manifest.json output/github-publication/assets/SHA256SUMS.txt --target $env:GITHUB_SHA --repo $env:GITHUB_REPOSITORY --title "FinDash $($manifest.version)" --notes-file output/github-publication/assets/release-notes.md --draft
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          gh release edit $tag --repo $env:GITHUB_REPOSITORY --draft=false --latest
+      - name: Remove signing file
+        if: always()
+        shell: pwsh
+        run: |
+          if (Test-Path android/release.jks) { Remove-Item -LiteralPath android/release.jks -Force }

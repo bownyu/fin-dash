@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.view.View
 import android.widget.RemoteViews
+import org.json.JSONObject
 
 object VoiceWidgetState {
     fun preferences(context: Context) = context.getSharedPreferences("voice_widget", Context.MODE_PRIVATE)
@@ -31,6 +32,7 @@ object VoiceWidgetState {
         val prefs = preferences(context)
         val phase = prefs.getString("phase:$id", "idle") ?: "idle"
         val hasDraft = prefs.contains("draft:$id")
+        val transfer = try { JSONObject(prefs.getString("draft:$id", "{}") ?: "{}").optJSONObject("fields")?.optString("type") == "transfer" } catch (_: Exception) { false }
         val canConfirm = prefs.getBoolean("canConfirm:$id", false)
         val saved = prefs.contains("transaction:$id")
         val operation = VoiceWidgetFlow.primary(phase, canConfirm, hasDraft)
@@ -51,6 +53,8 @@ object VoiceWidgetState {
         views.setOnClickPendingIntent(R.id.voice_widget_retry, action(VoiceWidget.ACTION_RETRY, id * 8 + 1))
         views.setOnClickPendingIntent(R.id.voice_widget_undo, action(VoiceWidget.ACTION_UNDO, id * 8 + 2))
         views.setOnClickPendingIntent(R.id.voice_widget_account, action(VoiceWidget.ACTION_ACCOUNT, id * 8 + 3))
+        views.setOnClickPendingIntent(R.id.voice_widget_from, action(VoiceWidget.ACTION_FROM_ACCOUNT, id * 8 + 5))
+        views.setOnClickPendingIntent(R.id.voice_widget_to, action(VoiceWidget.ACTION_TO_ACCOUNT, id * 8 + 6))
         views.setOnClickPendingIntent(R.id.voice_widget_again, action(VoiceWidget.ACTION_SPEAK, id * 8 + 4))
         views.setBoolean(R.id.voice_widget_button, "setEnabled", operation != null)
         val label = when {
@@ -73,11 +77,13 @@ object VoiceWidgetState {
         views.setViewVisibility(R.id.voice_widget_progress, if (busy) View.VISIBLE else View.GONE)
         views.setViewVisibility(R.id.voice_widget_button, if (busy) View.INVISIBLE else View.VISIBLE)
         val editable = !busy && phase != "listening"
+        views.setViewVisibility(R.id.voice_widget_transfer_accounts, if (editable && hasDraft && transfer) View.VISIBLE else View.GONE)
         views.setViewVisibility(R.id.voice_widget_undo, if (editable && saved) View.VISIBLE else View.GONE)
         views.setBoolean(R.id.voice_widget_account, "setEnabled",
             editable && hasDraft && prefs.getBoolean("hasAccounts:$id", false))
         views.setContentDescription(R.id.voice_widget_account,
-            if (hasDraft) "$summary。点击切换记账账户" else summary ?: "语音记账")
+            if (hasDraft && transfer) "$summary。点击轮换转账账户组合，可用转出和转入按钮分别切换"
+            else if (hasDraft) "$summary。点击切换记账账户" else summary ?: "语音记账")
         views.setViewVisibility(R.id.voice_widget_secondary,
             if (editable && (hasDraft || saved || transcript.isNotBlank())) View.VISIBLE else View.GONE)
         views.setViewVisibility(R.id.voice_widget_again, if (editable && hasDraft) View.VISIBLE else View.GONE)

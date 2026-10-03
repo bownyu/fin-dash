@@ -1,0 +1,5 @@
+# Copy to key.properties locally; never commit the real file or signing key.
+storeFile=../signing/release.jks
+storePassword=SET_LOCALLY_OR_FROM_CI_SECRET
+keyPassword=SET_LOCALLY_OR_FROM_CI_SECRET
+keyAlias=release

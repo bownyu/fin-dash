@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
 import '../data/wallet_store.dart';
 import '../domain/models.dart';
+import '../domain/command_context.dart';
 import '../services/ai_service.dart';
 
 const primary = Color(0xFF3478F6);
@@ -33,6 +34,18 @@ Color txColor(TxType type) => switch (type) {
   TxType.expense => coral,
   TxType.transfer => primary,
 };
+String formSnapshot(List<Object?> values) => jsonEncode(values);
+
+/// Editable amounts remain visible; read-only ledger summaries use this scope.
+String privateMoney(BuildContext context, int value, {bool symbol = true}) =>
+    AppScope.storeOf(context).data.settings['visible'] == false
+    ? (symbol ? '¥ ••••••' : '••••••')
+    : money(value, symbol: symbol);
+
+String privateFinancialText(BuildContext context, String text) =>
+    AppScope.storeOf(context).data.settings['visible'] == false
+    ? text.replaceAll(RegExp(r'[-+]?¥\s*[\d,]+(?:\.\d{2})?'), '¥ ••••••')
+    : text;
 IconData iconOf(String name) => switch (name) {
   'restaurant' || 'fastfood' => Icons.restaurant_rounded,
   'directions_car' || 'local_taxi' => Icons.directions_car_rounded,
@@ -116,6 +129,7 @@ ThemeData walletTheme(Brightness brightness) {
           : SystemUiOverlayStyle.dark,
       centerTitle: true,
       titleTextStyle: TextStyle(
+        fontFamily: 'SF Pro Display',
         fontSize: 18,
         fontWeight: FontWeight.w700,
         color: ink,
@@ -161,7 +175,11 @@ ThemeData walletTheme(Brightness brightness) {
       style: FilledButton.styleFrom(
         minimumSize: const Size(48, 50),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
-        textStyle: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700),
+        textStyle: const TextStyle(
+          fontFamily: 'SF Pro Display',
+          fontSize: 15,
+          fontWeight: FontWeight.w700,
+        ),
       ),
     ),
     outlinedButtonTheme: OutlinedButtonThemeData(
@@ -173,6 +191,12 @@ ThemeData walletTheme(Brightness brightness) {
     chipTheme: ChipThemeData(
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
       side: BorderSide.none,
+    ),
+    popupMenuTheme: PopupMenuThemeData(
+      color: dark ? darkSurface : Colors.white,
+      surfaceTintColor: Colors.transparent,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+      elevation: 8,
     ),
     segmentedButtonTheme: SegmentedButtonThemeData(
       style: ButtonStyle(
@@ -502,17 +526,109 @@ class OverviewGrid extends StatelessWidget {
   );
 }
 
-class AppScope extends InheritedNotifier<WalletStore> {
+class AppScope extends StatefulWidget {
+  final WalletStore store;
   final AiService ai;
+  final Widget child;
   const AppScope({
     super.key,
-    required WalletStore store,
+    required this.store,
     required this.ai,
+    required this.child,
+  });
+  static AppScopeData of(BuildContext context) =>
+      InheritedModel.inheritFrom<AppScopeData>(context)!;
+  static WalletStore storeOf(
+    BuildContext context, {
+    Set<WalletDomain>? domains,
+  }) {
+    final selected = domains ?? WalletDomain.values.toSet();
+    for (final domain in selected) {
+      InheritedModel.inheritFrom<AppScopeData>(context, aspect: domain);
+    }
+    return context.getInheritedWidgetOfExactType<AppScopeData>()!.store;
+  }
+
+  @override
+  State<AppScope> createState() => _AppScopeState();
+}
+
+class _AppScopeState extends State<AppScope> {
+  final versions = {for (final domain in WalletDomain.values) domain: 0};
+  final callbacks = <WalletDomain, VoidCallback>{};
+  int runtime = 0;
+  void refreshRuntime() {
+    if (mounted) setState(() => runtime++);
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    for (final domain in WalletDomain.values) {
+      callbacks[domain] = () {
+        if (mounted) setState(() => versions[domain] = versions[domain]! + 1);
+      };
+      widget.store.domainUpdates[domain]!.addListener(callbacks[domain]!);
+    }
+    widget.store.runtimeUpdates.addListener(refreshRuntime);
+  }
+
+  @override
+  void didUpdateWidget(covariant AppScope oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if(oldWidget.store==widget.store)return;
+    for(final domain in WalletDomain.values) {
+      oldWidget.store.domainUpdates[domain]!.removeListener(callbacks[domain]!);
+      widget.store.domainUpdates[domain]!.addListener(callbacks[domain]!);
+      versions[domain]=versions[domain]!+1;
+    }
+    oldWidget.store.runtimeUpdates.removeListener(refreshRuntime);
+    widget.store.runtimeUpdates.addListener(refreshRuntime);
+    runtime++;
+  }
+
+  @override
+  void dispose() {
+    for (final domain in WalletDomain.values) {
+      widget.store.domainUpdates[domain]!.removeListener(callbacks[domain]!);
+    }
+    widget.store.runtimeUpdates.removeListener(refreshRuntime);
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => AppScopeData(
+    store: widget.store,
+    ai: widget.ai,
+    versions: Map.of(versions),
+    runtime: runtime,
+    child: widget.child,
+  );
+}
+
+class AppScopeData extends InheritedModel<WalletDomain> {
+  final WalletStore store;
+  final AiService ai;
+  final Map<WalletDomain, int> versions;
+  final int runtime;
+  WalletStore get notifier => store;
+  const AppScopeData({
+    super.key,
+    required this.store,
+    required this.ai,
+    required this.versions,
+    required this.runtime,
     required super.child,
-  }) : super(notifier: store);
-  static AppScope of(BuildContext context) =>
-      context.dependOnInheritedWidgetOfExactType<AppScope>()!;
-  static WalletStore storeOf(BuildContext context) => of(context).notifier!;
+  });
+  @override
+  bool updateShouldNotify(AppScopeData oldWidget) =>
+      runtime != oldWidget.runtime ||
+      versions.entries.any((e) => oldWidget.versions[e.key] != e.value);
+  @override
+  bool updateShouldNotifyDependent(
+    AppScopeData oldWidget,
+    Set<WalletDomain> dependencies,
+  ) => dependencies.any((d) => versions[d] != oldWidget.versions[d]);
 }
 
 Future<T?> openPage<T>(
@@ -561,6 +677,7 @@ Future<bool> confirm(
   String title,
   String message, {
   String action = '确认',
+  String cancelLabel = '取消',
   bool destructive = false,
 }) async =>
     await showDialog<bool>(
@@ -571,7 +688,7 @@ Future<bool> confirm(
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(c, false),
-            child: const Text('取消'),
+            child: Text(cancelLabel),
           ),
           TextButton(
             onPressed: () => Navigator.pop(c, true),
@@ -679,6 +796,17 @@ class EmptyState extends StatelessWidget {
   );
 }
 
+/// Keeps per-frame keyboard metrics out of the form/page owning the controls.
+class KeyboardInsetPadding extends StatelessWidget {
+  final Widget child;
+  const KeyboardInsetPadding({super.key, required this.child});
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: EdgeInsets.only(bottom: MediaQuery.viewInsetsOf(context).bottom),
+    child: child,
+  );
+}
+
 class PageList extends StatelessWidget {
   final List<Widget> children;
   const PageList({super.key, required this.children});
@@ -694,6 +822,37 @@ class PageList extends StatelessWidget {
   );
 }
 
+/// Headers and footers stay simple; large data sections create only visible rows.
+class LazyPageList extends StatelessWidget {
+  final List<Widget> leading, trailing;
+  final int itemCount;
+  final IndexedWidgetBuilder itemBuilder;
+  const LazyPageList({
+    super.key,
+    this.leading = const [],
+    this.trailing = const [],
+    required this.itemCount,
+    required this.itemBuilder,
+  });
+
+  @override
+  Widget build(BuildContext context) => ListView.builder(
+    padding: EdgeInsets.fromLTRB(
+      20,
+      20,
+      20,
+      MediaQuery.paddingOf(context).bottom + 32,
+    ),
+    itemCount: leading.length + itemCount + trailing.length,
+    itemBuilder: (context, index) {
+      if (index < leading.length) return leading[index];
+      final row = index - leading.length;
+      if (row < itemCount) return itemBuilder(context, row);
+      return trailing[row - itemCount];
+    },
+  );
+}
+
 class MoneyText extends StatelessWidget {
   final int value;
   final double size;
@@ -704,7 +863,7 @@ class MoneyText extends StatelessWidget {
     super.key,
     this.size = 24,
     this.color,
-    this.respectPrivacy = false,
+    this.respectPrivacy = true,
   });
   @override
   Widget build(BuildContext context) {
@@ -714,16 +873,31 @@ class MoneyText extends StatelessWidget {
     return FittedBox(
       fit: BoxFit.scaleDown,
       alignment: Alignment.centerLeft,
-      child: Text(
-        visible ? money(value) : '¥ ••••••',
-        style: TextStyle(
-          fontSize: size,
-          fontWeight: FontWeight.w700,
-          letterSpacing: -.5,
-          color: color,
-          fontFeatures: const [ui.FontFeature.tabularFigures()],
-        ),
-      ),
+      child: visible
+          ? TweenAnimationBuilder<int>(
+              tween: IntTween(begin: value, end: value),
+              duration: Duration(
+                milliseconds: MediaQuery.disableAnimationsOf(context) ? 0 : 220,
+              ),
+              builder: (_, amount, _) => Text(
+                money(amount),
+                style: TextStyle(
+                  fontSize: size,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: -.5,
+                  color: color,
+                  fontFeatures: const [ui.FontFeature.tabularFigures()],
+                ),
+              ),
+            )
+          : Text(
+              '¥ ••••••',
+              style: TextStyle(
+                fontSize: size,
+                fontWeight: FontWeight.w700,
+                color: color,
+              ),
+            ),
     );
   }
 }
@@ -875,7 +1049,7 @@ class TransactionRow extends StatelessWidget {
                             ? '−'
                             : tx.type == TxType.income
                             ? '+'
-                            : ''}${money(tx.amount, symbol: false)}',
+                            : ''}${privateMoney(context, tx.amount, symbol: false)}',
                         style: TextStyle(
                           fontSize: 16,
                           fontWeight: FontWeight.w700,
@@ -917,5 +1091,6 @@ String dateHeading(DateTime date) {
   if (dayKey(date) == dayKey(today.subtract(const Duration(days: 1)))) {
     return '昨天';
   }
-  return DateFormat('M月d日 EEEE', 'zh_CN').format(date);
+  const weekdays = ['星期一', '星期二', '星期三', '星期四', '星期五', '星期六', '星期日'];
+  return '${date.month}月${date.day}日 ${weekdays[date.weekday - 1]}';
 }

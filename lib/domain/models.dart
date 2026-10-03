@@ -1,4 +1,3 @@
-import 'dart:convert';
 import 'dart:math';
 
 typedef Json = Map<String, dynamic>;
@@ -65,6 +64,37 @@ extension PeriodLabels on Period {
     Period.month => '月',
     Period.year => '年',
   };
+}
+
+/// A configured 29/30/31 means the last valid day in shorter months.
+DateTime monthDay(int year, int month, int day) {
+  final first = DateTime(year, month);
+  final lastDay = DateTime(first.year, first.month + 1, 0).day;
+  return DateTime(first.year, first.month, min(day, lastDay));
+}
+
+DateTime nextRepaymentDate(int repaymentDay, DateTime now) {
+  final today = DateTime(now.year, now.month, now.day);
+  final thisMonth = monthDay(now.year, now.month, repaymentDay);
+  return thisMonth.isBefore(today)
+      ? monthDay(now.year, now.month + 1, repaymentDay)
+      : thisMonth;
+}
+
+DateRange creditBillingCycle(
+  int billingDay,
+  bool includeDayInPrevious,
+  DateTime now,
+) {
+  DateTime cutoff(int offset) {
+    final day = monthDay(now.year, now.month + offset, billingDay);
+    return includeDayInPrevious ? day.add(const Duration(days: 1)) : day;
+  }
+
+  final current = cutoff(0);
+  return now.isBefore(current)
+      ? DateRange(cutoff(-1), current)
+      : DateRange(current, cutoff(1));
 }
 
 class DateRange {
@@ -161,7 +191,13 @@ class LedgerTx {
   final int amount;
   final DateTime date;
   final TxType type;
-  final String? accountId, fromId, toId;
+  final String? accountId,
+      fromId,
+      toId,
+      categoryId,
+      sourceId,
+      originalTransactionId;
+  final String sourceType, timePrecision;
   const LedgerTx({
     required this.id,
     required this.title,
@@ -174,6 +210,11 @@ class LedgerTx {
     this.accountId,
     this.fromId,
     this.toId,
+    this.categoryId,
+    this.sourceId,
+    this.originalTransactionId,
+    this.sourceType = 'unknown',
+    this.timePrecision = 'unknown',
   });
   Json toJson() => {
     'id': id,
@@ -187,6 +228,11 @@ class LedgerTx {
     'accountId': accountId,
     'transferFromId': fromId,
     'transferToId': toId,
+    'categoryId': categoryId,
+    'sourceType': sourceType,
+    'sourceId': sourceId,
+    'originalTransactionId': originalTransactionId,
+    'timePrecision': timePrecision,
   };
   factory LedgerTx.fromJson(Json j, {bool legacy = false}) => LedgerTx(
     id: j['id'],
@@ -200,6 +246,11 @@ class LedgerTx {
     accountId: j['accountId'],
     fromId: j['transferFromId'],
     toId: j['transferToId'],
+    categoryId: j['categoryId'],
+    sourceType: j['sourceType'] ?? 'unknown',
+    sourceId: j['sourceId'],
+    originalTransactionId: j['originalTransactionId'],
+    timePrecision: j['timePrecision'] ?? 'unknown',
   );
   int effectOn(String account) => switch (type) {
     TxType.expense => accountId == account ? -amount : 0,
@@ -271,18 +322,64 @@ class QuickEntry {
   );
 }
 
-class WalletData {
-  List<WalletAccount> accounts;
-  List<LedgerTx> transactions;
-  List<WalletCategory> categories;
-  List<QuickEntry> quickEntries;
-  Json profile, settings, agent, providerConfigs, extras;
-  List<Json> goals, chats;
-  WalletData({
-    List<WalletAccount>? accounts,
-    List<LedgerTx>? transactions,
-    List<WalletCategory>? categories,
-    List<QuickEntry>? quickEntries,
+/// Independently writable application metadata. It deliberately has no ledger
+/// lists, so metadata mutations cannot accidentally change financial records.
+class WalletMetadata {
+  bool _frozen = false;
+  void _writable() {
+    if (_frozen) throw StateError('已提交账本不可修改，请使用应用命令');
+  }
+
+  Json _profile;
+  Json get profile => _profile;
+  set profile(Json value) {
+    _writable();
+    _profile = value;
+  }
+
+  Json _settings;
+  Json get settings => _settings;
+  set settings(Json value) {
+    _writable();
+    _settings = value;
+  }
+
+  Json _agent;
+  Json get agent => _agent;
+  set agent(Json value) {
+    _writable();
+    _agent = value;
+  }
+
+  Json _providerConfigs;
+  Json get providerConfigs => _providerConfigs;
+  set providerConfigs(Json value) {
+    _writable();
+    _providerConfigs = value;
+  }
+
+  Json _extras;
+  Json get extras => _extras;
+  set extras(Json value) {
+    _writable();
+    _extras = value;
+  }
+
+  List<Json> _goals;
+  List<Json> get goals => _goals;
+  set goals(List<Json> value) {
+    _writable();
+    _goals = value;
+  }
+
+  List<Json> _chats;
+  List<Json> get chats => _chats;
+  set chats(List<Json> value) {
+    _writable();
+    _chats = value;
+  }
+
+  WalletMetadata({
     Json? profile,
     Json? settings,
     Json? agent,
@@ -290,20 +387,116 @@ class WalletData {
     Json? extras,
     List<Json>? goals,
     List<Json>? chats,
-  }) : accounts = accounts ?? [],
-       transactions = transactions ?? [],
-       categories = categories ?? defaultCategories(),
-       quickEntries = quickEntries ?? [],
-       profile = profile ?? {},
-       settings = settings ?? {'visible': true, 'theme': 'light', 'budget': 0},
-       agent = agent ?? defaultAgent(),
-       providerConfigs = providerConfigs ?? {},
-       extras = extras ?? {},
-       goals = goals ?? [],
-       chats = chats ?? [];
+  }) : _profile = profile ?? {},
+       _settings = settings ?? {'visible': true, 'theme': 'light', 'budget': 0},
+       _agent = agent ?? defaultAgent(),
+       _providerConfigs = providerConfigs ?? {},
+       _extras = extras ?? {},
+       _goals = goals ?? [],
+       _chats = chats ?? [];
+
+  void freezeMetadata() {
+    if (_frozen) return;
+    _profile = _freezeJson(_profile);
+    _settings = _freezeJson(_settings);
+    _agent = _freezeJson(_agent);
+    _providerConfigs = _freezeJson(_providerConfigs);
+    _extras = _freezeJson(_extras);
+    _goals = List.unmodifiable(_goals.map(_freezeJson));
+    _chats = List.unmodifiable(_chats.map(_freezeJson));
+    _frozen = true;
+  }
+
+  WalletMetadata cloneMetadata() => WalletMetadata(
+    profile: _copyJson(profile),
+    settings: _copyJson(settings),
+    agent: _copyJson(agent),
+    providerConfigs: _copyJson(providerConfigs),
+    extras: _copyJson(extras),
+    goals: goals.map(_copyJson).toList(),
+    chats: chats.map(_copyJson).toList(),
+  );
+}
+
+class WalletData extends WalletMetadata {
+  List<WalletAccount> _accounts;
+  List<WalletAccount> get accounts => _accounts;
+  set accounts(List<WalletAccount> value) {
+    _writable();
+    _accounts = value;
+  }
+
+  List<LedgerTx> _transactions;
+  List<LedgerTx> get transactions => _transactions;
+  set transactions(List<LedgerTx> value) {
+    _writable();
+    _transactions = value;
+  }
+
+  List<WalletCategory> _categories;
+  List<WalletCategory> get categories => _categories;
+  set categories(List<WalletCategory> value) {
+    _writable();
+    _categories = value;
+  }
+
+  List<QuickEntry> _quickEntries;
+  List<QuickEntry> get quickEntries => _quickEntries;
+  set quickEntries(List<QuickEntry> value) {
+    _writable();
+    _quickEntries = value;
+  }
+
+  WalletData({
+    List<WalletAccount>? accounts,
+    List<LedgerTx>? transactions,
+    List<WalletCategory>? categories,
+    List<QuickEntry>? quickEntries,
+    super.profile,
+    super.settings,
+    super.agent,
+    super.providerConfigs,
+    super.extras,
+    super.goals,
+    super.chats,
+  }) : _accounts = accounts ?? [],
+       _transactions = transactions ?? [],
+       _categories = categories ?? defaultCategories(),
+       _quickEntries = quickEntries ?? [];
+
+  void freeze({WalletData? previous}) {
+    if (_frozen) return;
+    if (!identical(_accounts, previous?.accounts)) {
+      _accounts = List.unmodifiable(_accounts);
+    }
+    if (!identical(_transactions, previous?.transactions)) {
+      _transactions = List.unmodifiable(_transactions);
+    }
+    if (!identical(_categories, previous?.categories)) {
+      _categories = List.unmodifiable(_categories);
+    }
+    if (!identical(_quickEntries, previous?.quickEntries)) {
+      _quickEntries = List.unmodifiable(_quickEntries);
+    }
+    freezeMetadata();
+  }
+
+  WalletData withMetadata(WalletMetadata metadata) => WalletData(
+    accounts: accounts,
+    transactions: transactions,
+    categories: categories,
+    quickEntries: quickEntries,
+    profile: metadata.profile,
+    settings: metadata.settings,
+    agent: metadata.agent,
+    providerConfigs: metadata.providerConfigs,
+    extras: metadata.extras,
+    goals: metadata.goals,
+    chats: metadata.chats,
+  );
   Json toJson() => {
     'format': 'findash-flutter',
-    'schema': 1,
+    'schema': 2,
     'accounts': accounts.map((a) => a.toJson()).toList(),
     'transactions': transactions.map((t) => t.toJson()).toList(),
     'categories': categories.map((c) => c.toJson()).toList(),
@@ -337,7 +530,36 @@ class WalletData {
     goals: (j['goals'] as List? ?? []).map((g) => Json.from(g)).toList(),
     chats: (j['chats'] as List? ?? []).map((c) => Json.from(c)).toList(),
   );
-  WalletData clone() => WalletData.fromJson(jsonDecode(jsonEncode(toJson())));
+
+  /// Domain records contain only final scalar/immutable fields. Share those
+  /// records, copy their lists, and recursively detach all mutable JSON trees.
+  /// Avoid allocating and parsing a second full ledger-sized JSON string.
+  WalletData clone() => WalletData(
+    accounts: List.of(accounts),
+    transactions: List.of(transactions),
+    categories: List.of(categories),
+    quickEntries: List.of(quickEntries),
+    profile: _copyJson(profile),
+    settings: _copyJson(settings),
+    agent: _copyJson(agent),
+    providerConfigs: _copyJson(providerConfigs),
+    extras: _copyJson(extras),
+    goals: goals.map(_copyJson).toList(),
+    chats: chats.map(_copyJson).toList(),
+  );
+}
+
+Json _copyJson(Json value) => {
+  for (final entry in value.entries) entry.key: _copyJsonValue(entry.value),
+};
+
+dynamic _copyJsonValue(dynamic value) {
+  if (value is Map) return _copyJson(Json.from(value));
+  if (value is List) return value.map(_copyJsonValue).toList();
+  if (value == null || value is String || value is num || value is bool) {
+    return value;
+  }
+  throw const FormatException('账本包含不支持的数据类型');
 }
 
 Json defaultAgent() => {
@@ -440,3 +662,11 @@ const accountPresets = <String, List<(String, String, String)>>{
     ('other_investment', '其它理财', 'more_horiz'),
   ],
 };
+Json _freezeJson(Json value) => Map.unmodifiable({
+  for (final entry in value.entries) entry.key: _freezeValue(entry.value),
+});
+dynamic _freezeValue(dynamic value) {
+  if (value is Map) return _freezeJson(Json.from(value));
+  if (value is List) return List.unmodifiable(value.map(_freezeValue));
+  return value;
+}
