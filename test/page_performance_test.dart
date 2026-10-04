@@ -3,7 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:fin_dash/services/ai_service.dart';
 import 'package:fin_dash/ui/design.dart';
 import 'package:fin_dash/ui/finance_pages.dart';
-import 'package:fin_dash/ui/voice_entry_page.dart';
+import 'package:fin_dash/ui/voice_entry_sheet.dart';
 import 'helpers.dart';
 
 void main() {
@@ -23,7 +23,7 @@ void main() {
         ai: AiService(store, TestVault()),
         child: MaterialApp(
           theme: walletTheme(Brightness.light),
-          home: const VoiceEntryPage(),
+          home: const VoiceSheetHost(),
         ),
       ),
     );
@@ -35,7 +35,7 @@ void main() {
     final previous = debugOnRebuildDirtyWidget;
     debugOnRebuildDirtyWidget = (element, builtOnce) {
       previous?.call(element, builtOnce);
-      if (element.widget is VoiceEntryPage) builds++;
+      if (element.widget is VoiceEntrySheet) builds++;
     };
     addTearDown(() => debugOnRebuildDirtyWidget = previous);
     for (final height in [50.0, 150.0, 250.0, 300.0, 200.0, 0.0]) {
@@ -50,7 +50,7 @@ void main() {
       findsOneWidget,
     );
     await tester.enterText(input, '');
-    await tester.pump();
+    await tester.pumpAndSettle();
     expect(find.byKey(const Key('voice-confirm')), findsNothing);
     expect(tester.takeException(), null);
   });

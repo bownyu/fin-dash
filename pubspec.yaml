@@ -1,7 +1,7 @@
 name: fin_dash
 description: 本地优先的个人记账与资产管理应用
 publish_to: none
-version: 0.4.1+8
+version: 0.5.0+9
 environment:
   sdk: ^3.11.0
 dependencies:

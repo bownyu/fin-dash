@@ -5,6 +5,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
+import '../data/wallet_store.dart';
 import '../domain/models.dart';
 import '../domain/command_context.dart';
 import '../services/file_export.dart';
@@ -16,7 +17,7 @@ import 'design.dart';
 import 'interaction.dart';
 import 'editors.dart';
 import 'preferences.dart';
-import 'voice_entry_page.dart';
+import 'voice_entry_sheet.dart';
 
 class HomePage extends StatefulWidget {
   final VoidCallback onBills, onStats;
@@ -25,9 +26,69 @@ class HomePage extends StatefulWidget {
   State<HomePage> createState() => _HomePageState();
 }
 
-class _HomePageState extends State<HomePage> {
+class _HomePageState extends State<HomePage>
+    with SingleTickerProviderStateMixin {
   int assetView = 0;
   Period spendingPeriod = Period.day;
+
+  /// Plays once when the home page is created; switching tabs keeps it done.
+  late final intro = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 620),
+  );
+  Set<String>? recentIds;
+  String? recentEpoch;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (intro.isAnimating || intro.isCompleted) return;
+    if (MediaQuery.disableAnimationsOf(context)) {
+      intro.value = 1;
+    } else {
+      intro.forward();
+    }
+  }
+
+  @override
+  void dispose() {
+    intro.dispose();
+    super.dispose();
+  }
+
+  /// Sections rise in one after another; finished transitions cost nothing.
+  Widget reveal(int slot, Widget child) {
+    final start = min(slot * .1, .5);
+    final progress = intro.drive(
+      CurveTween(
+        curve: Interval(start, start + .5, curve: Curves.easeOutCubic),
+      ),
+    );
+    return FadeTransition(
+      opacity: progress,
+      child: AnimatedBuilder(
+        animation: progress,
+        child: child,
+        builder: (_, child) => Transform.translate(
+          offset: Offset(0, 14 * (1 - progress.value)),
+          child: child,
+        ),
+      ),
+    );
+  }
+
+  /// Bills new since the previous build, so a just-saved bill can be pointed
+  /// out. Restores and bulk imports change many rows and highlight none.
+  Set<String> freshBills(WalletStore store, List<LedgerTx> recent) {
+    final ids = {for (final t in recent) t.id};
+    final known = recentEpoch == store.ledgerEpoch ? recentIds : null;
+    recentIds = ids;
+    recentEpoch = store.ledgerEpoch;
+    if (known == null) return const {};
+    final fresh = ids.difference(known);
+    return fresh.length > 3 ? const {} : fresh;
+  }
+
   @override
   Widget build(BuildContext context) {
     final store = AppScope.storeOf(
@@ -47,6 +108,7 @@ class _HomePageState extends State<HomePage> {
       range: DateRange.forPeriod(spendingPeriod, DateTime.now()),
     );
     final recent = store.query().take(12).toList();
+    final fresh = freshBills(store, recent);
     final pendingPayments = PaymentNotifications.pendingCount(store.data);
     final budget = (store.data.settings['budget'] as num? ?? 0).toInt();
     final monthSpend = store.total(
@@ -55,496 +117,619 @@ class _HomePageState extends State<HomePage> {
     );
     return PageList(
       children: [
-        if (pendingPayments > 0) ...[
-          Semantics(
-            liveRegion: true,
-            child: Panel(
-              key: const Key('home-payment-pending'),
+        AnimatedSize(
+          duration: motionDuration(context, 260),
+          curve: Curves.easeOutCubic,
+          alignment: Alignment.topCenter,
+          child: pendingPayments == 0
+              ? const SizedBox(width: double.infinity)
+              : reveal(
+                  0,
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 14),
+                    child: Semantics(
+                      liveRegion: true,
+                      child: Panel(
+                        key: const Key('home-payment-pending'),
+                        child: Row(
+                          children: [
+                            const Icon(
+                              Icons.receipt_long_rounded,
+                              color: primary,
+                            ),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    '$pendingPayments 笔支付记录待确认',
+                                    style: const TextStyle(
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                                  ),
+                                  const Text(
+                                    '核对金额和实际账户后入账',
+                                    style: TextStyle(
+                                      color: muted,
+                                      fontSize: 12,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            TextButton(
+                              onPressed: () =>
+                                  openPage(context, const PaymentReviewPage()),
+                              child: const Text('去核对'),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+        ),
+        reveal(
+          1,
+          OverviewGrid(
+            hero: HeroPanel(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: InkWell(
+                          onTap: () =>
+                              setState(() => assetView = (assetView + 1) % 3),
+                          child: Row(
+                            children: [
+                              AnimatedSwitcher(
+                                duration: motionDuration(context, 180),
+                                layoutBuilder: (current, previous) => Stack(
+                                  alignment: Alignment.centerLeft,
+                                  children: [...previous, ?current],
+                                ),
+                                child: Text(
+                                  label,
+                                  key: ValueKey(label),
+                                  style: TextStyle(
+                                    color: colors.secondary,
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: 6),
+                              Icon(
+                                Icons.unfold_more_rounded,
+                                size: 15,
+                                color: colors.secondary,
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                      IconButton(
+                        key: const Key('theme-picker'),
+                        tooltip: '切换外观',
+                        onPressed: () => showThemePicker(context),
+                        icon: Icon(
+                          colors.dark
+                              ? Icons.dark_mode_outlined
+                              : Icons.light_mode_outlined,
+                          size: 20,
+                          color: colors.secondary,
+                        ),
+                      ),
+                      IconButton(
+                        tooltip: '提醒中心',
+                        onPressed: () =>
+                            openPage(context, const RemindersPage()),
+                        icon: Badge(
+                          isLabelVisible: store.suggestions.isNotEmpty,
+                          smallSize: 6,
+                          child: Icon(
+                            Icons.notifications_none_rounded,
+                            size: 20,
+                            color: colors.secondary,
+                          ),
+                        ),
+                      ),
+                      IconButton(
+                        tooltip: visible ? '隐藏金额' : '显示金额',
+                        onPressed: () => perform(
+                          context,
+                          () => store.change(
+                            (d) => d.settings['visible'] = !visible,
+                          ),
+                        ),
+                        icon: Icon(
+                          visible
+                              ? Icons.visibility_outlined
+                              : Icons.visibility_off_outlined,
+                          color: colors.secondary,
+                          size: 20,
+                        ),
+                      ),
+                    ],
+                  ),
+                  InkWell(
+                    onTap: () =>
+                        setState(() => assetView = (assetView + 1) % 3),
+                    child: SizedBox(
+                      width: double.infinity,
+                      height: 56,
+                      child: MoneyText(
+                        value,
+                        size: 40,
+                        color: colors.ink,
+                        respectPrivacy: true,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 18),
+                  // One highlight slides between the three views.
+                  DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: colors.ink.withValues(alpha: .035),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Stack(
+                      children: [
+                        Positioned.fill(
+                          child: AnimatedAlign(
+                            duration: motionDuration(context, 260),
+                            curve: Curves.easeOutCubic,
+                            alignment: Alignment(assetView - 1.0, 0),
+                            child: FractionallySizedBox(
+                              widthFactor: 1 / 3,
+                              heightFactor: 1,
+                              child: DecoratedBox(
+                                decoration: BoxDecoration(
+                                  color: primary.withValues(
+                                    alpha: colors.dark ? .25 : .1,
+                                  ),
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                        Row(
+                          children: List.generate(
+                            3,
+                            (i) => Expanded(
+                              child: Semantics(
+                                selected: assetView == i,
+                                child: InkWell(
+                                  key: Key('asset-view-$i'),
+                                  onTap: () => setState(() => assetView = i),
+                                  borderRadius: BorderRadius.circular(12),
+                                  child: Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                      vertical: 9,
+                                    ),
+                                    child: AnimatedDefaultTextStyle(
+                                      duration: motionDuration(context, 180),
+                                      style: TextStyle(
+                                        fontSize: 12,
+                                        fontWeight: assetView == i
+                                            ? FontWeight.w700
+                                            : FontWeight.w500,
+                                        color: assetView == i
+                                            ? (colors.dark
+                                                  ? const Color(0xFFA8CBFF)
+                                                  : primary)
+                                            : colors.secondary,
+                                      ),
+                                      child: Text(
+                                        ['净资产', '总资产', '总负债'][i],
+                                        textAlign: TextAlign.center,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  Divider(color: colors.ink.withValues(alpha: .08)),
+                  const SizedBox(height: 10),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: InkWell(
+                          onTap: () => setState(
+                            () => spendingPeriod = spendingPeriod == Period.day
+                                ? Period.week
+                                : spendingPeriod == Period.week
+                                ? Period.month
+                                : Period.day,
+                          ),
+                          child: AnimatedSwitcher(
+                            duration: motionDuration(context, 240),
+                            switchInCurve: Curves.easeOutCubic,
+                            switchOutCurve: Curves.easeInCubic,
+                            layoutBuilder: (current, previous) => Stack(
+                              alignment: Alignment.centerLeft,
+                              children: [...previous, ?current],
+                            ),
+                            transitionBuilder: (child, animation) =>
+                                FadeTransition(
+                                  opacity: animation,
+                                  child: SlideTransition(
+                                    position: Tween(
+                                      begin: const Offset(0, .35),
+                                      end: Offset.zero,
+                                    ).animate(animation),
+                                    child: child,
+                                  ),
+                                ),
+                            child: Column(
+                              key: ValueKey(spendingPeriod),
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  '${spendingPeriod == Period.day
+                                      ? '今日'
+                                      : spendingPeriod == Period.week
+                                      ? '本周'
+                                      : '本月'}支出 ↕',
+                                  style: TextStyle(
+                                    color: colors.secondary,
+                                    fontSize: 12,
+                                  ),
+                                ),
+                                const SizedBox(height: 5),
+                                MoneyText(
+                                  spend,
+                                  size: 21,
+                                  color: colors.ink,
+                                  respectPrivacy: true,
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                      TextButton.icon(
+                        onPressed: () =>
+                            openPage(context, const AccountsPage()),
+                        style: TextButton.styleFrom(
+                          foregroundColor: colors.dark
+                              ? const Color(0xFFB6D4FF)
+                              : primary,
+                          backgroundColor: primary.withValues(alpha: .09),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 16,
+                            vertical: 11,
+                          ),
+                        ),
+                        icon: const Icon(
+                          Icons.account_balance_wallet_outlined,
+                          size: 18,
+                        ),
+                        label: const Text('管理资产'),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            tiles: [
+              _Summary(
+                '本月收入',
+                store.total(
+                  TxType.income,
+                  range: DateRange.forPeriod(Period.month, DateTime.now()),
+                ),
+                colors.income,
+                respectPrivacy: true,
+              ),
+              _Summary(
+                '本月支出',
+                monthSpend,
+                colors.expense,
+                respectPrivacy: true,
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 16),
+        reveal(
+          2,
+          LayoutBuilder(
+            builder: (context, box) {
+              final actions = <Widget>[
+                _Action(
+                  '记一笔',
+                  Icons.add_rounded,
+                  primary,
+                  () =>
+                      openPage(context, const TransactionEditor(), modal: true),
+                ),
+                _Action(
+                  '转账',
+                  Icons.swap_horiz_rounded,
+                  mint,
+                  () => openPage(
+                    context,
+                    const TransactionEditor(initialType: TxType.transfer),
+                    modal: true,
+                  ),
+                ),
+                _Action(
+                  'AI 顾问',
+                  Icons.auto_awesome_rounded,
+                  const Color(0xFFA78BFA),
+                  () => openPage(context, const ChatPage()),
+                ),
+                KeyedSubtree(
+                  key: const Key('home-voice-entry'),
+                  child: _Action(
+                    '语音记账',
+                    Icons.mic_rounded,
+                    primary,
+                    // The intent is already clear, so recording starts at once.
+                    () => showVoiceEntry(context, autoStart: true),
+                  ),
+                ),
+              ];
+              if (box.maxWidth < 340 ||
+                  MediaQuery.textScalerOf(context).scale(1) > 1.15) {
+                return Wrap(
+                  spacing: 10,
+                  runSpacing: 10,
+                  children: [
+                    for (final action in actions)
+                      SizedBox(width: (box.maxWidth - 10) / 2, child: action),
+                  ],
+                );
+              }
+              return Row(
+                children: [
+                  for (var i = 0; i < actions.length; i++) ...[
+                    if (i > 0) const SizedBox(width: 10),
+                    Expanded(child: actions[i]),
+                  ],
+                ],
+              );
+            },
+          ),
+        ),
+        if (store.suggestions.isNotEmpty) ...[
+          const SizedBox(height: 18),
+          reveal(
+            3,
+            Panel(
+              padding: const EdgeInsets.all(16),
+              color: primary.withValues(alpha: .09),
               child: Row(
                 children: [
-                  const Icon(Icons.receipt_long_rounded, color: primary),
+                  const Icon(Icons.lightbulb_outline_rounded, color: primary),
                   const SizedBox(width: 12),
                   Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          '$pendingPayments 笔支付记录待确认',
-                          style: const TextStyle(fontWeight: FontWeight.w700),
+                          store.suggestions.first['title'],
+                          style: const TextStyle(fontWeight: FontWeight.w600),
                         ),
-                        const Text(
-                          '核对金额和实际账户后入账',
-                          style: TextStyle(color: muted, fontSize: 12),
+                        Text(
+                          privateFinancialText(
+                            context,
+                            store.suggestions.first['text'],
+                          ),
+                          style: Theme.of(context).textTheme.bodySmall,
                         ),
                       ],
                     ),
                   ),
-                  TextButton(
-                    onPressed: () =>
-                        openPage(context, const PaymentReviewPage()),
-                    child: const Text('去核对'),
+                  IconButton(
+                    tooltip: '查看提醒',
+                    onPressed: () => openPage(context, const RemindersPage()),
+                    icon: const Icon(Icons.chevron_right_rounded, color: muted),
                   ),
                 ],
               ),
-            ),
-          ),
-          const SizedBox(height: 14),
-        ],
-        OverviewGrid(
-          hero: HeroPanel(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Expanded(
-                      child: InkWell(
-                        onTap: () =>
-                            setState(() => assetView = (assetView + 1) % 3),
-                        child: Row(
-                          children: [
-                            Text(
-                              label,
-                              style: TextStyle(
-                                color: colors.secondary,
-                                fontSize: 13,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                            const SizedBox(width: 6),
-                            Icon(
-                              Icons.unfold_more_rounded,
-                              size: 15,
-                              color: colors.secondary,
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                    IconButton(
-                      key: const Key('theme-picker'),
-                      tooltip: '切换外观',
-                      onPressed: () => showThemePicker(context),
-                      icon: Icon(
-                        colors.dark
-                            ? Icons.dark_mode_outlined
-                            : Icons.light_mode_outlined,
-                        size: 20,
-                        color: colors.secondary,
-                      ),
-                    ),
-                    IconButton(
-                      tooltip: '提醒中心',
-                      onPressed: () => openPage(context, const RemindersPage()),
-                      icon: Badge(
-                        isLabelVisible: store.suggestions.isNotEmpty,
-                        smallSize: 6,
-                        child: Icon(
-                          Icons.notifications_none_rounded,
-                          size: 20,
-                          color: colors.secondary,
-                        ),
-                      ),
-                    ),
-                    IconButton(
-                      tooltip: visible ? '隐藏金额' : '显示金额',
-                      onPressed: () => perform(
-                        context,
-                        () => store.change(
-                          (d) => d.settings['visible'] = !visible,
-                        ),
-                      ),
-                      icon: Icon(
-                        visible
-                            ? Icons.visibility_outlined
-                            : Icons.visibility_off_outlined,
-                        color: colors.secondary,
-                        size: 20,
-                      ),
-                    ),
-                  ],
-                ),
-                InkWell(
-                  onTap: () => setState(() => assetView = (assetView + 1) % 3),
-                  child: SizedBox(
-                    width: double.infinity,
-                    height: 56,
-                    child: MoneyText(
-                      value,
-                      size: 40,
-                      color: colors.ink,
-                      respectPrivacy: true,
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 18),
-                Row(
-                  children: List.generate(
-                    3,
-                    (i) => Expanded(
-                      child: Padding(
-                        padding: EdgeInsets.only(right: i == 2 ? 0 : 6),
-                        child: Semantics(
-                          selected: assetView == i,
-                          child: InkWell(
-                            key: Key('asset-view-$i'),
-                            onTap: () => setState(() => assetView = i),
-                            borderRadius: BorderRadius.circular(12),
-                            child: AnimatedContainer(
-                              duration: const Duration(milliseconds: 180),
-                              padding: const EdgeInsets.symmetric(vertical: 9),
-                              decoration: BoxDecoration(
-                                color: assetView == i
-                                    ? primary.withValues(
-                                        alpha: colors.dark ? .25 : .1,
-                                      )
-                                    : colors.ink.withValues(alpha: .035),
-                                borderRadius: BorderRadius.circular(12),
-                              ),
-                              child: Text(
-                                ['净资产', '总资产', '总负债'][i],
-                                textAlign: TextAlign.center,
-                                style: TextStyle(
-                                  fontSize: 12,
-                                  fontWeight: assetView == i
-                                      ? FontWeight.w700
-                                      : FontWeight.w500,
-                                  color: assetView == i
-                                      ? (colors.dark
-                                            ? const Color(0xFFA8CBFF)
-                                            : primary)
-                                      : colors.secondary,
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 16),
-                Divider(color: colors.ink.withValues(alpha: .08)),
-                const SizedBox(height: 10),
-                Row(
-                  children: [
-                    Expanded(
-                      child: InkWell(
-                        onTap: () => setState(
-                          () => spendingPeriod = spendingPeriod == Period.day
-                              ? Period.week
-                              : spendingPeriod == Period.week
-                              ? Period.month
-                              : Period.day,
-                        ),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              '${spendingPeriod == Period.day
-                                  ? '今日'
-                                  : spendingPeriod == Period.week
-                                  ? '本周'
-                                  : '本月'}支出 ↕',
-                              style: TextStyle(
-                                color: colors.secondary,
-                                fontSize: 12,
-                              ),
-                            ),
-                            const SizedBox(height: 5),
-                            MoneyText(
-                              spend,
-                              size: 21,
-                              color: colors.ink,
-                              respectPrivacy: true,
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                    TextButton.icon(
-                      onPressed: () => openPage(context, const AccountsPage()),
-                      style: TextButton.styleFrom(
-                        foregroundColor: colors.dark
-                            ? const Color(0xFFB6D4FF)
-                            : primary,
-                        backgroundColor: primary.withValues(alpha: .09),
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 16,
-                          vertical: 11,
-                        ),
-                      ),
-                      icon: const Icon(
-                        Icons.account_balance_wallet_outlined,
-                        size: 18,
-                      ),
-                      label: const Text('管理资产'),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-          tiles: [
-            _Summary(
-              '本月收入',
-              store.total(
-                TxType.income,
-                range: DateRange.forPeriod(Period.month, DateTime.now()),
-              ),
-              colors.income,
-              respectPrivacy: true,
-            ),
-            _Summary('本月支出', monthSpend, colors.expense, respectPrivacy: true),
-          ],
-        ),
-        const SizedBox(height: 16),
-        LayoutBuilder(
-          builder: (context, box) {
-            final actions = <Widget>[
-              _Action(
-                '记一笔',
-                Icons.add_rounded,
-                primary,
-                () => openPage(context, const TransactionEditor(), modal: true),
-              ),
-              _Action(
-                '转账',
-                Icons.swap_horiz_rounded,
-                mint,
-                () => openPage(
-                  context,
-                  const TransactionEditor(initialType: TxType.transfer),
-                  modal: true,
-                ),
-              ),
-              _Action(
-                'AI 顾问',
-                Icons.auto_awesome_rounded,
-                const Color(0xFFA78BFA),
-                () => openPage(context, const ChatPage()),
-              ),
-              KeyedSubtree(
-                key: const Key('home-voice-entry'),
-                child: _Action(
-                  '语音记账',
-                  Icons.mic_rounded,
-                  primary,
-                  () => openVoiceEntry(context),
-                ),
-              ),
-            ];
-            if (box.maxWidth < 340 ||
-                MediaQuery.textScalerOf(context).scale(1) > 1.15) {
-              return Wrap(
-                spacing: 10,
-                runSpacing: 10,
-                children: [
-                  for (final action in actions)
-                    SizedBox(width: (box.maxWidth - 10) / 2, child: action),
-                ],
-              );
-            }
-            return Row(
-              children: [
-                for (var i = 0; i < actions.length; i++) ...[
-                  if (i > 0) const SizedBox(width: 10),
-                  Expanded(child: actions[i]),
-                ],
-              ],
-            );
-          },
-        ),
-        if (store.suggestions.isNotEmpty) ...[
-          const SizedBox(height: 18),
-          Panel(
-            padding: const EdgeInsets.all(16),
-            color: primary.withValues(alpha: .09),
-            child: Row(
-              children: [
-                const Icon(Icons.lightbulb_outline_rounded, color: primary),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        store.suggestions.first['title'],
-                        style: const TextStyle(fontWeight: FontWeight.w600),
-                      ),
-                      Text(
-                        privateFinancialText(
-                          context,
-                          store.suggestions.first['text'],
-                        ),
-                        style: Theme.of(context).textTheme.bodySmall,
-                      ),
-                    ],
-                  ),
-                ),
-                IconButton(
-                  tooltip: '查看提醒',
-                  onPressed: () => openPage(context, const RemindersPage()),
-                  icon: const Icon(Icons.chevron_right_rounded, color: muted),
-                ),
-              ],
             ),
           ),
         ],
-        SectionTitle(
-          '快捷交易',
-          action: '管理',
-          onAction: () => openPage(context, const QuickEntriesPage()),
+        reveal(
+          4,
+          SectionTitle(
+            '快捷交易',
+            action: '管理',
+            onAction: () => openPage(context, const QuickEntriesPage()),
+          ),
         ),
         if (store.data.quickEntries.isEmpty)
-          Panel(
-            padding: const EdgeInsets.all(16),
-            child: InkWell(
-              onTap: () => openPage(
-                context,
-                const TransactionEditor(saveAsQuick: true),
-                modal: true,
-              ),
-              child: const Row(
-                children: [
-                  Icon(Icons.add_circle_outline_rounded, color: primary),
-                  SizedBox(width: 12),
-                  Expanded(child: Text('添加快捷交易')),
-                  Icon(Icons.chevron_right_rounded, color: muted),
-                ],
+          reveal(
+            4,
+            Panel(
+              padding: const EdgeInsets.all(16),
+              child: InkWell(
+                onTap: () => openPage(
+                  context,
+                  const TransactionEditor(saveAsQuick: true),
+                  modal: true,
+                ),
+                child: const Row(
+                  children: [
+                    Icon(Icons.add_circle_outline_rounded, color: primary),
+                    SizedBox(width: 12),
+                    Expanded(child: Text('添加快捷交易')),
+                    Icon(Icons.chevron_right_rounded, color: muted),
+                  ],
+                ),
               ),
             ),
           )
         else
-          SizedBox(
-            height: 132 * MediaQuery.textScalerOf(context).scale(1),
-            child: ListView.separated(
-              scrollDirection: Axis.horizontal,
-              itemCount: store.data.quickEntries.length + 1,
-              separatorBuilder: (_, _) => const SizedBox(width: 10),
-              itemBuilder: (context, i) {
-                if (i == store.data.quickEntries.length) {
+          reveal(
+            4,
+            SizedBox(
+              height: 132 * MediaQuery.textScalerOf(context).scale(1),
+              child: ListView.separated(
+                scrollDirection: Axis.horizontal,
+                itemCount: store.data.quickEntries.length + 1,
+                separatorBuilder: (_, _) => const SizedBox(width: 10),
+                itemBuilder: (context, i) {
+                  if (i == store.data.quickEntries.length) {
+                    return SizedBox(
+                      width: 96,
+                      child: _QuickTile(
+                        '添加',
+                        null,
+                        Icons.add_rounded,
+                        muted,
+                        () => openPage(
+                          context,
+                          const TransactionEditor(saveAsQuick: true),
+                          modal: true,
+                        ),
+                      ),
+                    );
+                  }
+                  final q = store.data.quickEntries[i];
                   return SizedBox(
                     width: 96,
                     child: _QuickTile(
-                      '添加',
-                      null,
-                      Icons.add_rounded,
-                      muted,
+                      q.title,
+                      q.amount,
+                      iconOf(q.icon),
+                      txColor(q.type),
                       () => openPage(
                         context,
-                        const TransactionEditor(saveAsQuick: true),
+                        TransactionEditor(quick: q),
                         modal: true,
                       ),
                     ),
                   );
-                }
-                final q = store.data.quickEntries[i];
-                return SizedBox(
-                  width: 96,
-                  child: _QuickTile(
-                    q.title,
-                    q.amount,
-                    iconOf(q.icon),
-                    txColor(q.type),
-                    () => openPage(
-                      context,
-                      TransactionEditor(quick: q),
-                      modal: true,
-                    ),
-                  ),
-                );
-              },
+                },
+              ),
             ),
           ),
         if (budget > 0) ...[
-          const SectionTitle('本月预算'),
-          Panel(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        monthSpend > budget
-                            ? '超出 ${privateMoney(context, monthSpend - budget)}'
-                            : '还可支出 ${privateMoney(context, budget - monthSpend)}',
-                        style: TextStyle(
-                          fontWeight: FontWeight.w600,
-                          color: monthSpend > budget ? coral : null,
+          reveal(5, const SectionTitle('本月预算')),
+          reveal(
+            5,
+            Panel(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          monthSpend > budget
+                              ? '超出 ${privateMoney(context, monthSpend - budget)}'
+                              : '还可支出 ${privateMoney(context, budget - monthSpend)}',
+                          style: TextStyle(
+                            fontWeight: FontWeight.w600,
+                            color: monthSpend > budget ? coral : null,
+                          ),
                         ),
                       ),
-                    ),
-                    Text(
-                      '${(monthSpend / budget * 100).round()}%',
-                      style: const TextStyle(color: muted),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 14),
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(6),
-                  child: LinearProgressIndicator(
-                    value: (monthSpend / budget).clamp(0.0, 1.0),
-                    minHeight: 6,
-                    color: monthSpend > budget ? coral : primary,
-                    backgroundColor: primary.withValues(alpha: .1),
+                      Text(
+                        '${(monthSpend / budget * 100).round()}%',
+                        style: const TextStyle(color: muted),
+                      ),
+                    ],
                   ),
-                ),
-                const SizedBox(height: 10),
-                Text(
-                  '预算 ${privateMoney(context, budget)} · 支出 ${privateMoney(context, monthSpend)}',
-                  style: Theme.of(context).textTheme.bodySmall,
-                ),
-              ],
+                  const SizedBox(height: 14),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(6),
+                    // Grows from empty on first show, then eases between values.
+                    child: TweenAnimationBuilder<double>(
+                      tween: Tween(
+                        begin: 0,
+                        end: (monthSpend / budget).clamp(0.0, 1.0),
+                      ),
+                      duration: motionDuration(context, 700),
+                      curve: Curves.easeOutCubic,
+                      builder: (_, value, _) => LinearProgressIndicator(
+                        value: value,
+                        minHeight: 6,
+                        color: monthSpend > budget ? coral : primary,
+                        backgroundColor: primary.withValues(alpha: .1),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  Text(
+                    '预算 ${privateMoney(context, budget)} · 支出 ${privateMoney(context, monthSpend)}',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                ],
+              ),
             ),
           ),
         ],
-        SectionTitle('最近交易', action: '全部账单', onAction: widget.onBills),
+        reveal(
+          6,
+          SectionTitle('最近交易', action: '全部账单', onAction: widget.onBills),
+        ),
         if (recent.isEmpty)
-          Panel(
-            child: EmptyState(
-              '还没有账单',
-              '暂无账单，点击开始记账。',
-              action: FilledButton(
-                onPressed: () =>
-                    openPage(context, const TransactionEditor(), modal: true),
-                child: const Text('开始记账'),
+          reveal(
+            6,
+            Panel(
+              child: EmptyState(
+                '还没有账单',
+                '暂无账单，点击开始记账。',
+                action: FilledButton(
+                  onPressed: () =>
+                      openPage(context, const TransactionEditor(), modal: true),
+                  child: const Text('开始记账'),
+                ),
               ),
             ),
           )
         else
           ...groupTxs(recent).entries.map(
-            (g) => Padding(
-              padding: const EdgeInsets.only(bottom: 14),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Padding(
-                    padding: const EdgeInsets.only(left: 3, bottom: 8),
-                    child: Text(
-                      dateHeading(DateTime.parse(g.key)),
-                      style: Theme.of(context).textTheme.bodySmall,
+            (g) => reveal(
+              6,
+              Padding(
+                padding: const EdgeInsets.only(bottom: 14),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.only(left: 3, bottom: 8),
+                      child: Text(
+                        dateHeading(DateTime.parse(g.key)),
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
                     ),
-                  ),
-                  Panel(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 14,
-                      vertical: 2,
+                    Panel(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 14,
+                        vertical: 2,
+                      ),
+                      child: Column(
+                        children: g.value
+                            .map(
+                              (t) => _FreshRow(
+                                key: ValueKey(t.id),
+                                fresh: fresh.contains(t.id),
+                                child: TransactionRow(
+                                  t,
+                                  onTap: () => transactionActions(context, t),
+                                ),
+                              ),
+                            )
+                            .toList(),
+                      ),
                     ),
-                    child: Column(
-                      children: g.value
-                          .map(
-                            (t) => TransactionRow(
-                              t,
-                              onTap: () => transactionActions(context, t),
-                            ),
-                          )
-                          .toList(),
-                    ),
-                  ),
-                ],
+                  ],
+                ),
               ),
             ),
           ),
@@ -563,44 +748,29 @@ class _Action extends StatelessWidget {
   final VoidCallback onTap;
   const _Action(this.text, this.icon, this.color, this.onTap);
   @override
-  Widget build(BuildContext context) => Material(
-    color: Colors.transparent,
-    child: Ink(
-      decoration: BoxDecoration(
-        color: Color.alphaBlend(
-          color.withValues(alpha: .05),
-          WalletColors.of(context).surface,
-        ),
-        borderRadius: BorderRadius.circular(22),
-        border: Border.all(color: WalletColors.of(context).border),
-      ),
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(22),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(vertical: 16),
-          child: Column(
-            children: [
-              Container(
-                padding: const EdgeInsets.all(9),
-                decoration: BoxDecoration(
-                  color: color.withValues(alpha: .1),
-                  borderRadius: BorderRadius.circular(14),
-                ),
-                child: Icon(icon, color: color, size: 23),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                text,
-                style: const TextStyle(
-                  fontWeight: FontWeight.w600,
-                  fontSize: 13,
-                ),
-              ),
-            ],
+  Widget build(BuildContext context) => _PressTile(
+    color: Color.alphaBlend(
+      color.withValues(alpha: .05),
+      WalletColors.of(context).surface,
+    ),
+    padding: const EdgeInsets.symmetric(vertical: 16),
+    onTap: onTap,
+    child: Column(
+      children: [
+        Container(
+          padding: const EdgeInsets.all(9),
+          decoration: BoxDecoration(
+            color: color.withValues(alpha: .1),
+            borderRadius: BorderRadius.circular(14),
           ),
+          child: Icon(icon, color: color, size: 23),
         ),
-      ),
+        const SizedBox(height: 8),
+        Text(
+          text,
+          style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
+        ),
+      ],
     ),
   );
 }
@@ -613,48 +783,133 @@ class _QuickTile extends StatelessWidget {
   final VoidCallback onTap;
   const _QuickTile(this.title, this.amount, this.icon, this.color, this.onTap);
   @override
-  Widget build(BuildContext context) => Material(
-    color: Colors.transparent,
-    child: Ink(
-      decoration: BoxDecoration(
-        color: WalletColors.of(context).surface,
-        borderRadius: BorderRadius.circular(22),
-        border: Border.all(color: WalletColors.of(context).border),
-      ),
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(22),
-        child: Padding(
+  Widget build(BuildContext context) => _PressTile(
+    color: WalletColors.of(context).surface,
+    padding: const EdgeInsets.all(10),
+    onTap: onTap,
+    child: Column(
+      children: [
+        Container(
           padding: const EdgeInsets.all(10),
-          child: Column(
-            children: [
-              Container(
-                padding: const EdgeInsets.all(10),
-                decoration: BoxDecoration(
-                  color: color.withValues(alpha: .1),
-                  borderRadius: BorderRadius.circular(14),
-                ),
-                child: Icon(icon, color: color, size: 22),
-              ),
-              const SizedBox(height: 7),
-              Text(
-                title,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(fontSize: 12),
-              ),
-              Text(
-                amount == null
-                    ? '自定金额'
-                    : privateMoney(context, amount!, symbol: false),
-                style: Theme.of(context).textTheme.bodySmall,
-              ),
-            ],
+          decoration: BoxDecoration(
+            color: color.withValues(alpha: .1),
+            borderRadius: BorderRadius.circular(14),
           ),
+          child: Icon(icon, color: color, size: 22),
+        ),
+        const SizedBox(height: 7),
+        Text(
+          title,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(fontSize: 12),
+        ),
+        Text(
+          amount == null
+              ? '自定金额'
+              : privateMoney(context, amount!, symbol: false),
+          style: Theme.of(context).textTheme.bodySmall,
+        ),
+      ],
+    ),
+  );
+}
+
+/// A rounded home tile that dips slightly while pressed. The scale only
+/// animates during a touch, so idle tiles cost nothing.
+class _PressTile extends StatefulWidget {
+  final Color color;
+  final EdgeInsetsGeometry padding;
+  final VoidCallback onTap;
+  final Widget child;
+  const _PressTile({
+    required this.color,
+    required this.padding,
+    required this.onTap,
+    required this.child,
+  });
+  @override
+  State<_PressTile> createState() => _PressTileState();
+}
+
+class _PressTileState extends State<_PressTile> {
+  bool pressed = false;
+  @override
+  Widget build(BuildContext context) => AnimatedScale(
+    scale: pressed ? .96 : 1,
+    duration: motionDuration(context, 120),
+    curve: Curves.easeOut,
+    child: Material(
+      color: Colors.transparent,
+      child: Ink(
+        decoration: BoxDecoration(
+          color: widget.color,
+          borderRadius: BorderRadius.circular(22),
+          border: Border.all(color: WalletColors.of(context).border),
+        ),
+        child: InkWell(
+          onTap: widget.onTap,
+          onHighlightChanged: (value) => setState(() => pressed = value),
+          borderRadius: BorderRadius.circular(22),
+          child: Padding(padding: widget.padding, child: widget.child),
         ),
       ),
     ),
   );
+}
+
+/// Briefly tints a bill that just appeared. The tint waits until this page is
+/// the visible route again, so a bill saved from the voice sheet or editor is
+/// pointed out after the sheet closes rather than behind it.
+class _FreshRow extends StatefulWidget {
+  final bool fresh;
+  final Widget child;
+  const _FreshRow({super.key, required this.fresh, required this.child});
+  @override
+  State<_FreshRow> createState() => _FreshRowState();
+}
+
+class _FreshRowState extends State<_FreshRow>
+    with SingleTickerProviderStateMixin {
+  AnimationController? highlight;
+  late bool waiting = widget.fresh;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (!waiting || ModalRoute.isCurrentOf(context) == false) return;
+    waiting = false;
+    if (MediaQuery.disableAnimationsOf(context)) return;
+    highlight = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1600),
+    )..forward();
+  }
+
+  @override
+  void dispose() {
+    highlight?.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final animation = highlight;
+    if (animation == null) return widget.child;
+    return AnimatedBuilder(
+      animation: animation,
+      child: widget.child,
+      builder: (_, child) => DecoratedBox(
+        decoration: BoxDecoration(
+          color: primary.withValues(
+            alpha: .16 * (1 - Curves.easeInCubic.transform(animation.value)),
+          ),
+          borderRadius: BorderRadius.circular(16),
+        ),
+        child: child,
+      ),
+    );
+  }
 }
 
 class AccountsPage extends StatelessWidget {

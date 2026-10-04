@@ -13,7 +13,7 @@ object VoiceWidgetState {
     fun show(context: Context, id: Int, message: String? = null, text: String? = null,
         phase: String? = null, draft: String? = null, summary: String? = null,
         transaction: String? = null, entryId: String? = null, canConfirm: Boolean? = null,
-        clear: Boolean = false, hasAccounts: Boolean? = null) {
+        clear: Boolean = false, hasAccounts: Boolean? = null, live: String? = null) {
         val edit = preferences(context).edit()
         if (clear) for (key in listOf("draft", "transaction", "summary", "canConfirm")) edit.remove("$key:$id")
         message?.let { edit.putString("status:$id", it) }
@@ -25,6 +25,8 @@ object VoiceWidgetState {
         entryId?.let { edit.putString("entry:$id", it) }
         canConfirm?.let { edit.putBoolean("canConfirm:$id", it) }
         hasAccounts?.let { edit.putBoolean("hasAccounts:$id", it) }
+        // Words heard in the current capture; they only become text:$id once recognized.
+        live?.let { if (it.isEmpty()) edit.remove("live:$id") else edit.putString("live:$id", it) }
         edit.apply()
         render(context, id)
     }
@@ -39,7 +41,13 @@ object VoiceWidgetState {
         val busy = phase in VoiceWidgetFlow.busy
         val views = RemoteViews(context.packageName, R.layout.voice_widget)
         val transcript = prefs.getString("text:$id", "") ?: ""
-        val summary = if (hasDraft || saved) prefs.getString("summary:$id", transcript) else transcript
+        val live = if (phase in setOf("starting", "listening", "recognizing"))
+            prefs.getString("live:$id", "") ?: "" else ""
+        val summary = when {
+            live.isNotBlank() -> if (hasDraft) "补充：$live" else live
+            hasDraft || saved -> prefs.getString("summary:$id", transcript)
+            else -> transcript
+        }
         views.setTextViewText(R.id.voice_widget_text,
             if (summary.isNullOrBlank()) "FinDash · 语音记账" else summary.substringBefore('\n'))
         val detail = summary?.substringAfter('\n', "") ?: ""

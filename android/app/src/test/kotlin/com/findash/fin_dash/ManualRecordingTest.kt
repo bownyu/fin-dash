@@ -65,6 +65,25 @@ class ManualRecordingTest {
         } finally { file.delete() }
     }
 
+    @Test fun recordingLevelFollowsLoudness() {
+        fun buffer(amplitude: Int) = ByteArray(3200).also { bytes ->
+            for (i in 0 until 1600) {
+                val value = if (i % 2 == 0) amplitude else -amplitude
+                bytes[i * 2] = (value and 255).toByte()
+                bytes[i * 2 + 1] = ((value shr 8) and 255).toByte()
+            }
+        }
+        assertEquals(0f, PcmSegments.level(ByteArray(3200), 3200), 0f)
+        assertEquals(0f, PcmSegments.level(buffer(20), 0), 0f)
+        val quiet = PcmSegments.level(buffer(30), 3200)    // about -61 dBFS
+        val speech = PcmSegments.level(buffer(2000), 3200) // about -24 dBFS
+        assertEquals(0f, quiet, 0f)
+        assertTrue(speech > .8f && speech < 1f)
+        assertEquals(1f, PcmSegments.level(buffer(32000), 3200), 0f)
+        // A short final read only measures the bytes actually recorded.
+        assertEquals(speech, PcmSegments.level(buffer(2000).copyOf(6400), 3200), 0f)
+    }
+
     @Test fun digitalSilenceNeverReachesTheRecognizer() {
         val file = File.createTempFile("findash-pcm-silence-", ".pcm")
         try {

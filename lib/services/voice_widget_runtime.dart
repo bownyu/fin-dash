@@ -35,14 +35,13 @@ class VoiceWidgetRuntime {
           await service.undo(tx);
           return {'success': true, 'message': '已撤销这笔账单', 'undone': true};
         }
+        final stored = request['draft'] is String
+            ? _draft(request['draft'] as String, '${request['previous'] ?? ''}')
+            : null;
         VoiceDraft draft;
         if (request['operation'] == 'confirm' ||
             request['operation'] == 'account') {
-          final raw = Json.from(jsonDecode(request['draft'] as String));
-          draft = VoiceDraft(
-            raw['entryId'] as String,
-            Json.from(raw['fields'] as Map),
-          );
+          draft = stored!;
           if (request['operation'] == 'confirm') {
             final tx = await service.confirm(draft);
             return {
@@ -113,16 +112,16 @@ class VoiceWidgetRuntime {
               : accounts.length == 1
               ? accounts.single.id
               : null;
+          // With a stored draft the new words correct it instead of starting over.
           draft = await service.preview(
             request['text'] as String,
-            entryId: request['entryId'] as String,
+            entryId: stored?.entryId ?? request['entryId'] as String,
             accountId: accountId,
+            base: stored,
           );
         }
         final problem = draft.problem(store.data);
-        final accountMissing =
-            draft.fields['type'] != 'transfer' &&
-            !store.activeAccounts.any((a) => a.id == draft.fields['accountId']);
+        final missing = draft.missing(store.data);
         return {
           'success': true,
           'canConfirm': problem == null,
@@ -131,13 +130,14 @@ class VoiceWidgetRuntime {
               ? draft.fields['type'] == 'transfer'
                     ? '点摘要换组合 · 可分别换转出／转入'
                     : '点账单换账户 · 右侧确认'
-              : accountMissing
+              : missing.contains('accountId')
               ? '点账单选择付款账户'
-              : draft.fields['amountCents'] == null
+              : missing.contains('amountCents')
               ? '缺少金额 · 点麦克风补充'
               : '请补充信息：$problem',
           'summary': _summary(store, draft.fields),
-          'draft': {'entryId': draft.entryId, 'fields': draft.fields},
+          'draft': draft.toJson(),
+          if (draft.transcript.isNotEmpty) 'text': draft.transcript,
           'hasAccounts': store.activeAccounts.isNotEmpty,
         };
       } catch (e) {
@@ -147,6 +147,16 @@ class VoiceWidgetRuntime {
         };
       }
     });
+  }
+
+  static VoiceDraft _draft(String encoded, String transcript) {
+    final raw = Json.from(jsonDecode(encoded));
+    return VoiceDraft(
+      raw['entryId'] as String,
+      Json.from(raw['fields'] as Map),
+      transcript: transcript,
+      assumed: {...(raw['assumed'] as List? ?? const []).whereType<String>()},
+    );
   }
 
   static String _summary(WalletStore store, Json fields) {

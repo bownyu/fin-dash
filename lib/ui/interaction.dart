@@ -79,6 +79,8 @@ Future<T?> pickWalletOption<T>(
   required String Function(T) label,
   String? Function(T)? subtitle,
   IconData? Function(T)? icon,
+  Color? Function(T)? color,
+  bool grid = false,
   T? selected,
 }) async {
   final selection = await showModalBottomSheet<_Selection<T>>(
@@ -93,8 +95,8 @@ Future<T?> pickWalletOption<T>(
       label: (item) => label(item.value as T),
       subtitle: subtitle,
       icon: icon,
-      color: null,
-      grid: false,
+      color: color,
+      grid: grid,
     ),
   );
   return selection?.value;

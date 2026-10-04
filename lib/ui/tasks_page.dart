@@ -4,7 +4,7 @@ import '../domain/models.dart';
 import '../agent/task_runtime.dart';
 import 'design.dart';
 import 'query_result_card.dart';
-import 'voice_entry_page.dart';
+import 'voice_entry_sheet.dart';
 import 'saved_analyses_page.dart';
 import 'agent_batch_card.dart';
 
@@ -41,12 +41,10 @@ class TasksPage extends StatelessWidget {
                           '语音草稿：${drafts[index - tasks.length]['text']}',
                         ),
                         trailing: const Icon(Icons.chevron_right),
-                        onTap: () => openPage(
+                        onTap: () => showVoiceEntry(
                           context,
-                          VoiceEntryPage(
-                            entryId: drafts[index - tasks.length]['entryId'],
-                            initialText: drafts[index - tasks.length]['text'],
-                          ),
+                          entryId: drafts[index - tasks.length]['entryId'],
+                          initialText: drafts[index - tasks.length]['text'],
                         ),
                       ),
                     )

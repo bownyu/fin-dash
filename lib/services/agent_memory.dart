@@ -1,5 +1,6 @@
 import '../data/wallet_store.dart';
 import '../domain/models.dart';
+import '../domain/text_terms.dart';
 
 /// Keeps the existing agent.memories format, including imported legacy fields.
 class AgentMemory {
@@ -7,24 +8,15 @@ class AgentMemory {
   AgentMemory(this.store);
   static String fact(Json item) =>
       '${item['fact'] ?? item['description'] ?? ''}'.trim();
-  static String _normalize(String value) =>
-      value.toLowerCase().replaceAll(RegExp(r'\s+'), '');
   List<Json> search(String query, {int limit = 12, int maxChars = 6000}) {
-    final terms = <String>{};
-    final normalized = _normalize(query);
-    terms.addAll(
-      RegExp(r'[a-z0-9]+').allMatches(normalized).map((m) => m.group(0)!),
-    );
-    for (var i = 0; i < normalized.length - 1; i++) {
-      terms.add(normalized.substring(i, i + 2));
-    }
+    final terms = searchTerms(query);
     final items = (store.data.agent['memories'] as List? ?? [])
         .whereType<Map>()
         .map((m) => Json.from(m))
         .where((m) => fact(m).isNotEmpty)
         .toList();
     int score(Json item) {
-      final value = _normalize(fact(item));
+      final value = normalizeSearchText(fact(item));
       final relevant = terms.where(value.contains).length;
       return relevant * 10 +
           switch (item['importance']) {
@@ -47,7 +39,7 @@ class AgentMemory {
     var length = 0;
     for (final item in items) {
       final text = fact(item);
-      if (!seen.add(_normalize(text))) continue;
+      if (!seen.add(normalizeSearchText(text))) continue;
       if (length + text.length > maxChars) continue;
       result.add({...item, 'fact': text});
       length += text.length;
@@ -81,7 +73,10 @@ class AgentMemory {
         throw const FormatException('记忆不存在，请先查询');
       }
       final duplicate = items.indexWhere(
-        (m) => m is Map && _normalize(fact(Json.from(m))) == _normalize(text),
+        (m) =>
+            m is Map &&
+            normalizeSearchText(fact(Json.from(m))) ==
+                normalizeSearchText(text),
       );
       if (!update && duplicate >= 0) {
         index = duplicate;

@@ -2,13 +2,19 @@ import 'package:flutter/services.dart';
 
 class VoiceInput {
   static const channel = MethodChannel('findash/voice');
+
+  /// [onLevel] receives microphone loudness from 0 to 1 about ten times a second.
   Future<String?> listen({
     void Function(String)? onPartial,
     void Function(String)? onState,
+    void Function(double)? onLevel,
   }) async {
     channel.setMethodCallHandler((call) async {
       if (call.method == 'partial') onPartial?.call(call.arguments as String);
       if (call.method == 'state') onState?.call(call.arguments as String);
+      if (call.method == 'level') {
+        onLevel?.call((call.arguments as num).toDouble());
+      }
     });
     try {
       return await channel.invokeMethod<String>('start');

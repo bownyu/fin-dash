@@ -3,10 +3,27 @@ package com.findash.fin_dash
 import java.io.File
 import java.io.RandomAccessFile
 import kotlin.math.abs
+import kotlin.math.log10
+import kotlin.math.sqrt
 
 /** Used after manual stop only: prefer quiet boundaries and retain every PCM sample. */
 object PcmSegments {
     private const val RATE = 16000
+
+    /** Loudness of one PCM16 buffer, mapping -60..-20 dBFS onto 0..1 for the recording meter. */
+    fun level(buffer: ByteArray, count: Int): Float {
+        val samples = minOf(count, buffer.size) / 2
+        if (samples == 0) return 0f
+        var sum = 0.0
+        for (i in 0 until samples) {
+            val sample = ((buffer[i * 2].toInt() and 255) or (buffer[i * 2 + 1].toInt() shl 8))
+                .toShort() / 32768.0
+            sum += sample * sample
+        }
+        val decibels = 20 * log10(maxOf(sqrt(sum / samples), 1e-9))
+        return ((decibels + 60) / 40).coerceIn(0.0, 1.0).toFloat()
+    }
+
     fun read(file: File, consume: (FloatArray) -> Boolean) {
         RandomAccessFile(file, "r").use { input ->
             val buffer = ByteArray(RATE * 20 * 2)

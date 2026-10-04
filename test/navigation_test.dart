@@ -246,4 +246,90 @@ void main() {
       );
     }
   }
+
+  testWidgets('home sections rise in once and stay put across tab switches', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final store = await emptyStore();
+    await store.change((data) {
+      final demo = demoData();
+      data.profile = demo.profile;
+      data.accounts = demo.accounts;
+      data.transactions = demo.transactions;
+    });
+    await tester.pumpWidget(
+      FinDashApp(store: store, ai: AiService(store, TestVault())),
+    );
+    await tester.pump();
+    FadeTransition overviewFade() => tester.widget<FadeTransition>(
+      find
+          .ancestor(
+            of: find.byType(OverviewGrid),
+            matching: find.byType(FadeTransition),
+          )
+          .first,
+    );
+    expect(overviewFade().opacity.value, lessThan(1));
+    await tester.pumpAndSettle();
+    expect(overviewFade().opacity.value, 1);
+    await tester.tap(find.byKey(const Key('nav-2')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('nav-0')));
+    await tester.pump();
+    expect(overviewFade().opacity.value, 1);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+    'a bill saved under a sheet is highlighted only after the sheet closes',
+    (tester) async {
+      final store = await renderApp(tester);
+      await tester.scrollUntilVisible(
+        find.text('查看全部账单 →'),
+        300,
+        scrollable: find
+            .descendant(
+              of: find.byType(PageList),
+              matching: find.byType(Scrollable),
+            )
+            .first,
+      );
+      await tester.pumpAndSettle();
+      final home = tester.element(find.byType(HomePage));
+      showModalBottomSheet<void>(
+        context: home,
+        builder: (_) => const SizedBox(height: 200),
+      );
+      await tester.pumpAndSettle();
+      await store.change(
+        (d) => d.transactions.add(
+          LedgerTx(
+            id: 'fresh-bill',
+            title: '刚记的一笔',
+            amount: 100,
+            date: DateTime.now(),
+            type: TxType.expense,
+            category: '餐饮',
+            accountId: d.accounts.first.id,
+          ),
+        ),
+      );
+      await tester.pump();
+      expect(find.text('刚记的一笔'), findsOneWidget);
+      // Nothing animates behind the sheet.
+      await tester.pump(const Duration(seconds: 2));
+      expect(tester.hasRunningAnimations, isFalse);
+      Navigator.of(home).pop();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(tester.hasRunningAnimations, isTrue);
+      await tester.pumpAndSettle();
+      expect(tester.hasRunningAnimations, isFalse);
+      expect(tester.takeException(), isNull);
+    },
+  );
 }

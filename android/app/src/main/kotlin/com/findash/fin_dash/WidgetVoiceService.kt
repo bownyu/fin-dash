@@ -105,21 +105,30 @@ class WidgetVoiceService : Service() {
                     "entryId" to (prefs.getString("entry:$id", null) ?: UUID.randomUUID().toString())))
             }
             else -> {
-                val previous = if (operation == "supplement") prefs.getString("text:$id", "") ?: "" else ""
-                val entry = UUID.randomUUID().toString()
+                // A spoken correction keeps the reviewed draft and its entry; the app runtime merges them.
+                val draft = if (operation == "supplement") prefs.getString("draft:$id", null) else null
+                val previous = prefs.getString("text:$id", "") ?: ""
+                val entry = draft?.let { prefs.getString("entry:$id", null) } ?: UUID.randomUUID().toString()
                 // Keep previous text until the local model returns a new transcript.
                 VoiceWidgetState.show(this, id, "正在启动麦克风…", phase = "starting",
-                    entryId = entry, clear = true)
+                    entryId = entry, clear = draft == null, live = "")
                 speech = SpeechCapture(this, { text ->
                     speech = null
-                    val combined = if (previous.isEmpty()) text else "$previous；补充：$text"
-                    VoiceWidgetState.show(this, id, text = combined)
-                    callRuntime(id, mapOf("operation" to "preview", "text" to combined, "entryId" to entry))
+                    if (draft == null) VoiceWidgetState.show(this, id, text = text)
+                    callRuntime(id, buildMap {
+                        put("operation", "preview")
+                        put("text", text)
+                        put("entryId", entry)
+                        if (draft != null) {
+                            put("draft", draft)
+                            put("previous", previous)
+                        }
+                    })
                 }, { message ->
                     speech = null
                     finish(id, mapOf("message" to message))
                 }, { text ->
-                    VoiceWidgetState.show(this, id, text = if (previous.isEmpty()) text else "$previous；补充：$text")
+                    VoiceWidgetState.show(this, id, live = text)
                 }, { state ->
                     VoiceWidgetState.show(this, id, when (state) {
                         "listening" -> "正在录音 · 点一下结束"
@@ -159,7 +168,7 @@ class WidgetVoiceService : Service() {
         val draft = result["draft"] as? Map<*, *>
         val undone = result["undone"] == true
         VoiceWidgetState.show(this, id, result["message"]?.toString() ?: "未完成，请重试",
-            text = if (undone) "" else null,
+            text = if (undone) "" else result["text"]?.toString(), live = "",
             phase = when { undone -> "idle"; tx != null -> "saved"; draft != null -> "review"; else -> "error" },
             transaction = tx?.let { JSONObject(it).toString() },
             draft = draft?.let { JSONObject(it).toString() },

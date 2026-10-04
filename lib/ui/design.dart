@@ -631,16 +631,20 @@ class AppScopeData extends InheritedModel<WalletDomain> {
   ) => dependencies.any((d) => versions[d] != oldWidget.versions[d]);
 }
 
+/// False while the caller's route is covered or still animating, so a double
+/// tap never stacks two pages or sheets.
+bool routeReady(BuildContext context) {
+  final current = ModalRoute.of(context);
+  return current == null ||
+      (current.isCurrent && current.animation?.isAnimating != true);
+}
+
 Future<T?> openPage<T>(
   BuildContext context,
   Widget page, {
   bool modal = false,
 }) {
-  final current = ModalRoute.of(context);
-  if (current != null &&
-      (!current.isCurrent || current.animation?.isAnimating == true)) {
-    return Future<T?>.value();
-  }
+  if (!routeReady(context)) return Future<T?>.value();
   FocusManager.instance.primaryFocus?.unfocus();
   return Navigator.of(
     context,
@@ -873,31 +877,45 @@ class MoneyText extends StatelessWidget {
     return FittedBox(
       fit: BoxFit.scaleDown,
       alignment: Alignment.centerLeft,
-      child: visible
-          ? TweenAnimationBuilder<int>(
-              tween: IntTween(begin: value, end: value),
-              duration: Duration(
-                milliseconds: MediaQuery.disableAnimationsOf(context) ? 0 : 220,
-              ),
-              builder: (_, amount, _) => Text(
-                money(amount),
+      // Hiding or showing amounts cross-fades instead of snapping.
+      child: AnimatedSwitcher(
+        duration: Duration(
+          milliseconds: MediaQuery.disableAnimationsOf(context) ? 0 : 180,
+        ),
+        layoutBuilder: (current, previous) => Stack(
+          alignment: Alignment.centerLeft,
+          children: [...previous, ?current],
+        ),
+        child: visible
+            ? TweenAnimationBuilder<int>(
+                key: const ValueKey(true),
+                tween: IntTween(begin: value, end: value),
+                duration: Duration(
+                  milliseconds: MediaQuery.disableAnimationsOf(context)
+                      ? 0
+                      : 220,
+                ),
+                builder: (_, amount, _) => Text(
+                  money(amount),
+                  style: TextStyle(
+                    fontSize: size,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: -.5,
+                    color: color,
+                    fontFeatures: const [ui.FontFeature.tabularFigures()],
+                  ),
+                ),
+              )
+            : Text(
+                '¥ ••••••',
+                key: const ValueKey(false),
                 style: TextStyle(
                   fontSize: size,
                   fontWeight: FontWeight.w700,
-                  letterSpacing: -.5,
                   color: color,
-                  fontFeatures: const [ui.FontFeature.tabularFigures()],
                 ),
               ),
-            )
-          : Text(
-              '¥ ••••••',
-              style: TextStyle(
-                fontSize: size,
-                fontWeight: FontWeight.w700,
-                color: color,
-              ),
-            ),
+      ),
     );
   }
 }

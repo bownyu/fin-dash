@@ -7,6 +7,7 @@ import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.os.Handler
 import android.os.Looper
+import android.os.Process
 import com.k2fsa.sherpa.onnx.OfflineModelConfig
 import com.k2fsa.sherpa.onnx.OfflineRecognizer
 import com.k2fsa.sherpa.onnx.OfflineRecognizerConfig
@@ -15,15 +16,21 @@ import com.k2fsa.sherpa.onnx.SileroVadModelConfig
 import com.k2fsa.sherpa.onnx.Vad
 import com.k2fsa.sherpa.onnx.VadModelConfig
 import java.io.File
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.FutureTask
 import java.util.concurrent.atomic.AtomicReference
 
-/** Records until the user stops; only then runs the bundled ASR. No network/provider fallback. */
+/**
+ * Records until the user stops; only then runs the bundled ASR. No network/provider fallback.
+ * Model weights load while the user speaks, so stopping only waits for decoding.
+ */
 class SpeechCapture(
     context: Context,
     private val onResult: (String) -> Unit,
     private val onError: (String) -> Unit,
     private val onPartial: (String) -> Unit = {},
-    private val onState: (String) -> Unit = {}
+    private val onState: (String) -> Unit = {},
+    private val onLevel: (Float) -> Unit = {}
 ) {
     companion object {
         private const val SAMPLE_RATE = 16000
@@ -34,6 +41,10 @@ class SpeechCapture(
     private val context = context.applicationContext
     private val handler = Handler(Looper.getMainLooper())
     private val session = ManualRecordingSession()
+
+    private class Models(val recognizer: OfflineRecognizer, val vad: Vad) {
+        fun release() { recognizer.release(); vad.release() }
+    }
 
     fun start() {
         if (!session.start()) return
@@ -48,10 +59,12 @@ class SpeechCapture(
     @SuppressLint("MissingPermission") // VoiceBridge / WidgetPermissionActivity request it first.
     private fun captureAndTranscribe() {
         var pcm: File? = null
+        var models: FutureTask<Models>? = null
         try {
             // Fail explicitly if a broken build omitted the model, without using system/cloud ASR.
             context.assets.openFd("$MODEL_DIR/model.int8.onnx").use { }
             if (session.cancelled) return
+            models = FutureTask { loadModels() }.also { Thread(it, "findash-voice-model").start() }
             // Remove recordings left by a killed process before opening this session's file.
             context.cacheDir.listFiles { file -> file.name.startsWith("findash-voice-") &&
                 file.name.endsWith(".pcm") }?.forEach { it.delete() }
@@ -75,7 +88,11 @@ class SpeechCapture(
                     while (session.recording) {
                         val count = recorder.read(buffer, 0, buffer.size)
                         check(count > 0) { "录音中断，请检查麦克风后重试" }
-                        if (!session.cancelled) output.write(buffer, 0, count)
+                        if (!session.cancelled) {
+                            output.write(buffer, 0, count)
+                            val level = PcmSegments.level(buffer, count)
+                            publish { onLevel(level) }
+                        }
                     }
                 }
             } finally {
@@ -86,7 +103,9 @@ class SpeechCapture(
             }
             if (session.cancelled) return
             publish { onState("recognizing") }
-            val text = transcribe(pcm)
+            val text = transcribe(pcm, try { models.get() } catch (e: ExecutionException) {
+                throw e.cause ?: e
+            })
             if (text.isBlank()) deliver { onError("没有听清，请再说一次，也可以直接输入") }
             else deliver { onResult(text) }
         } catch (_: SecurityException) {
@@ -100,62 +119,72 @@ class SpeechCapture(
                 else "本地识别未完成，请重试或直接输入记账内容") }
         } finally {
             pcm?.delete()
+            // A model still loading after an early failure is released before the microphone frees up,
+            // so two captures never hold the weights at once.
+            try { models?.get()?.release() } catch (_: Exception) { }
             active.compareAndSet(this, null)
         }
     }
 
-    private fun transcribe(pcm: File): String {
-        // Keep long recordings on disk. Segments bound model memory without ending the recording.
-        if (pcm.length() < 3200) return ""
+    private fun loadModels(): Models {
+        Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND)
         val vad = Vad(context.assets, VadModelConfig(sileroVadModelConfig =
             SileroVadModelConfig(model = "$MODEL_DIR/silero_vad.onnx", threshold = 0.35f,
                 minSpeechDuration = 0.1f, minSilenceDuration = 0.8f, maxSpeechDuration = 20f)))
-        var recognizer: OfflineRecognizer? = null
         try {
-            recognizer = OfflineRecognizer(context.assets, OfflineRecognizerConfig(
+            return Models(OfflineRecognizer(context.assets, OfflineRecognizerConfig(
                 modelConfig = OfflineModelConfig(
                     senseVoice = OfflineSenseVoiceModelConfig(
                         model = "$MODEL_DIR/model.int8.onnx", language = "zh",
                         useInverseTextNormalization = true),
-                    tokens = "$MODEL_DIR/tokens.txt", numThreads = 2, provider = "cpu")))
-            val text = StringBuilder()
-            fun decode(samples: FloatArray) {
-                if (session.cancelled) return
-                val stream = recognizer.createStream()
-                try {
-                    stream.acceptWaveform(samples, SAMPLE_RATE)
-                    recognizer.decode(stream)
-                    val result = recognizer.getResult(stream).text
-                        .replace(Regex("<\\|[^|]*\\|>"), "").trim()
-                    if (result.isNotEmpty()) {
-                        text.append(result)
-                        val partial = text.toString()
-                        publish { onPartial(partial) }
-                    }
-                } finally { stream.release() }
-            }
-            fun drain() {
-                while (!vad.empty() && !session.cancelled) {
-                    decode(vad.front().samples)
-                    vad.pop()
+                    tokens = "$MODEL_DIR/tokens.txt", numThreads = 2, provider = "cpu"))), vad)
+        } catch (e: Throwable) {
+            vad.release()
+            throw e
+        }
+    }
+
+    private fun transcribe(pcm: File, models: Models): String {
+        // Keep long recordings on disk. Segments bound model memory without ending the recording.
+        if (pcm.length() < 3200) return ""
+        val (recognizer, vad) = models.recognizer to models.vad
+        val text = StringBuilder()
+        fun decode(samples: FloatArray) {
+            if (session.cancelled) return
+            val stream = recognizer.createStream()
+            try {
+                stream.acceptWaveform(samples, SAMPLE_RATE)
+                recognizer.decode(stream)
+                val result = recognizer.getResult(stream).text
+                    .replace(Regex("<\\|[^|]*\\|>"), "").trim()
+                if (result.isNotEmpty()) {
+                    text.append(result)
+                    val partial = text.toString()
+                    publish { onPartial(partial) }
                 }
+            } finally { stream.release() }
+        }
+        fun drain() {
+            while (!vad.empty() && !session.cancelled) {
+                decode(vad.front().samples)
+                vad.pop()
             }
-            // VAD only filters/splits already-stopped audio. It never controls the microphone.
-            PcmSegments.read(pcm) { samples ->
+        }
+        // VAD only filters/splits already-stopped audio. It never controls the microphone.
+        PcmSegments.read(pcm) { samples ->
+            if (session.cancelled) return@read false
+            // Silero consumes one 512-sample window per call, not a full recording.
+            for (offset in samples.indices step 512) {
                 if (session.cancelled) return@read false
-                // Silero consumes one 512-sample window per call, not a full recording.
-                for (offset in samples.indices step 512) {
-                    if (session.cancelled) return@read false
-                    val window = samples.copyOfRange(offset, minOf(offset + 512, samples.size))
-                    vad.acceptWaveform(if (window.size == 512) window else window.copyOf(512))
-                    drain()
-                }
-                !session.cancelled
+                val window = samples.copyOfRange(offset, minOf(offset + 512, samples.size))
+                vad.acceptWaveform(if (window.size == 512) window else window.copyOf(512))
+                drain()
             }
-            vad.flush()
-            drain()
-            return text.toString()
-        } finally { recognizer?.release(); vad.release() }
+            !session.cancelled
+        }
+        vad.flush()
+        drain()
+        return text.toString()
     }
 
     fun stop() {

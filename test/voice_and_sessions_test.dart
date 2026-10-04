@@ -15,7 +15,6 @@ import 'package:fin_dash/services/voice_bookkeeping.dart';
 import 'package:fin_dash/ui/ai_pages.dart';
 import 'package:fin_dash/ui/design.dart';
 import 'package:fin_dash/ui/editors.dart';
-import 'package:fin_dash/ui/voice_entry_page.dart';
 import 'helpers.dart';
 
 http.Response answer(String text) => http.Response(
@@ -99,8 +98,12 @@ class ImageFailureAi extends AiService {
 class ParsedVoiceAi extends AiService {
   ParsedVoiceAi(WalletStore store) : super(store, TestVault('key'));
   @override
-  Future<Json> interpretVoice(String text, {String? defaultAccountId}) async =>
-      expense();
+  Future<Json> interpretVoice(
+    String text, {
+    String? defaultAccountId,
+    Json? current,
+    List<Json> history = const [],
+  }) async => expense();
 }
 
 Widget featureHarness(
@@ -450,14 +453,15 @@ void main() {
   );
 
   testWidgets(
-    'voice page records a typed sentence and provides undo at large text sizes',
+    'voice sheet records a typed sentence and provides undo at large text sizes',
     (tester) async {
       final store = await configuredAiStore();
       await store.saveAccount(bank);
       final ai = ParsedVoiceAi(store);
       await tester.pumpWidget(
-        featureHarness(store, ai, const VoiceEntryPage(autoStart: false)),
+        featureHarness(store, ai, const VoiceSheetHost()),
       );
+      await tester.pumpAndSettle();
       await tester.enterText(
         find.byKey(const Key('voice-transcript')),
         '银行卡午餐28元',

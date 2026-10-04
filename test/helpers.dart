@@ -1,7 +1,10 @@
+import 'package:flutter/material.dart';
 import 'package:fin_dash/data/storage_base.dart';
 import 'package:fin_dash/data/wallet_store.dart';
 import 'package:fin_dash/domain/models.dart';
 import 'package:fin_dash/services/ai_service.dart';
+import 'package:fin_dash/services/voice_input.dart';
+import 'package:fin_dash/ui/voice_entry_sheet.dart';
 
 class TestVault implements KeyVault {
   String? key;
@@ -77,3 +80,30 @@ LedgerTx tx({
   fromId: from,
   toId: to,
 );
+
+/// Opens the voice sheet over a blank page after the first frame, the way the
+/// home page and the task list open it. Pump until settled before using it.
+class VoiceSheetHost extends StatefulWidget {
+  final VoiceInput? voice;
+  final bool autoStart;
+  const VoiceSheetHost({super.key, this.voice, this.autoStart = false});
+  @override
+  State<VoiceSheetHost> createState() => _VoiceSheetHostState();
+}
+
+class _VoiceSheetHostState extends State<VoiceSheetHost> {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback(
+      (_) => showVoiceEntry(
+        context,
+        voice: widget.voice,
+        autoStart: widget.autoStart,
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) => const Scaffold(body: SizedBox.expand());
+}

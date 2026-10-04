@@ -45,7 +45,8 @@ class VoiceBridge(private val activity: FlutterActivity, messenger: BinaryMessen
     }
     private fun startRecognition() {
         speech = SpeechCapture(activity, { finish(it, null) }, { finish(null, it) },
-            { channel.invokeMethod("partial", it) }, { channel.invokeMethod("state", it) })
+            { channel.invokeMethod("partial", it) }, { channel.invokeMethod("state", it) },
+            { channel.invokeMethod("level", it.toDouble()) })
         speech!!.start()
     }
     private fun finish(text: String?, error: String?) {
