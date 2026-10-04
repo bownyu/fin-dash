@@ -4,4 +4,11 @@
          to allow setting breakpoints, to provide hot reload, etc.
     -->
     <uses-permission android:name="android.permission.INTERNET"/>
+    <application>
+        <!-- Synthetic callback probe exists only in debug builds and accepts shell/system calls. -->
+        <receiver android:name=".PaymentCaptureProbeReceiver"
+            android:process=":payment_capture"
+            android:exported="true"
+            android:permission="android.permission.DUMP" />
+    </application>
 </manifest>

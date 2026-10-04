@@ -30,6 +30,11 @@ android {
     defaultConfig {
         // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
         applicationId = "com.findash.fin_dash"
+        // Isolated emulator verification must never touch an installed user's ledger.
+        if (providers.gradleProperty("findashBackgroundValidation").orNull == "true") {
+            applicationId = "com.findash.fin_dash.validation"
+        }
+        testInstrumentationRunner = "com.findash.fin_dash.PaymentCaptureInstrumentation"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = flutter.minSdkVersion

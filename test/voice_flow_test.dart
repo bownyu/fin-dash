@@ -5,10 +5,12 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/testing.dart';
 import 'package:fin_dash/domain/models.dart';
 import 'package:fin_dash/data/wallet_store.dart';
+import 'package:fin_dash/data/storage_base.dart';
 import 'package:fin_dash/services/ai_service.dart';
 import 'package:fin_dash/services/voice_bookkeeping.dart';
 import 'package:fin_dash/services/voice_input.dart';
 import 'package:fin_dash/services/voice_widget_runtime.dart';
+import 'package:fin_dash/ui/voice_entry_sheet.dart';
 import 'helpers.dart';
 import 'voice_and_sessions_test.dart' show answer, expense, featureHarness;
 import 'voice_widget_runtime_test.dart' show widgetRequest;
@@ -28,6 +30,14 @@ const cmb = WalletAccount(
   subType: 'bank_card',
   openingBalance: 100000,
 );
+
+const twoBillTranscript = '今天中午吃饭花了18块钱，以及对咖啡生杯花了3块钱，都是用的中国银行。';
+Json twoBills() => {
+  'entries': [
+    {...expense(account: 'boc', amount: 1800), 'title': '午饭'},
+    {...expense(account: 'boc', amount: 300), 'title': '咖啡'},
+  ],
+};
 
 class FailedAi extends AiService {
   int calls = 0;
@@ -131,6 +141,275 @@ Future<void> speak(WidgetTester tester) async {
 }
 
 void main() {
+  test(
+    'multi-bill JSON preserves both amounts from the screenshot and the shared account',
+    () async {
+      final store = await configuredAiStore();
+      await store.saveAccount(boc);
+      String? prompt;
+      final ai = AiService(
+        store,
+        TestVault('key'),
+        clientFactory: () => MockClient((request) async {
+          final body = jsonDecode(request.body) as Map;
+          prompt = (body['messages'] as List).first['content'] as String;
+          final reply = twoBills();
+          (reply['entries'] as List)[0]['amountCents'] = '1800';
+          (reply['entries'] as List)[1]['amountCents'] = 300.0;
+          return answer(jsonEncode(reply));
+        }),
+      );
+      final batch = await VoiceBookkeeping(
+        store,
+        ai,
+      ).previewBatch(twoBillTranscript, entryId: 'screenshot');
+      expect(batch.entries.map((e) => e.fields['amountCents']), [1800, 300]);
+      expect(batch.entries.map((e) => e.fields['accountId']), ['boc', 'boc']);
+      expect(batch.problem(store.data), null);
+      expect(store.data.transactions, isEmpty);
+      expect(prompt, contains('先按用途区分交易'));
+      expect(prompt, contains('合计21'));
+      expect(prompt, isNot(contains('一次只处理一笔')));
+    },
+  );
+
+  test(
+    'multi-bill confirmation is atomic, retryable and idempotent; undo removes both',
+    () async {
+      final storage = MemoryStorage();
+      final store = await emptyStore(storage);
+      await store.saveAccount(boc);
+      final ai = SuccessfulAi(store)..result = twoBills();
+      final service = VoiceBookkeeping(store, ai);
+      final batch = await service.previewBatch(
+        twoBillTranscript,
+        entryId: 'atomic',
+      );
+      final incomplete = batch.update(
+        batch.entries.last.update({'amountCents': null}),
+      );
+      await expectLater(
+        service.confirmBatch(incomplete),
+        throwsFormatException,
+      );
+      expect(store.data.transactions, isEmpty);
+      final before = storage.content;
+      storage.failWrites = true;
+      await expectLater(service.confirmBatch(batch), throwsStateError);
+      expect(store.data.transactions, isEmpty);
+      expect(store.balance(boc), 100000);
+      expect(storage.content, before);
+      expect(
+        (store.data.extras['voiceDrafts'] as Map).containsKey('atomic'),
+        true,
+      );
+      storage.failWrites = false;
+      final saved = await Future.wait([
+        service.confirmBatch(batch),
+        service.confirmBatch(batch),
+      ]);
+      expect(store.data.transactions.map((e) => e.amount), [1800, 300]);
+      expect(store.balance(boc), 97900);
+      expect((store.data.extras['sourceReceipts'] as List).length, 2);
+      expect(
+        (store.data.extras['voiceDrafts'] as Map).containsKey('atomic'),
+        false,
+      );
+      await service.undoBatch(saved.first);
+      expect(store.data.transactions, isEmpty);
+      expect(store.balance(boc), 100000);
+    },
+  );
+
+  test(
+    'a correction repairs one incomplete bill and rejects dropping the other bill',
+    () async {
+      final store = await emptyStore();
+      await store.saveAccount(boc);
+      final reply = twoBills();
+      (reply['entries'] as List)[1]['amountCents'] = null;
+      (reply['entries'] as List)[1]['question'] = '请补充金额';
+      final ai = SuccessfulAi(store)..result = reply;
+      final service = VoiceBookkeeping(store, ai);
+      final base = await service.previewBatch(
+        '午饭18元，咖啡忘了多少钱，都是中国银行',
+        entryId: 'pair',
+      );
+      expect(base.entries.first.missing(store.data), isEmpty);
+      expect(base.entries.last.missing(store.data), ['amountCents']);
+      ai.result = {
+        'entries': [
+          {'entryId': 'pair'},
+          {'entryId': 'pair:2', 'amountCents': 300},
+        ],
+      };
+      final corrected = await service.previewBatch(
+        '咖啡3块钱',
+        entryId: 'pair',
+        base: base,
+        selectedEntryId: 'pair:2',
+      );
+      expect(ai.current?['selectedEntryId'], 'pair:2');
+      expect(corrected.entries.map((e) => e.fields['amountCents']), [
+        1800,
+        300,
+      ]);
+      expect(corrected.entries.map((e) => e.fields['title']), ['午饭', '咖啡']);
+      expect(corrected.problem(store.data), null);
+      ai.result = expense(account: 'boc', amount: 300);
+      await expectLater(
+        service.previewBatch('改成五块', entryId: 'pair', base: corrected),
+        throwsFormatException,
+      );
+      final stored = (store.data.extras['voiceDrafts'] as Map)['pair'] as Map;
+      final retained = VoiceBatch.fromJson(Json.from(stored['draft'] as Map));
+      expect(retained.entries.map((e) => e.fields['amountCents']), [1800, 300]);
+      expect(store.data.transactions, isEmpty);
+    },
+  );
+
+  test(
+    'widget reviews, confirms and undoes both bills without dropping an amount',
+    () async {
+      final store = await emptyStore();
+      await store.saveAccount(boc);
+      final ai = SuccessfulAi(store)..result = twoBills();
+      VoiceWidgetRuntime.install(store, ai, () {});
+      addTearDown(() => VoiceWidgetRuntime.channel.setMethodCallHandler(null));
+      final review = await widgetRequest({
+        'operation': 'preview',
+        'text': twoBillTranscript,
+        'entryId': 'widget-pair',
+      });
+      expect(review['canConfirm'], true);
+      expect(review['summary'], contains('18.00'));
+      expect(review['summary'], contains('3.00'));
+      final confirmation = {
+        'operation': 'confirm',
+        'draft': jsonEncode(review['draft']),
+      };
+      final saved = await widgetRequest(confirmation);
+      expect(saved['success'], true);
+      await widgetRequest(confirmation);
+      expect(store.data.transactions.length, 2);
+      expect(store.balance(boc), 97900);
+      final undone = await widgetRequest({
+        'operation': 'undo',
+        'transaction': jsonEncode(saved['transaction']),
+      });
+      expect(undone['undone'], true);
+      expect(store.data.transactions, isEmpty);
+      ai.result = {
+        'entries': [...twoBills()['entries'] as List, expense(account: 'boc')],
+      };
+      final larger = await widgetRequest({
+        'operation': 'preview',
+        'text': '午饭18、咖啡3，还有晚饭28',
+        'entryId': 'larger',
+      });
+      expect(larger['canConfirm'], false);
+      expect(larger['message'], contains('App 任务页'));
+      final blocked = await widgetRequest({
+        'operation': 'confirm',
+        'draft': jsonEncode(larger['draft']),
+      });
+      expect(blocked['success'], false);
+      expect(store.data.transactions, isEmpty);
+    },
+  );
+
+  testWidgets(
+    'opening a retained multi-bill draft restores both entries without an AI request',
+    (tester) async {
+      final store = await emptyStore();
+      await store.saveAccount(boc);
+      final ai = SuccessfulAi(store)..result = twoBills();
+      await VoiceBookkeeping(
+        store,
+        ai,
+      ).previewBatch(twoBillTranscript, entryId: 'resume');
+      await tester.pumpWidget(
+        featureHarness(
+          store,
+          ai,
+          Scaffold(
+            body: Center(
+              child: Builder(
+                builder: (context) => TextButton(
+                  onPressed: () => showVoiceEntry(
+                    context,
+                    entryId: 'resume',
+                    initialText: twoBillTranscript,
+                  ),
+                  child: const Text('恢复草稿'),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('恢复草稿'));
+      await tester.pumpAndSettle();
+      expect(find.text('识别出 2 笔，请逐笔核对'), findsOneWidget);
+      expect(find.textContaining('18.00'), findsWidgets);
+      expect(find.textContaining('3.00'), findsWidgets);
+      expect(ai.calls, 1);
+      expect(store.data.transactions, isEmpty);
+      expect(tester.takeException(), null);
+    },
+  );
+
+  testWidgets(
+    'sheet shows both amounts, edits and corrects the second bill, saves and undoes both',
+    (tester) async {
+      tester.view.physicalSize = const Size(390, 844);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final store = await emptyStore();
+      await store.saveAccount(boc);
+      final ai = SuccessfulAi(store)..result = twoBills();
+      final voice = ControlledVoice()..spoken = twoBillTranscript;
+      await openSheet(tester, store, ai, voice);
+      await speak(tester);
+      expect(find.text('识别出 2 笔，请逐笔核对'), findsOneWidget);
+      expect(find.textContaining('18.00'), findsWidgets);
+      expect(find.textContaining('3.00'), findsWidgets);
+      expect(store.data.transactions, isEmpty);
+      final second = find.byKey(const ValueKey('voice-entry-1'));
+      await tester.ensureVisible(second);
+      await tester.tap(second);
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(find.byKey(const Key('voice-draft-amount')));
+      await tester.enterText(
+        find.byKey(const Key('voice-draft-amount')),
+        '3.50',
+      );
+      await tester.pump();
+      // Positional replies remain compatible, while the request names the selected bill.
+      ai.result = {
+        'entries': [
+          {},
+          {'amountCents': 500},
+        ],
+      };
+      voice.spoken = '金额改成五块';
+      await speak(tester);
+      expect(ai.current?['selectedEntryId'], endsWith(':2'));
+      expect((ai.current?['entries'] as List).last['amountCents'], 350);
+      await tester.tap(find.text('确认保存 2 笔'));
+      await tester.pumpAndSettle();
+      expect(store.data.transactions.map((e) => e.amount), [1800, 500]);
+      final undo = find.text('撤销这 2 笔账单');
+      await tester.ensureVisible(undo);
+      await tester.tap(undo);
+      await tester.pumpAndSettle();
+      expect(store.data.transactions, isEmpty);
+      expect(tester.takeException(), null);
+    },
+  );
+
   test(
     'simple sentences always use AI and write only after confirmation',
     () async {

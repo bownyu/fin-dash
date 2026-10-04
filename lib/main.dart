@@ -38,7 +38,7 @@ Future<void> main(List<String> args) async {
       const SystemUiOverlayStyle(
         statusBarColor: Colors.transparent,
         statusBarIconBrightness: Brightness.dark,
-        systemNavigationBarColor: Color(0xFFF3F5FA),
+        systemNavigationBarColor: Color(0xFFF5F3EE),
       ),
     );
     runApp(FinDashApp(store: store, ai: ai, demo: demo));
@@ -153,8 +153,7 @@ class _FinDashAppState extends State<FinDashApp> {
               ? Brightness.light
               : Brightness.dark,
         ),
-        child: ColoredBox(
-          color: WalletColors.of(context).background,
+        child: WalletBackdrop(
           child: Center(
             child: ConstrainedBox(
               constraints: const BoxConstraints(maxWidth: 960),
@@ -211,7 +210,21 @@ class _Shell extends StatefulWidget {
   State<_Shell> createState() => _ShellState();
 }
 
-class _ShellState extends State<_Shell> {
+class _ShellState extends State<_Shell> with SingleTickerProviderStateMixin {
+  late final _transition = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 260),
+    value: 1,
+  );
+  late final _tabOpacity = _transition.drive(
+    CurveTween(curve: Curves.easeOutCubic),
+  );
+  late final _tabOffset = _transition.drive(
+    Tween(
+      begin: const Offset(0, .018),
+      end: Offset.zero,
+    ).chain(CurveTween(curve: Curves.easeOutCubic)),
+  );
   final _billsKey = GlobalKey<BillsPageState>();
   late final List<Widget> _pages = [
     HomePage(onBills: () => select(2), onStats: () => select(1)),
@@ -230,23 +243,48 @@ class _ShellState extends State<_Shell> {
       _visited.add(value);
       index = value;
     });
+    // Start even when this destination is mounted for the first time.
+    if (MediaQuery.disableAnimationsOf(context)) {
+      _transition.value = 1;
+    } else {
+      _transition.forward(from: 0);
+    }
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (MediaQuery.disableAnimationsOf(context)) _transition.value = 1;
+  }
+
+  @override
+  void dispose() {
+    _transition.dispose();
+    super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     final wide = MediaQuery.sizeOf(context).width >= 900;
     final colors = WalletColors.of(context);
-    final views = IndexedStack(
-      key: _tabViewKey,
-      index: index,
-      children: List.generate(
-        _pages.length,
-        (i) => _visited.contains(i)
-            ? TickerMode(
-                enabled: i == index,
-                child: RepaintBoundary(child: _pages[i]),
-              )
-            : const SizedBox.shrink(),
+    final views = FadeTransition(
+      key: const Key('main-tab-transition'),
+      opacity: _tabOpacity,
+      child: SlideTransition(
+        position: _tabOffset,
+        child: IndexedStack(
+          key: _tabViewKey,
+          index: index,
+          children: List.generate(
+            _pages.length,
+            (i) => _visited.contains(i)
+                ? TickerMode(
+                    enabled: i == index,
+                    child: RepaintBoundary(child: _pages[i]),
+                  )
+                : const SizedBox.shrink(),
+          ),
+        ),
       ),
     );
     return PopScope(
@@ -261,6 +299,7 @@ class _ShellState extends State<_Shell> {
       },
       child: Scaffold(
         extendBody: true,
+        backgroundColor: Colors.transparent,
         body: SafeArea(
           bottom: false,
           child: Column(
@@ -283,11 +322,25 @@ class _ShellState extends State<_Shell> {
                           Padding(
                             padding: const EdgeInsets.fromLTRB(16, 20, 4, 24),
                             child: GlassPanel(
+                              radius: 20,
                               padding: const EdgeInsets.symmetric(vertical: 16),
                               child: NavigationRail(
                                 selectedIndex: index,
                                 backgroundColor: Colors.transparent,
-                                indicatorColor: primary.withValues(alpha: .14),
+                                indicatorColor: colors.inset,
+                                selectedIconTheme: IconThemeData(
+                                  color: colors.ink,
+                                ),
+                                selectedLabelTextStyle: Theme.of(context)
+                                    .textTheme
+                                    .bodySmall!
+                                    .copyWith(
+                                      color: colors.ink,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                unselectedLabelTextStyle: Theme.of(
+                                  context,
+                                ).textTheme.bodySmall,
                                 onDestinationSelected: select,
                                 labelType: NavigationRailLabelType.all,
                                 leading: Padding(
@@ -297,8 +350,10 @@ class _ShellState extends State<_Shell> {
                                   ),
                                   child: FloatingActionButton.small(
                                     tooltip: '记一笔',
-                                    backgroundColor: primary,
-                                    foregroundColor: Colors.white,
+                                    elevation: 0,
+                                    highlightElevation: 0,
+                                    backgroundColor: colors.ink,
+                                    foregroundColor: colors.surface,
                                     onPressed: () => openPage(
                                       context,
                                       const TransactionEditor(),
@@ -356,7 +411,7 @@ class _ShellState extends State<_Shell> {
                 child: Padding(
                   padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
                   child: GlassPanel(
-                    radius: 30,
+                    radius: 24,
                     padding: const EdgeInsets.symmetric(
                       horizontal: 6,
                       vertical: 7,
@@ -378,12 +433,10 @@ class _ShellState extends State<_Shell> {
                               heroTag: 'main-add',
                               tooltip: '记一笔',
                               elevation: 0,
-                              backgroundColor: colors.dark
-                                  ? primary
-                                  : colors.ink,
-                              foregroundColor: Colors.white,
+                              backgroundColor: colors.ink,
+                              foregroundColor: colors.surface,
                               shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(20),
+                                borderRadius: BorderRadius.circular(17),
                               ),
                               onPressed: () => openPage(
                                 context,
@@ -424,13 +477,13 @@ class _ShellState extends State<_Shell> {
             onTap: () => select(value),
             borderRadius: BorderRadius.circular(24),
             child: AnimatedContainer(
-              duration: const Duration(milliseconds: 220),
+              duration: Duration(
+                milliseconds: MediaQuery.disableAnimationsOf(context) ? 0 : 220,
+              ),
               padding: const EdgeInsets.symmetric(vertical: 7),
               decoration: BoxDecoration(
                 color: value == index
-                    ? primary.withValues(
-                        alpha: WalletColors.of(context).dark ? .22 : .09,
-                      )
+                    ? WalletColors.of(context).inset
                     : Colors.transparent,
                 borderRadius: BorderRadius.circular(24),
               ),
@@ -440,7 +493,7 @@ class _ShellState extends State<_Shell> {
                   Icon(
                     value == index ? selected : icon,
                     color: value == index
-                        ? primary
+                        ? WalletColors.of(context).ink
                         : WalletColors.of(context).secondary,
                     size: 24,
                   ),
@@ -453,7 +506,7 @@ class _ShellState extends State<_Shell> {
                           ? FontWeight.w700
                           : FontWeight.w500,
                       color: value == index
-                          ? primary
+                          ? WalletColors.of(context).ink
                           : WalletColors.of(context).secondary,
                     ),
                   ),

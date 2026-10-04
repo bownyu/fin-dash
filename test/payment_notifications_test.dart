@@ -48,7 +48,60 @@ class FakeBridge implements NotificationBridge {
   }
 }
 
+class PagedBridge extends FakeBridge {
+  PagedBridge(super.events);
+
+  @override
+  Future<dynamic> call(String method, [Json? arguments]) async {
+    final result = await super.call(method, arguments);
+    return method == 'peek' ? (result as List).take(10).toList() : result;
+  }
+}
+
+List<Json> pagedEvents() => List.generate(
+  130,
+  (index) => {
+    ...event(),
+    'eventId': index.toRadixString(16).padLeft(64, '0'),
+    'postedAt': (event()['postedAt'] as int) + index * 180000,
+  },
+);
+
 void main() {
+  test(
+    'IPC-sized pages drain beyond ten pages without losing events',
+    () async {
+      final storage = MemoryStorage();
+      final store = await emptyStore(storage);
+      final bridge = PagedBridge(pagedEvents());
+      final inbox = PaymentNotifications(store, bridge: bridge);
+      await inbox.sync();
+      expect(bridge.acknowledgements, 13);
+      expect(bridge.events, isEmpty);
+      expect(inbox.pending.length, 130);
+      final reloaded = await emptyStore(storage);
+      expect(PaymentNotifications(reloaded).pending.length, 130);
+    },
+  );
+
+  test(
+    'clearing paged notifications preserves every ignored ID before ACK',
+    () async {
+      final store = await emptyStore();
+      final bridge = PagedBridge(pagedEvents());
+      final inbox = PaymentNotifications(store, bridge: bridge);
+      await inbox.clearPending();
+      expect(bridge.acknowledgements, 13);
+      expect(bridge.events, isEmpty);
+      expect(inbox.records.length, 130);
+      expect(inbox.records.every((record) => record['cleared'] == true), true);
+      bridge.events.addAll(pagedEvents());
+      await inbox.sync();
+      expect(inbox.pending, isEmpty);
+      expect(inbox.records.length, 130);
+    },
+  );
+
   test(
     'page clear waits for lifecycle sync and cleared events never replay',
     () async {

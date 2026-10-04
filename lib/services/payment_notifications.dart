@@ -66,6 +66,14 @@ class PaymentNotifications {
     await bridge.call('openSettings');
   }
 
+  Future<void> openBatterySettings() async {
+    await bridge.call('openBatterySettings');
+  }
+
+  Future<void> openAppSettings() async {
+    await bridge.call('openAppSettings');
+  }
+
   Future<void> reconnect() async {
     if (!supported) return;
     await bridge.call('reconnect');
@@ -75,7 +83,8 @@ class PaymentNotifications {
     if (!supported || store.loading || store.startupError != null) {
       return;
     }
-    for (var page = 0; page < 10; page++) {
+    // Native pages are also bounded by IPC size; allow the full 1000-event inbox.
+    for (var page = 0; page < 100; page++) {
       final batch = (await bridge.call('peek') as List)
           .map((e) => Json.from(e as Map))
           .toList();
@@ -358,8 +367,12 @@ class PaymentNotifications {
         throw const FormatException('请选择有效账户');
       }
     }
-    tx=LedgerTx.fromJson({...tx.toJson(),'sourceType':'notification','sourceId':eventId,
-      if(record['kind']=='refund') 'originalTransactionId':refundOf});
+    tx = LedgerTx.fromJson({
+      ...tx.toJson(),
+      'sourceType': 'notification',
+      'sourceId': eventId,
+      if (record['kind'] == 'refund') 'originalTransactionId': refundOf,
+    });
     LedgerOperations.putTransaction(d, tx, mode: TransactionWrite.insert);
     record['status'] = 'applied';
     record['transactionId'] = tx.id;
@@ -423,7 +436,7 @@ class PaymentNotifications {
     if (supported) {
       await bridge.call('setEnabled', {'enabled': false});
       // Clearing also works when the review queue is full. Preserve IDs before ACK.
-      for (var page = 0; page < 10; page++) {
+      for (var page = 0; page < 100; page++) {
         final batch = (await bridge.call('peek') as List)
             .map((e) => Json.from(e as Map))
             .toList();

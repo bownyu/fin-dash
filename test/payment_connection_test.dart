@@ -11,17 +11,30 @@ class ConnectionBridge implements NotificationBridge {
   bool granted = true, enabled = true, connected = false;
   bool connectOnRequest = true;
   int requests = 0;
+  final calls = <String>[];
+  bool batteryUnrestricted = false;
+  bool failSettings = false;
   @override
   bool get supported => true;
   @override
   Future<dynamic> call(String method, [Json? arguments]) async {
+    calls.add(method);
+    if (method == 'openBatterySettings' || method == 'openAppSettings') {
+      if (failSettings) throw StateError('Settings unavailable');
+      return null;
+    }
     if (method == 'peek') return [];
     if (method == 'reconnect') {
       requests++;
       connected = connectOnRequest;
     }
     if (method == 'status') {
-      return {'enabled': enabled, 'granted': granted, 'connected': connected};
+      return {
+        'enabled': enabled,
+        'granted': granted,
+        'connected': connected,
+        'batteryUnrestricted': batteryUnrestricted,
+      };
     }
     return null;
   }
@@ -83,5 +96,38 @@ void main() {
       null,
     );
     expect(bridge.requests, 0);
+  });
+
+  testWidgets('background guidance opens settings only after a user tap', (
+    tester,
+  ) async {
+    final bridge = ConnectionBridge()..batteryUnrestricted = true;
+    await showPage(tester, bridge);
+    expect(find.text('电池优化：已允许不受限制'), findsOneWidget);
+    expect(find.textContaining('无需保持 App 界面开启'), findsOneWidget);
+    expect(bridge.calls, ['peek', 'status']);
+    await tester.ensureVisible(
+      find.byKey(const Key('payment-battery-settings')),
+    );
+    await tester.tap(find.byKey(const Key('payment-battery-settings')));
+    await tester.pumpAndSettle();
+    expect(bridge.calls.last, 'openBatterySettings');
+    await tester.tap(find.byKey(const Key('payment-app-settings')));
+    await tester.pumpAndSettle();
+    expect(bridge.calls.last, 'openAppSettings');
+    final calls = bridge.calls.length;
+    await tester.pump(const Duration(minutes: 5));
+    expect(bridge.calls.length, calls);
+    expect(tester.takeException(), null);
+  });
+
+  testWidgets('settings failure keeps the capture page usable', (tester) async {
+    final bridge = ConnectionBridge()..failSettings = true;
+    await showPage(tester, bridge);
+    await tester.ensureVisible(find.byKey(const Key('payment-app-settings')));
+    await tester.tap(find.byKey(const Key('payment-app-settings')));
+    await tester.pumpAndSettle();
+    expect(bridge.enabled, true);
+    expect(tester.takeException(), null);
   });
 }

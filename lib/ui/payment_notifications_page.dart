@@ -227,12 +227,64 @@ class _PaymentNotificationsPageState extends State<PaymentNotificationsPage>
                     child: const Text('打开系统通知使用权设置'),
                   ),
                 const Text(
-                  '进入 App 时会自动尝试恢复已开启且已授权的监听。省电限制或强行停止仍可能中断连接；重连只能接收后续通知，无法补回断开期间的消费。',
+                  '无需保持 App 界面开启。收到支付通知时在本机识别并保存，重新进入 App 后再确认入账。连接中断时会有限重试，开机和升级后也会尝试恢复监听。',
                   style: TextStyle(fontSize: 12, color: muted),
                 ),
               ],
             ),
           ),
+          if (supported) ...[
+            const SizedBox(height: 12),
+            Panel(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '后台监听设置',
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    status['batteryUnrestricted'] == true
+                        ? '电池优化：已允许不受限制'
+                        : '电池优化：请检查是否允许后台运行',
+                  ),
+                  const SizedBox(height: 6),
+                  const Text(
+                    '在系统设置中允许 FinDash 自启动和后台运行；部分手机还需要允许关联启动，或在最近任务中锁定应用。',
+                  ),
+                  Wrap(
+                    spacing: 8,
+                    children: [
+                      TextButton.icon(
+                        key: const Key('payment-battery-settings'),
+                        onPressed: busy
+                            ? null
+                            : () => perform(
+                                context,
+                                service!.openBatterySettings,
+                              ),
+                        icon: const Icon(Icons.battery_saver_outlined),
+                        label: const Text('电池优化设置'),
+                      ),
+                      TextButton.icon(
+                        key: const Key('payment-app-settings'),
+                        onPressed: busy
+                            ? null
+                            : () => perform(context, service!.openAppSettings),
+                        icon: const Icon(Icons.settings_outlined),
+                        label: const Text('应用后台设置'),
+                      ),
+                    ],
+                  ),
+                  const Text(
+                    '一键清理仍可能中断监听；强行停止后请重新打开 App。重连无法保证补回断开期间的支付通知。',
+                    style: TextStyle(fontSize: 12, color: muted),
+                  ),
+                ],
+              ),
+            ),
+          ],
           if (error != null)
             Padding(
               padding: const EdgeInsets.all(12),

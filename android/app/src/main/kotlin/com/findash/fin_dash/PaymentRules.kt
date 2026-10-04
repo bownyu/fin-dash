@@ -14,15 +14,19 @@ object PaymentRules {
     private val validAmount = Regex("(?:[0-9]+|[0-9]{1,3}(?:,[0-9]{3})+)(?:\\.[0-9]{1,2})?")
     private val blocked = Regex("验证码|待付款|待支付|未支付|付款失败|支付失败|扣款失败|转账失败|还款失败|退款失败|交易关闭|已取消|请付款|领取红包|优惠券待领取|还款提醒|待还款|待扣款|退款申请|处理中|限时活动|转账享优惠")
     private val signal = Regex("成功付款|付款成功|支付成功|成功收款|收款成功|收款到账|收到.*(?:转账|退款)|退款|还款|转账|扣款|支出|向.+付款|支付[¥￥]")
+    private val wechatTitle = Regex("^(微信支付|微信支付凭证|微信支付收款|微信收款助手|收款助手)([：:（(].*)?$")
+    private val alipayTitle = Regex("^(支付宝|支付宝支付|付款成功|支付成功|收款到账|交易提醒|退款通知|转账到账)([：:（(].*)?$")
+
+    fun acceptsTitle(packageName: String, title: String): Boolean = when (packageName) {
+        "com.tencent.mm" -> wechatTitle.matches(title.trim())
+        "com.eg.android.AlipayGphone" -> alipayTitle.matches(title.trim())
+        else -> false
+    }
 
     fun parse(packageName: String, title: String, text: String): PaymentMatch? {
-        if (packageName !in packages) return null
+        if (!acceptsTitle(packageName, title)) return null
         val full = "$title $text".trim()
         if (blocked.containsMatchIn(full)) return null
-        if (packageName == "com.tencent.mm" &&
-            !Regex("^(微信支付|微信支付凭证|微信支付收款|微信收款助手|收款助手)([：:（(].*)?$").matches(title.trim())) return null
-        if (packageName == "com.eg.android.AlipayGphone" &&
-            !Regex("^(支付宝|支付宝支付|付款成功|支付成功|收款到账|交易提醒|退款通知|转账到账)([：:（(].*)?$").matches(title.trim())) return null
         if (!signal.containsMatchIn(full)) return null
         val parsed = amount.findAll(full).map { m ->
             val raw = m.groupValues[1].ifEmpty { m.groupValues[2] }.trim()

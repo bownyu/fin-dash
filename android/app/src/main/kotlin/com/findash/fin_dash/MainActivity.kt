@@ -5,6 +5,8 @@ import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import android.content.Intent
 import android.content.Context
+import android.net.Uri
+import android.os.PowerManager
 import android.provider.Settings
 import java.util.concurrent.Executors
 
@@ -20,41 +22,35 @@ class MainActivity : FlutterActivity() {
         otaBridge = OtaBridge(this, flutterEngine.dartExecutor.binaryMessenger)
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "findash/payment_notifications")
             .setMethodCallHandler { call, result ->
-                val prefs = getSharedPreferences("payment_capture", MODE_PRIVATE)
-                if (call.method == "openSettings") {
+                if (call.method in setOf("openSettings", "openBatterySettings", "openAppSettings")) {
                     try {
-                        startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+                        val intent = when (call.method) {
+                            "openBatterySettings" -> Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+                            "openAppSettings" -> Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName"))
+                            else -> Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
+                        }
+                        try { startActivity(intent) }
+                        catch (_: android.content.ActivityNotFoundException) {
+                            startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
+                        }
                         result.success(null)
-                    } catch (_: Exception) { result.error("settings", "无法打开系统通知使用权设置", null) }
+                    } catch (_: Exception) { result.error("settings", "无法打开系统设置，请从手机设置进入 FinDash 应用详情", null) }
                     return@setMethodCallHandler
                 }
                 ioWorker.execute {
                     try {
-                        val inbox = NotificationInbox.get(this)
+                        val capture = PaymentCaptureClient(this)
                         val value: Any? = when (call.method) {
                             "status" -> {
-                                val granted = PaymentListenerConnection.granted(this)
-                                mapOf("enabled" to prefs.getBoolean("enabled", false), "granted" to granted,
-                                    "connected" to PaymentNotificationListener.connected, "queued" to inbox.count(),
-                                    "lastReceived" to prefs.getLong("lastReceived", 0),
-                                    "overflow" to prefs.getInt("overflow", 0), "storageError" to prefs.getBoolean("storageError", false))
+                                @Suppress("UNCHECKED_CAST")
+                                val status = capture.call("status") as Map<String, Any?>
+                                status + ("batteryUnrestricted" to getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(packageName))
                             }
-                            "setEnabled" -> {
-                                val enabled = call.argument<Boolean>("enabled") == true
-                                synchronized(inbox) {
-                                    check(prefs.edit().putBoolean("enabled", enabled).commit())
-                                }
-                                if (enabled) PaymentListenerConnection.reconnect(this, manual = true)
-                                null
-                            }
-                            "reconnect" -> PaymentListenerConnection.reconnect(this, manual = true)
-                            "peek" -> inbox.peek()
-                            "ack" -> { inbox.acknowledge(call.argument<List<String>>("ids") ?: emptyList()); null }
-                            "clear" -> {
-                                inbox.clear()
-                                prefs.edit().putInt("overflow", 0).putBoolean("storageError", false).commit()
-                                null
-                            }
+                            "setEnabled" -> capture.call("setEnabled", mapOf("enabled" to (call.argument<Boolean>("enabled") == true)))
+                            "reconnect" -> capture.call("reconnect", mapOf("manual" to true))
+                            "peek" -> capture.call("peek")
+                            "ack" -> capture.call("ack", mapOf("ids" to call.argument<List<String>>("ids")))
+                            "clear" -> capture.call("clear")
                             else -> throw IllegalArgumentException("未知通知接口")
                         }
                         runOnUiThread { result.success(value) }
@@ -67,7 +63,9 @@ class MainActivity : FlutterActivity() {
     override fun onResume() {
         super.onResume()
         // Best effort only: OEM restrictions must not prevent the app from opening.
-        try { PaymentListenerConnection.reconnect(this) } catch (_: Exception) { }
+        ioWorker.execute {
+            try { PaymentCaptureClient(applicationContext).call("reconnect") } catch (_: Exception) { }
+        }
     }
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)

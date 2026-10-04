@@ -36,9 +36,15 @@ class NotificationInbox private constructor(context: Context) :
     }
     @Synchronized fun peek(): List<Map<String, Any?>> {
         val result = mutableListOf<Map<String, Any?>>()
+        var bytes = 0
         readableDatabase.rawQuery("SELECT payload FROM events ORDER BY posted_at, id LIMIT 100", null).use { cursor ->
             while (cursor.moveToNext()) {
-                val obj = JSONObject(cursor.getString(0))
+                val raw = cursor.getString(0)
+                // Leave ample space under Binder's shared 1 MiB transaction limit.
+                val size = raw.length * 2
+                if (result.isNotEmpty() && bytes + size > 128 * 1024) break
+                bytes += size
+                val obj = JSONObject(raw)
                 result.add(obj.keys().asSequence().associateWith { key -> obj.opt(key).let { if (it == JSONObject.NULL) null else it } })
             }
         }

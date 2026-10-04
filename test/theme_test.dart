@@ -60,8 +60,8 @@ void main() {
       final balances = store.activeAccounts.map(store.balance).toList();
       await tester.tap(find.byKey(const Key('theme-picker')));
       await tester.pumpAndSettle();
-      expect(find.text('白色 · 透明'), findsOneWidget);
-      expect(find.text('黑色 · 蓝色'), findsOneWidget);
+      expect(find.text('浅色 · 米白'), findsOneWidget);
+      expect(find.text('深色 · 暖灰'), findsOneWidget);
       await tester.tap(find.byKey(const Key('theme-dark')));
       await tester.pumpAndSettle();
       expect(appearanceOf(tester), Brightness.dark);

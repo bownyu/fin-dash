@@ -8,12 +8,12 @@ import '../domain/models.dart';
 import '../domain/command_context.dart';
 import '../services/ai_service.dart';
 
-const primary = Color(0xFF3478F6);
-const mint = Color(0xFF219C84);
-const coral = Color(0xFFE37069);
-const muted = Color(0xFF748195);
-const darkBg = Color(0xFF080F1D);
-const darkSurface = Color(0xFF152238);
+const primary = Color(0xFFA75F43);
+const mint = Color(0xFF527563);
+const coral = Color(0xFFAA6257);
+const muted = Color(0xFF77736C);
+const darkBg = Color(0xFF1C1C1A);
+const darkSurface = Color(0xFF282825);
 const palette = [
   '#FF8B7B',
   '#4ECDC4',
@@ -83,13 +83,15 @@ IconData iconOf(String name) => switch (name) {
 };
 ThemeData walletTheme(Brightness brightness) {
   final dark = brightness == Brightness.dark;
-  final ink = dark ? const Color(0xFFF3F6FF) : const Color(0xFF202C40);
-  final secondaryInk = dark ? const Color(0xFF9EADC5) : const Color(0xFF637188);
+  final colors = WalletColors(dark);
+  final ink = colors.ink;
+  final secondaryInk = colors.secondary;
   final scheme =
       ColorScheme.fromSeed(seedColor: primary, brightness: brightness).copyWith(
-        primary: primary,
+        primary: colors.accent,
+        onPrimary: dark ? darkBg : Colors.white,
         secondary: mint,
-        surface: dark ? darkSurface : Colors.white,
+        surface: colors.surface,
         onSurface: ink,
         onSurfaceVariant: secondaryInk,
         outline: secondaryInk.withValues(alpha: .3),
@@ -100,7 +102,7 @@ ThemeData walletTheme(Brightness brightness) {
     brightness: brightness,
     colorScheme: scheme,
     scaffoldBackgroundColor: Colors.transparent,
-    canvasColor: dark ? darkBg : const Color(0xFFF5F7FC),
+    canvasColor: colors.background,
     pageTransitionsTheme: const PageTransitionsTheme(
       builders: {
         TargetPlatform.android: WalletPageTransitionsBuilder(),
@@ -164,7 +166,7 @@ ThemeData walletTheme(Brightness brightness) {
     ),
     inputDecorationTheme: InputDecorationTheme(
       filled: true,
-      fillColor: dark ? const Color(0xFF0F1A2D) : const Color(0xFFEEF2F9),
+      fillColor: colors.inset,
       border: OutlineInputBorder(
         borderRadius: BorderRadius.circular(18),
         borderSide: BorderSide.none,
@@ -193,7 +195,7 @@ ThemeData walletTheme(Brightness brightness) {
       side: BorderSide.none,
     ),
     popupMenuTheme: PopupMenuThemeData(
-      color: dark ? darkSurface : Colors.white,
+      color: colors.surface,
       surfaceTintColor: Colors.transparent,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
       elevation: 8,
@@ -215,20 +217,16 @@ ThemeData walletTheme(Brightness brightness) {
         ),
       ),
     ),
-    dividerTheme: DividerThemeData(
-      color: dark
-          ? Colors.white.withValues(alpha: .1)
-          : const Color(0xFF526681).withValues(alpha: .1),
-    ),
+    dividerTheme: DividerThemeData(color: colors.border),
     bottomSheetTheme: BottomSheetThemeData(
-      backgroundColor: dark ? darkSurface : Colors.white,
+      backgroundColor: colors.surface,
       surfaceTintColor: Colors.transparent,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(32)),
       ),
     ),
     dialogTheme: DialogThemeData(
-      backgroundColor: dark ? darkSurface : const Color(0xFFF9FAFF),
+      backgroundColor: colors.surface,
       surfaceTintColor: Colors.transparent,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(28)),
     ),
@@ -241,21 +239,24 @@ class WalletColors {
   const WalletColors(this.dark);
   static WalletColors of(BuildContext context) =>
       WalletColors(Theme.of(context).brightness == Brightness.dark);
-  Color get background => dark ? darkBg : const Color(0xFFF3F5FA);
-  Color get ink => dark ? const Color(0xFFF3F6FF) : const Color(0xFF202C40);
+  Color get background => dark ? darkBg : const Color(0xFFF5F3EE);
+  Color get ink => dark ? const Color(0xFFEAE7E0) : const Color(0xFF302E2A);
   Color get secondary =>
-      dark ? const Color(0xFF9EADC5) : const Color(0xFF637188);
-  Color get border => dark
-      ? const Color(0xFFADC7FF).withValues(alpha: .13)
-      : Colors.white.withValues(alpha: .95);
-  Color get surface => dark
-      ? darkSurface.withValues(alpha: .78)
-      : Colors.white.withValues(alpha: .78);
-  Color get income => dark ? const Color(0xFF69D5B6) : const Color(0xFF15856E);
-  Color get expense => dark ? const Color(0xFFFFA095) : const Color(0xFFC65954);
-  List<Color> get hero => dark
-      ? const [Color(0xFF204E94), Color(0xFF12274A), Color(0xFF14243E)]
-      : const [Color(0xF9FFFFFF), Color(0xE8F0F5FF), Color(0xDCF0ECFF)];
+      dark ? const Color(0xFFAAA69D) : const Color(0xFF77736C);
+  Color get border => dark ? const Color(0xFF3D3D37) : const Color(0xFFE2DED6);
+  Color get surface => dark ? darkSurface : const Color(0xFFFCFBF8);
+  Color get panel => surface.withValues(alpha: dark ? .84 : .76);
+  Color get glassBorder => Colors.white.withValues(alpha: dark ? .16 : .88);
+  List<Color> get glassTints => dark
+      ? [
+          const Color(0xFF45453E).withValues(alpha: .8),
+          darkSurface.withValues(alpha: .72),
+        ]
+      : [Colors.white.withValues(alpha: .88), surface.withValues(alpha: .64)];
+  Color get inset => dark ? const Color(0xFF33332E) : const Color(0xFFEDEAE3);
+  Color get accent => dark ? const Color(0xFFD3A18A) : primary;
+  Color get income => dark ? const Color(0xFF96B5A2) : mint;
+  Color get expense => dark ? const Color(0xFFD5A097) : coral;
 }
 
 class WalletBackdrop extends StatelessWidget {
@@ -273,13 +274,11 @@ class WalletBackdrop extends StatelessWidget {
             child: DecoratedBox(
               decoration: BoxDecoration(
                 gradient: RadialGradient(
-                  center: const Alignment(1.1, -.9),
-                  radius: 1.2,
+                  center: const Alignment(.9, -.85),
+                  radius: 1.3,
                   colors: [
-                    (colors.dark
-                            ? const Color(0xFF2858A2)
-                            : const Color(0xFFB9D6FF))
-                        .withValues(alpha: colors.dark ? .34 : .42),
+                    (colors.dark ? const Color(0xFF555548) : Colors.white)
+                        .withValues(alpha: colors.dark ? .34 : .85),
                     colors.background.withValues(alpha: 0),
                   ],
                 ),
@@ -290,13 +289,12 @@ class WalletBackdrop extends StatelessWidget {
             child: DecoratedBox(
               decoration: BoxDecoration(
                 gradient: RadialGradient(
-                  center: const Alignment(-1.1, .15),
-                  radius: 1,
+                  center: const Alignment(-1, .35),
+                  radius: 1.2,
                   colors: [
-                    (colors.dark
-                            ? const Color(0xFF46386F)
-                            : const Color(0xFFD9CBFB))
-                        .withValues(alpha: colors.dark ? .17 : .32),
+                    const Color(
+                      0xFFB4AA98,
+                    ).withValues(alpha: colors.dark ? .07 : .18),
                     colors.background.withValues(alpha: 0),
                   ],
                 ),
@@ -368,7 +366,7 @@ class WalletPageTransitionsBuilder extends PageTransitionsBuilder {
   }
 }
 
-/// Blur is reserved for floating controls, keeping long lists inexpensive.
+/// Real background blur is confined to the clipped floating navigation.
 class GlassPanel extends StatelessWidget {
   static final _blur = ui.ImageFilter.blur(sigmaX: 10, sigmaY: 10);
   final Widget child;
@@ -383,14 +381,14 @@ class GlassPanel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = WalletColors.of(context);
-    return Container(
+    return DecoratedBox(
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(radius),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withValues(alpha: colors.dark ? .2 : .07),
-            blurRadius: 26,
-            offset: const Offset(0, 8),
+            color: Colors.black.withValues(alpha: colors.dark ? .18 : .06),
+            blurRadius: 22,
+            offset: const Offset(0, 7),
           ),
         ],
       ),
@@ -404,14 +402,10 @@ class GlassPanel extends StatelessWidget {
                 gradient: LinearGradient(
                   begin: Alignment.topLeft,
                   end: Alignment.bottomRight,
-                  colors: [
-                    (colors.dark ? const Color(0xFF263956) : Colors.white)
-                        .withValues(alpha: .86),
-                    colors.surface.withValues(alpha: .7),
-                  ],
+                  colors: colors.glassTints,
                 ),
                 borderRadius: BorderRadius.circular(radius),
-                border: Border.all(color: colors.border),
+                border: Border.all(color: colors.glassBorder),
               ),
               child: Padding(padding: padding, child: child),
             ),
@@ -424,7 +418,12 @@ class GlassPanel extends StatelessWidget {
 
 class HeroPanel extends StatelessWidget {
   final Widget child;
-  const HeroPanel({super.key, required this.child});
+  final EdgeInsetsGeometry padding;
+  const HeroPanel({
+    super.key,
+    required this.child,
+    this.padding = const EdgeInsets.all(24),
+  });
   @override
   Widget build(BuildContext context) {
     final colors = WalletColors.of(context);
@@ -433,43 +432,19 @@ class HeroPanel extends StatelessWidget {
         gradient: LinearGradient(
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
-          colors: colors.hero,
+          colors: colors.glassTints,
         ),
-        borderRadius: BorderRadius.circular(30),
-        border: Border.all(color: colors.border),
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(color: colors.glassBorder),
         boxShadow: [
           BoxShadow(
-            color: primary.withValues(alpha: colors.dark ? .1 : .07),
-            blurRadius: 32,
-            offset: const Offset(0, 12),
+            color: Colors.black.withValues(alpha: colors.dark ? .1 : .025),
+            blurRadius: 24,
+            offset: const Offset(0, 8),
           ),
         ],
       ),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(30),
-        child: Stack(
-          children: [
-            Positioned(
-              right: -36,
-              top: -56,
-              child: ExcludeSemantics(
-                child: Container(
-                  width: 190,
-                  height: 190,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    border: Border.all(
-                      color: colors.ink.withValues(alpha: .045),
-                      width: 32,
-                    ),
-                  ),
-                ),
-              ),
-            ),
-            Padding(padding: const EdgeInsets.all(24), child: child),
-          ],
-        ),
-      ),
+      child: Padding(padding: padding, child: child),
     );
   }
 }
@@ -481,6 +456,7 @@ class OverviewGrid extends StatelessWidget {
   @override
   Widget build(BuildContext context) => LayoutBuilder(
     builder: (context, constraints) {
+      if (tiles.isEmpty) return hero;
       if (constraints.maxWidth >= 620) {
         return IntrinsicHeight(
           child: Row(
@@ -576,11 +552,11 @@ class _AppScopeState extends State<AppScope> {
   @override
   void didUpdateWidget(covariant AppScope oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if(oldWidget.store==widget.store)return;
-    for(final domain in WalletDomain.values) {
+    if (oldWidget.store == widget.store) return;
+    for (final domain in WalletDomain.values) {
       oldWidget.store.domainUpdates[domain]!.removeListener(callbacks[domain]!);
       widget.store.domainUpdates[domain]!.addListener(callbacks[domain]!);
-      versions[domain]=versions[domain]!+1;
+      versions[domain] = versions[domain]! + 1;
     }
     oldWidget.store.runtimeUpdates.removeListener(refreshRuntime);
     widget.store.runtimeUpdates.addListener(refreshRuntime);
@@ -720,18 +696,9 @@ class Panel extends StatelessWidget {
   Widget build(BuildContext context) => Container(
     padding: padding,
     decoration: BoxDecoration(
-      color: color ?? WalletColors.of(context).surface,
-      borderRadius: BorderRadius.circular(24),
+      color: color ?? WalletColors.of(context).panel,
+      borderRadius: BorderRadius.circular(18),
       border: Border.all(color: WalletColors.of(context).border),
-      boxShadow: [
-        BoxShadow(
-          color: const Color(
-            0xFF223A60,
-          ).withValues(alpha: WalletColors.of(context).dark ? .04 : .035),
-          blurRadius: 20,
-          offset: const Offset(0, 6),
-        ),
-      ],
     ),
     child: child,
   );
@@ -982,12 +949,14 @@ class TransactionRow extends StatelessWidget {
   final LedgerTx tx;
   final VoidCallback? onTap, onLongPress;
   final bool? selected;
+  final bool neutralIcon;
   const TransactionRow(
     this.tx, {
     super.key,
     this.onTap,
     this.onLongPress,
     this.selected,
+    this.neutralIcon = false,
   });
   @override
   Widget build(BuildContext context) {
@@ -998,7 +967,9 @@ class TransactionRow extends StatelessWidget {
     final category = store.data.categories
         .where((c) => c.name == tx.category && c.type == tx.type)
         .firstOrNull;
-    final color = tx.type == TxType.transfer
+    final color = neutralIcon
+        ? WalletColors.of(context).secondary
+        : tx.type == TxType.transfer
         ? primary
         : colorOf(category?.color ?? '#94A3B8');
     return Material(

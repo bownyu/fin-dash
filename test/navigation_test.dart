@@ -51,6 +51,116 @@ Future<bool> markerIsVisible(WidgetTester tester) async {
 }
 
 void main() {
+  testWidgets('first visits and revisits animate the selected tab', (
+    tester,
+  ) async {
+    await renderApp(tester);
+    double opacity() => tester
+        .widget<FadeTransition>(find.byKey(const Key('main-tab-transition')))
+        .opacity
+        .value;
+    Offset offset() => tester
+        .widget<SlideTransition>(
+          find
+              .descendant(
+                of: find.byKey(const Key('main-tab-transition')),
+                matching: find.byType(SlideTransition),
+              )
+              .first,
+        )
+        .position
+        .value;
+    for (final index in [1, 2, 3, 0, 1]) {
+      await tester.tap(find.byKey(Key('nav-$index')));
+      await tester.pump();
+      expect(
+        opacity(),
+        0,
+        reason: 'tab $index must animate on its first frame',
+      );
+      expect(offset().dy, greaterThan(0));
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(opacity(), allOf(greaterThan(0), lessThan(1)));
+      await tester.pumpAndSettle();
+      expect(opacity(), 1);
+      expect(offset(), Offset.zero);
+    }
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('rapid tab changes finish on the last selected page', (
+    tester,
+  ) async {
+    await renderApp(tester);
+    final home = tester.state(find.byType(HomePage));
+    for (final index in [1, 2, 3, 2, 0]) {
+      await tester.tap(find.byKey(Key('nav-$index')));
+      await tester.pump(const Duration(milliseconds: 32));
+    }
+    await tester.pumpAndSettle();
+    expect(tester.state(find.byType(HomePage)), same(home));
+    expect(find.byType(BillsPage), findsNothing);
+    expect(
+      tester
+          .widget<FadeTransition>(find.byKey(const Key('main-tab-transition')))
+          .opacity
+          .value,
+      1,
+    );
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('reduced motion skips the first tab and subpage transitions', (
+    tester,
+  ) async {
+    tester.platformDispatcher.accessibilityFeaturesTestValue =
+        const FakeAccessibilityFeatures(disableAnimations: true);
+    addTearDown(tester.platformDispatcher.clearAccessibilityFeaturesTestValue);
+    await renderApp(tester);
+    await tester.tap(find.byKey(const Key('nav-1')));
+    await tester.pump();
+    expect(
+      tester
+          .widget<FadeTransition>(find.byKey(const Key('main-tab-transition')))
+          .opacity
+          .value,
+      1,
+    );
+    await tester.tap(find.byKey(const Key('nav-0')));
+    await tester.pump();
+    openPage<void>(tester.element(find.byType(HomePage)), const AccountsPage());
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 1));
+    expect(find.byType(AccountsPage), findsOneWidget);
+    expect(
+      find.ancestor(
+        of: find.byType(AccountsPage),
+        matching: find.byType(SlideTransition),
+      ),
+      findsNothing,
+    );
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('first subpage opening moves before it settles', (tester) async {
+    await renderApp(tester);
+    final result = openPage<void>(
+      tester.element(find.byType(HomePage)),
+      const AccountsPage(),
+    );
+    await tester.pump();
+    final page = find.byType(AccountsPage);
+    await tester.pump(const Duration(milliseconds: 80));
+    expect(tester.getTopLeft(page).dx, allOf(greaterThan(0), lessThan(390)));
+    await tester.pumpAndSettle();
+    expect(tester.getTopLeft(page).dx, 0);
+    Navigator.of(tester.element(page)).pop();
+    await tester.pumpAndSettle();
+    await result;
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets(
     'tab selection is immediate and skips unvisited intermediate tabs',
     (tester) async {
@@ -293,7 +403,7 @@ void main() {
         300,
         scrollable: find
             .descendant(
-              of: find.byType(PageList),
+              of: find.byType(HomePage),
               matching: find.byType(Scrollable),
             )
             .first,

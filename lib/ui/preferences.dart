@@ -107,7 +107,7 @@ class _ThemeOption extends StatelessWidget {
   Widget build(BuildContext context) {
     final colors = WalletColors.of(context);
     final sample = WalletColors(dark);
-    final title = dark ? '黑色 · 蓝色' : '白色 · 透明';
+    final title = dark ? '深色 · 暖灰' : '浅色 · 米白';
     return Semantics(
       button: true,
       selected: selected,
@@ -143,13 +143,7 @@ class _ThemeOption extends StatelessWidget {
                     padding: const EdgeInsets.all(12),
                     decoration: BoxDecoration(
                       borderRadius: BorderRadius.circular(14),
-                      gradient: LinearGradient(
-                        begin: Alignment.topLeft,
-                        end: Alignment.bottomRight,
-                        colors: dark
-                            ? const [Color(0xFF0C1525), Color(0xFF203C64)]
-                            : const [Color(0xFFE9F2FF), Color(0xFFF1EAFB)],
-                      ),
+                      color: sample.background,
                     ),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
@@ -166,7 +160,11 @@ class _ThemeOption extends StatelessWidget {
                         Container(
                           height: 36,
                           decoration: BoxDecoration(
-                            gradient: LinearGradient(colors: sample.hero),
+                            gradient: LinearGradient(
+                              begin: Alignment.topLeft,
+                              end: Alignment.bottomRight,
+                              colors: sample.glassTints,
+                            ),
                             borderRadius: BorderRadius.circular(9),
                             border: Border.all(color: sample.border),
                           ),
@@ -188,7 +186,7 @@ class _ThemeOption extends StatelessWidget {
                               Expanded(
                                 child: Container(
                                   decoration: BoxDecoration(
-                                    color: sample.surface,
+                                    color: sample.panel,
                                     borderRadius: BorderRadius.circular(7),
                                   ),
                                 ),
@@ -197,7 +195,7 @@ class _ThemeOption extends StatelessWidget {
                               Expanded(
                                 child: Container(
                                   decoration: BoxDecoration(
-                                    color: sample.surface,
+                                    color: sample.panel,
                                     borderRadius: BorderRadius.circular(7),
                                   ),
                                 ),
@@ -233,7 +231,7 @@ class _ThemeOption extends StatelessWidget {
                 ),
                 const SizedBox(height: 5),
                 Text(
-                  dark ? '深邃夜色，蓝色光感' : '推荐 · 轻盈通透',
+                  dark ? '暖灰玻璃，柔和层次' : '推荐 · 米白玻璃',
                   style: Theme.of(context).textTheme.bodySmall,
                 ),
               ],

@@ -103,8 +103,21 @@ class _VoiceEntrySheetState extends State<VoiceEntrySheet>
 
   /// Fields a spoken correction just changed; they flash once.
   Set<String> changed = const {};
-  VoiceDraft? draft;
-  LedgerTx? saved;
+  VoiceBatch? batch;
+  int selectedEntry = 0;
+  VoiceDraft? get draft => batch?.entries[selectedEntry];
+  set draft(VoiceDraft? value) {
+    if (value == null) {
+      batch = null;
+      selectedEntry = 0;
+    } else {
+      batch =
+          batch?.update(value) ??
+          VoiceBatch(value.entryId, [value], transcript: value.transcript);
+    }
+  }
+
+  List<LedgerTx>? saved;
   VoiceBookkeeping get bookkeeping =>
       VoiceBookkeeping(AppScope.storeOf(context), AppScope.of(context).ai);
 
@@ -129,6 +142,15 @@ class _VoiceEntrySheetState extends State<VoiceEntrySheet>
         : accounts.length == 1
         ? accounts.single.id
         : null;
+    final stored = (store.data.extras['voiceDrafts'] as Map?)?[widget.entryId];
+    if (!widget.autoStart && stored is Map && stored['draft'] is Map) {
+      batch = VoiceBatch.fromJson(
+        Json.from(stored['draft'] as Map),
+        transcript: '${stored['text'] ?? transcript.text}',
+      );
+      transcript.text = batch!.transcript;
+      _fill(draft!);
+    }
     if (widget.autoStart) {
       WidgetsBinding.instance.addPostFrameCallback((_) => listen());
     }
@@ -154,7 +176,7 @@ class _VoiceEntrySheetState extends State<VoiceEntrySheet>
   /// replacing it, so one misheard word never costs the whole sentence.
   Future<void> listen({bool correction = false}) async {
     if (!mounted || listening || processing || saving) return;
-    final base = correction ? draft : null;
+    final base = correction ? batch : null;
     final generation = ++captureGeneration;
     FocusManager.instance.primaryFocus?.unfocus();
     levels.reset();
@@ -243,7 +265,8 @@ class _VoiceEntrySheetState extends State<VoiceEntrySheet>
   }
 
   Future<void> preview({String? correction}) async {
-    final base = correction == null ? null : draft;
+    final base = correction == null ? null : batch;
+    final previous = draft;
     if (listening || processing || saving) return;
     if (base == null && transcript.text.trim().isEmpty) return;
     final service = bookkeeping;
@@ -262,24 +285,26 @@ class _VoiceEntrySheetState extends State<VoiceEntrySheet>
       }
     });
     try {
-      final result = await service.preview(
+      final result = await service.previewBatch(
         correction ?? transcript.text,
         entryId: entryId,
         accountId: accountId,
         base: base,
+        selectedEntryId: previous?.entryId,
       );
       if (!mounted) return;
-      _fill(result);
+      final current = result.entries[selectedEntry];
+      _fill(current);
       setState(() {
-        if (base != null) {
+        if (previous != null && base != null) {
           changed = {
-            for (final key in {...base.fields.keys, ...result.fields.keys})
-              if (base.fields[key] != result.fields[key]) key,
+            for (final key in {...previous.fields.keys, ...current.fields.keys})
+              if (previous.fields[key] != current.fields[key]) key,
           };
           flash++;
           transcript.text = result.transcript;
         }
-        draft = result;
+        batch = result;
       });
     } catch (e) {
       if (mounted) {
@@ -301,7 +326,7 @@ class _VoiceEntrySheetState extends State<VoiceEntrySheet>
       error = null;
     });
     try {
-      final tx = await service.confirm(draft!);
+      final tx = await service.confirmBatch(batch!);
       if (mounted) {
         HapticFeedback.lightImpact();
         setState(() {
@@ -333,7 +358,7 @@ class _VoiceEntrySheetState extends State<VoiceEntrySheet>
       error = null;
     });
     try {
-      await service.undo(tx);
+      await service.undoBatch(tx);
       if (mounted) {
         setState(() {
           saved = null;
@@ -354,9 +379,19 @@ class _VoiceEntrySheetState extends State<VoiceEntrySheet>
     error = null;
   });
 
+  void selectEntry(int index) => setState(() {
+    selectedEntry = index;
+    _fill(draft!);
+    changed = const {};
+    error = null;
+  });
+
   /// Takes the user straight to the first field that blocks saving.
   Future<void> fix(String field) async {
     final store = AppScope.storeOf(context);
+    final index =
+        batch?.entries.indexWhere((e) => e.problem(store.data) != null) ?? -1;
+    if (index >= 0 && index != selectedEntry) selectEntry(index);
     if (_accountFields.contains(field) && store.activeAccounts.isEmpty) {
       await openPage(context, const AccountEditor());
       return;
@@ -398,8 +433,11 @@ class _VoiceEntrySheetState extends State<VoiceEntrySheet>
     final busy = processing || saving;
     final hasText = transcript.text.trim().isNotEmpty;
     final current = draft;
-    final problem = current?.problem(store.data);
-    final blocking = current?.missing(store.data).firstOrNull;
+    final problem = batch?.problem(store.data);
+    final incomplete = batch?.entries
+        .where((e) => e.problem(store.data) != null)
+        .firstOrNull;
+    final blocking = incomplete?.missing(store.data).firstOrNull;
     final recording = listening && captureState == 'listening';
     final queued =
         processing &&
@@ -432,28 +470,96 @@ class _VoiceEntrySheetState extends State<VoiceEntrySheet>
     final showField =
         !listening &&
         ((current == null && saved == null && !processing) || editing);
+    final statusStyle = TextStyle(color: colors.secondary, fontSize: 12);
     final Widget result = saved != null
         ? Padding(
-            key: ValueKey('saved:${saved!.id}'),
+            key: ValueKey('saved:${saved!.first.id}'),
             padding: const EdgeInsets.only(top: 16),
-            child: _SavedReceipt(tx: saved!, onUndo: busy ? null : undo),
+            child: _SavedReceipt(
+              transactions: saved!,
+              onUndo: busy ? null : undo,
+            ),
           )
         : current != null
         ? Padding(
             key: ValueKey('draft:${current.entryId}'),
             padding: const EdgeInsets.only(top: 16),
-            child: VoiceReceiptCard(
-              draft: current,
-              enabled: !busy && !listening,
-              working: processing || listening,
-              amount: amount,
-              title: title,
-              amountFocus: amountFocus,
-              titleFocus: titleFocus,
-              changed: changed,
-              flash: flash,
-              onChanged: update,
-              onPick: pick,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                if (batch!.entries.length > 1) ...[
+                  Panel(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          '识别出 ${batch!.entries.length} 笔，请逐笔核对',
+                          style: const TextStyle(fontWeight: FontWeight.w700),
+                        ),
+                        const SizedBox(height: 8),
+                        for (var i = 0; i < batch!.entries.length; i++)
+                          ListTile(
+                            key: ValueKey('voice-entry-$i'),
+                            contentPadding: const EdgeInsets.symmetric(
+                              horizontal: 8,
+                            ),
+                            selected: selectedEntry == i,
+                            title: Text(
+                              '${i + 1}. ${batch!.entries[i].fields['title'] ?? '用途待补充'}',
+                            ),
+                            subtitle: Text(
+                              store
+                                      .account(
+                                        batch!.entries[i].fields['accountId'],
+                                      )
+                                      ?.name ??
+                                  (batch!.entries[i].fields['type'] ==
+                                          'transfer'
+                                      ? '转账'
+                                      : '账户待选择'),
+                            ),
+                            trailing: Text(
+                              batch!.entries[i].fields['amountCents'] is int
+                                  ? privateMoney(
+                                      context,
+                                      batch!.entries[i].fields['amountCents']
+                                          as int,
+                                    )
+                                  : '金额待补充',
+                              style: TextStyle(
+                                color:
+                                    batch!.entries[i].problem(store.data) ==
+                                        null
+                                    ? colors.ink
+                                    : coral,
+                              ),
+                            ),
+                            onTap: busy || listening
+                                ? null
+                                : () => selectEntry(i),
+                          ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  Text('正在核对第 ${selectedEntry + 1} 笔', style: statusStyle),
+                  const SizedBox(height: 8),
+                ],
+                VoiceReceiptCard(
+                  key: ValueKey(current.entryId),
+                  draft: current,
+                  enabled: !busy && !listening,
+                  working: processing || listening,
+                  amount: amount,
+                  title: title,
+                  amountFocus: amountFocus,
+                  titleFocus: titleFocus,
+                  changed: changed,
+                  flash: flash,
+                  onChanged: update,
+                  onPick: pick,
+                ),
+              ],
             ),
           )
         : processing
@@ -485,7 +591,11 @@ class _VoiceEntrySheetState extends State<VoiceEntrySheet>
                   key: const Key('voice-confirm'),
                   onPressed: problem == null ? confirm : null,
                   icon: const Icon(Icons.check_rounded),
-                  label: const Text('确认保存'),
+                  label: Text(
+                    batch!.entries.length == 1
+                        ? '确认保存'
+                        : '确认保存 ${batch!.entries.length} 笔',
+                  ),
                 )
               : FilledButton.icon(
                   key: const Key('voice-fix'),
@@ -494,7 +604,7 @@ class _VoiceEntrySheetState extends State<VoiceEntrySheet>
                   label: Text(
                     _fixLabel(
                       blocking,
-                      current.fields['type'],
+                      incomplete?.fields['type'],
                       store.activeAccounts.isEmpty,
                     ),
                   ),
@@ -507,7 +617,6 @@ class _VoiceEntrySheetState extends State<VoiceEntrySheet>
             label: const Text('生成账单'),
           )
         : null;
-    final statusStyle = TextStyle(color: colors.secondary, fontSize: 12);
     return EditorGuard(
       busy: saving,
       hasChanges: () =>
@@ -1710,9 +1819,9 @@ class _ReceiptSkeletonState extends State<_ReceiptSkeleton>
 }
 
 class _SavedReceipt extends StatelessWidget {
-  final LedgerTx tx;
+  final List<LedgerTx> transactions;
   final VoidCallback? onUndo;
-  const _SavedReceipt({required this.tx, required this.onUndo});
+  const _SavedReceipt({required this.transactions, required this.onUndo});
   @override
   Widget build(BuildContext context) {
     final store = AppScope.storeOf(context);
@@ -1744,18 +1853,27 @@ class _SavedReceipt extends StatelessWidget {
               ),
             ],
           ),
-          const SizedBox(height: 12),
-          Text(
-            '${tx.title} · ${tx.type.label} ${privateMoney(context, tx.amount)}',
-            style: const TextStyle(fontSize: 20),
+          for (final tx in transactions) ...[
+            const SizedBox(height: 12),
+            Text(
+              '${tx.title} · ${tx.type.label} ${privateMoney(context, tx.amount)}',
+              style: const TextStyle(fontSize: 20),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              tx.type == TxType.transfer
+                  ? '${store.account(tx.fromId)?.name} → ${store.account(tx.toId)?.name}'
+                  : store.account(tx.accountId)?.name ?? '',
+            ),
+          ],
+          TextButton(
+            onPressed: onUndo,
+            child: Text(
+              transactions.length == 1
+                  ? '撤销这笔账单'
+                  : '撤销这 ${transactions.length} 笔账单',
+            ),
           ),
-          const SizedBox(height: 6),
-          Text(
-            tx.type == TxType.transfer
-                ? '${store.account(tx.fromId)?.name} → ${store.account(tx.toId)?.name}'
-                : store.account(tx.accountId)?.name ?? '',
-          ),
-          TextButton(onPressed: onUndo, child: const Text('撤销这笔账单')),
         ],
       ),
     );

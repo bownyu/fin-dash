@@ -29,27 +29,52 @@ class VoiceWidgetRuntime {
         }
         final service = VoiceBookkeeping(store, ai);
         if (request['operation'] == 'undo') {
-          final tx = LedgerTx.fromJson(
-            Json.from(jsonDecode(request['transaction'])),
-          );
-          await service.undo(tx);
-          return {'success': true, 'message': '已撤销这笔账单', 'undone': true};
+          final raw = Json.from(jsonDecode(request['transaction']));
+          final transactions = raw['transactions'] is List
+              ? (raw['transactions'] as List)
+                    .map((e) => LedgerTx.fromJson(Json.from(e as Map)))
+                    .toList()
+              : [LedgerTx.fromJson(raw)];
+          await service.undoBatch(transactions);
+          return {
+            'success': true,
+            'message': transactions.length == 1
+                ? '已撤销这笔账单'
+                : '已撤销这${transactions.length}笔账单',
+            'undone': true,
+          };
         }
         final stored = request['draft'] is String
             ? _draft(request['draft'] as String, '${request['previous'] ?? ''}')
             : null;
-        VoiceDraft draft;
+        VoiceBatch batch;
         if (request['operation'] == 'confirm' ||
             request['operation'] == 'account') {
-          draft = stored!;
+          var draft = stored!.entries.first;
           if (request['operation'] == 'confirm') {
-            final tx = await service.confirm(draft);
+            if (!_widgetReviewable(stored)) {
+              throw const FormatException('请在 App 任务页逐笔核对这些账单后保存');
+            }
+            final transactions = await service.confirmBatch(stored);
             return {
               'success': true,
-              'message': '已保存 · 点麦克风再记一笔',
-              'summary': _summary(store, tx.toJson()),
-              'transaction': tx.toJson(),
+              'message': transactions.length == 1
+                  ? '已保存 · 点麦克风再记一笔'
+                  : '已保存${transactions.length}笔 · 点麦克风再记',
+              'summary': transactions.length == 1
+                  ? _summary(store, transactions.single.toJson())
+                  : _batchSummary(store, stored, saved: true),
+              'transaction': transactions.length == 1
+                  ? transactions.single.toJson()
+                  : {
+                      'transactions': transactions
+                          .map((e) => e.toJson())
+                          .toList(),
+                    },
             };
+          }
+          if (!_widgetReviewable(stored)) {
+            throw const FormatException('请在 App 任务页逐笔修改这些账单');
           }
           final accounts = store.activeAccounts;
           if (accounts.isEmpty) throw const FormatException('请先在 App 添加账户');
@@ -104,6 +129,12 @@ class VoiceWidgetRuntime {
               field: choices[(index + 1) % choices.length].id,
             });
           }
+          batch = stored.entries.length == 1
+              ? stored.update(draft)
+              : VoiceBatch(stored.entryId, [
+                  for (final e in stored.entries)
+                    e.update({'accountId': draft.fields['accountId']}),
+                ], transcript: stored.transcript);
         } else {
           final preferred = store.data.settings['quickEntryAccountId'];
           final accounts = store.activeAccounts;
@@ -113,21 +144,30 @@ class VoiceWidgetRuntime {
               ? accounts.single.id
               : null;
           // With a stored draft the new words correct it instead of starting over.
-          draft = await service.preview(
+          batch = await service.previewBatch(
             request['text'] as String,
             entryId: stored?.entryId ?? request['entryId'] as String,
             accountId: accountId,
             base: stored,
           );
         }
-        final problem = draft.problem(store.data);
-        final missing = draft.missing(store.data);
+        final draft = batch.entries.first;
+        final problem = batch.problem(store.data);
+        final reviewable = _widgetReviewable(batch);
+        final incomplete = batch.entries
+            .where((e) => e.problem(store.data) != null)
+            .firstOrNull;
+        final missing = incomplete?.missing(store.data) ?? const <String>[];
         return {
           'success': true,
-          'canConfirm': problem == null,
-          'needsClarification': problem != null,
-          'message': problem == null
-              ? draft.fields['type'] == 'transfer'
+          'canConfirm': problem == null && reviewable,
+          'needsClarification': problem != null || !reviewable,
+          'message': !reviewable
+              ? '请在 App 任务页逐笔核对这${batch.entries.length}笔账单'
+              : problem == null
+              ? batch.entries.length > 1
+                    ? '点摘要统一换账户 · 确认保存${batch.entries.length}笔'
+                    : draft.fields['type'] == 'transfer'
                     ? '点摘要换组合 · 可分别换转出／转入'
                     : '点账单换账户 · 右侧确认'
               : missing.contains('accountId')
@@ -135,9 +175,9 @@ class VoiceWidgetRuntime {
               : missing.contains('amountCents')
               ? '缺少金额 · 点麦克风补充'
               : '请补充信息：$problem',
-          'summary': _summary(store, draft.fields),
-          'draft': draft.toJson(),
-          if (draft.transcript.isNotEmpty) 'text': draft.transcript,
+          'summary': _batchSummary(store, batch),
+          'draft': batch.toJson(),
+          if (batch.transcript.isNotEmpty) 'text': batch.transcript,
           'hasAccounts': store.activeAccounts.isNotEmpty,
         };
       } catch (e) {
@@ -149,14 +189,34 @@ class VoiceWidgetRuntime {
     });
   }
 
-  static VoiceDraft _draft(String encoded, String transcript) {
+  static VoiceBatch _draft(String encoded, String transcript) {
     final raw = Json.from(jsonDecode(encoded));
-    return VoiceDraft(
-      raw['entryId'] as String,
-      Json.from(raw['fields'] as Map),
-      transcript: transcript,
-      assumed: {...(raw['assumed'] as List? ?? const []).whereType<String>()},
-    );
+    return VoiceBatch.fromJson(raw, transcript: transcript);
+  }
+
+  // The widget has two detail lines. Larger/mixed transfer batches need the app.
+  static bool _widgetReviewable(VoiceBatch batch) =>
+      batch.entries.length == 1 ||
+      (batch.entries.length == 2 &&
+          batch.entries.every((e) => e.fields['type'] != 'transfer'));
+
+  static String _batchSummary(
+    WalletStore store,
+    VoiceBatch batch, {
+    bool saved = false,
+  }) {
+    if (batch.entries.length == 1) {
+      return _summary(store, batch.entries.single.fields);
+    }
+    return '${saved ? '已保存' : '待确认'} ${batch.entries.length} 笔\n${batch.entries.map((e) {
+      final fields = e.fields;
+      final amount = fields['amountCents'] is int
+          ? store.data.settings['visible'] == false
+                ? '¥ ••••••'
+                : money(fields['amountCents'])
+          : '金额待补充';
+      return '${fields['title'] ?? '用途待补充'} $amount · ${store.account(fields['accountId'])?.name ?? '账户待选'}';
+    }).join('\n')}';
   }
 
   static String _summary(WalletStore store, Json fields) {
