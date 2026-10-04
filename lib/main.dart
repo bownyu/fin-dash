@@ -9,6 +9,7 @@ import 'services/payment_notifications.dart';
 import 'ui/design.dart';
 import 'ui/editors.dart';
 import 'ui/finance_pages.dart';
+import 'ui/interaction.dart';
 import 'ui/preferences.dart';
 import 'services/voice_widget_runtime.dart';
 import 'ui/payment_entry_reminder.dart';
@@ -211,6 +212,7 @@ class _Shell extends StatefulWidget {
 }
 
 class _ShellState extends State<_Shell> with SingleTickerProviderStateMixin {
+  static const _addSize = 52.0, _addGap = 6.0;
   late final _transition = AnimationController(
     vsync: this,
     duration: const Duration(milliseconds: 260),
@@ -243,11 +245,12 @@ class _ShellState extends State<_Shell> with SingleTickerProviderStateMixin {
       _visited.add(value);
       index = value;
     });
-    // Start even when this destination is mounted for the first time.
+    // A first visit builds the destination in the next frame; the clock waits
+    // for it so first and later visits fade in alike.
     if (MediaQuery.disableAnimationsOf(context)) {
       _transition.value = 1;
     } else {
-      _transition.forward(from: 0);
+      _transition.playSettled();
     }
   }
 
@@ -416,50 +419,32 @@ class _ShellState extends State<_Shell> with SingleTickerProviderStateMixin {
                       horizontal: 6,
                       vertical: 7,
                     ),
-                    child: Row(
-                      children: [
-                        _nav(0, Icons.home_outlined, Icons.home_rounded, '首页'),
-                        _nav(
-                          1,
-                          Icons.donut_large_rounded,
-                          Icons.donut_large_rounded,
-                          '统计',
-                        ),
-                        Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 6),
-                          child: SizedBox.square(
-                            dimension: 52,
-                            child: FloatingActionButton(
-                              heroTag: 'main-add',
-                              tooltip: '记一笔',
-                              elevation: 0,
-                              backgroundColor: colors.ink,
-                              foregroundColor: colors.surface,
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(17),
+                    child: LayoutBuilder(
+                      builder: (context, bar) {
+                        // One highlight glides between destinations and
+                        // skips the add button in the middle.
+                        const addSlot = _addSize + 2 * _addGap;
+                        final slot = (bar.maxWidth - addSlot) / 4;
+                        return Stack(
+                          children: [
+                            AnimatedPositioned(
+                              duration: motionDuration(context, 300),
+                              curve: Curves.easeOutCubic,
+                              top: 0,
+                              bottom: 0,
+                              left: slot * index + (index >= 2 ? addSlot : 0),
+                              width: slot,
+                              child: DecoratedBox(
+                                decoration: BoxDecoration(
+                                  color: colors.inset,
+                                  borderRadius: BorderRadius.circular(18),
+                                ),
                               ),
-                              onPressed: () => openPage(
-                                context,
-                                const TransactionEditor(),
-                                modal: true,
-                              ),
-                              child: const Icon(Icons.add_rounded, size: 29),
                             ),
-                          ),
-                        ),
-                        _nav(
-                          2,
-                          Icons.receipt_long_outlined,
-                          Icons.receipt_long_rounded,
-                          '账单',
-                        ),
-                        _nav(
-                          3,
-                          Icons.person_outline_rounded,
-                          Icons.person_rounded,
-                          '我的',
-                        ),
-                      ],
+                            _navRow(context),
+                          ],
+                        );
+                      },
                     ),
                   ),
                 ),
@@ -468,52 +453,74 @@ class _ShellState extends State<_Shell> with SingleTickerProviderStateMixin {
     );
   }
 
-  Widget _nav(int value, IconData icon, IconData selected, String label) =>
-      Expanded(
-        child: Semantics(
-          selected: value == index,
-          child: InkWell(
-            key: Key('nav-$value'),
-            onTap: () => select(value),
-            borderRadius: BorderRadius.circular(24),
-            child: AnimatedContainer(
-              duration: Duration(
-                milliseconds: MediaQuery.disableAnimationsOf(context) ? 0 : 220,
+  Widget _navRow(BuildContext context) {
+    final colors = WalletColors.of(context);
+    return Row(
+      children: [
+        _nav(0, Icons.home_outlined, Icons.home_rounded, '首页'),
+        _nav(1, Icons.donut_large_rounded, Icons.donut_large_rounded, '统计'),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: _addGap),
+          child: SizedBox.square(
+            dimension: _addSize,
+            child: FloatingActionButton(
+              heroTag: 'main-add',
+              tooltip: '记一笔',
+              elevation: 0,
+              backgroundColor: colors.ink,
+              foregroundColor: colors.surface,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(17),
               ),
-              padding: const EdgeInsets.symmetric(vertical: 7),
-              decoration: BoxDecoration(
-                color: value == index
-                    ? WalletColors.of(context).inset
-                    : Colors.transparent,
-                borderRadius: BorderRadius.circular(24),
-              ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(
-                    value == index ? selected : icon,
-                    color: value == index
-                        ? WalletColors.of(context).ink
-                        : WalletColors.of(context).secondary,
-                    size: 24,
-                  ),
-                  const SizedBox(height: 3),
-                  Text(
-                    label,
-                    style: TextStyle(
-                      fontSize: 10,
-                      fontWeight: value == index
-                          ? FontWeight.w700
-                          : FontWeight.w500,
-                      color: value == index
-                          ? WalletColors.of(context).ink
-                          : WalletColors.of(context).secondary,
-                    ),
-                  ),
-                ],
-              ),
+              onPressed: () =>
+                  openPage(context, const TransactionEditor(), modal: true),
+              child: const Icon(Icons.add_rounded, size: 29),
             ),
           ),
         ),
-      );
+        _nav(2, Icons.receipt_long_outlined, Icons.receipt_long_rounded, '账单'),
+        _nav(3, Icons.person_outline_rounded, Icons.person_rounded, '我的'),
+      ],
+    );
+  }
+
+  Widget _nav(int value, IconData icon, IconData selected, String label) {
+    final colors = WalletColors.of(context);
+    final active = value == index;
+    final tint = active ? colors.ink : colors.secondary;
+    return Expanded(
+      child: Semantics(
+        selected: active,
+        child: InkWell(
+          key: Key('nav-$value'),
+          onTap: () => select(value),
+          borderRadius: BorderRadius.circular(18),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 7),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TweenAnimationBuilder<Color?>(
+                  tween: ColorTween(end: tint),
+                  duration: motionDuration(context, 200),
+                  builder: (_, color, _) =>
+                      Icon(active ? selected : icon, color: color, size: 24),
+                ),
+                const SizedBox(height: 3),
+                AnimatedDefaultTextStyle(
+                  duration: motionDuration(context, 200),
+                  style: TextStyle(
+                    fontSize: 10,
+                    fontWeight: active ? FontWeight.w700 : FontWeight.w500,
+                    color: tint,
+                  ),
+                  child: Text(label),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 }

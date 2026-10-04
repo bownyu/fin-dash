@@ -1122,7 +1122,7 @@ class ChatHistoryPage extends StatelessWidget {
                               Navigator.pop(context);
                             } else {
                               Navigator.of(context).pushReplacement(
-                                MaterialPageRoute(
+                                WalletPageRoute(
                                   builder: (_) => const ChatPage(),
                                 ),
                               );
