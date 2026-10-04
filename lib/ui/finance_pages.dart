@@ -46,7 +46,8 @@ class _HomePageState extends State<HomePage>
     if (MediaQuery.disableAnimationsOf(context)) {
       intro.value = 1;
     } else {
-      intro.forward();
+      // The page's own first frame is the costly one; begin after it.
+      intro.playSettled();
     }
   }
 
@@ -150,9 +151,9 @@ class _HomePageState extends State<HomePage>
               range: DateRange.forPeriod(Period.month, DateTime.now()),
             ),
             colors.income,
-            respectPrivacy: true,
+            panel: false,
           ),
-          _Summary('本月支出', monthSpend, colors.expense, respectPrivacy: true),
+          _Summary('本月支出', monthSpend, colors.expense, panel: false),
         ];
         final spendingDetails = Row(
           children: [
@@ -292,6 +293,18 @@ class _HomePageState extends State<HomePage>
                   ),
                 ),
         );
+        final privacyToggle = IconButton(
+          tooltip: visible ? '隐藏金额' : '显示金额',
+          onPressed: () => perform(
+            context,
+            () => store.change((d) => d.settings['visible'] = !visible),
+          ),
+          icon: Icon(
+            visible ? Icons.visibility_outlined : Icons.visibility_off_outlined,
+            color: colors.secondary,
+            size: 20,
+          ),
+        );
         final assetSelector = DecoratedBox(
           decoration: BoxDecoration(
             color: colors.inset,
@@ -329,6 +342,7 @@ class _HomePageState extends State<HomePage>
                         borderRadius: BorderRadius.circular(12),
                         child: Padding(
                           padding: EdgeInsets.symmetric(
+                            horizontal: 6,
                             vertical: compact ? 7 : 9,
                           ),
                           child: AnimatedDefaultTextStyle(
@@ -473,27 +487,16 @@ class _HomePageState extends State<HomePage>
                             ),
                           ),
                         ),
-                        IconButton(
-                          tooltip: visible ? '隐藏金额' : '显示金额',
-                          onPressed: () => perform(
-                            context,
-                            () => store.change(
-                              (d) => d.settings['visible'] = !visible,
-                            ),
-                          ),
-                          icon: Icon(
-                            visible
-                                ? Icons.visibility_outlined
-                                : Icons.visibility_off_outlined,
-                            color: colors.secondary,
-                            size: 20,
-                          ),
-                        ),
+                        privacyToggle,
                       ],
                     )
                   : Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
+                        // The selector names the figure, so it heads the card
+                        // instead of repeating the label above the amount.
+                        assetSelector,
+                        SizedBox(height: compact ? 8 : 14),
                         Row(
                           children: [
                             Expanded(
@@ -501,71 +504,20 @@ class _HomePageState extends State<HomePage>
                                 onTap: () => setState(
                                   () => assetView = (assetView + 1) % 3,
                                 ),
-                                child: Row(
-                                  children: [
-                                    AnimatedSwitcher(
-                                      duration: motionDuration(context, 180),
-                                      layoutBuilder: (current, previous) =>
-                                          Stack(
-                                            alignment: Alignment.centerLeft,
-                                            children: [...previous, ?current],
-                                          ),
-                                      child: Text(
-                                        label,
-                                        key: ValueKey(label),
-                                        style: TextStyle(
-                                          color: colors.secondary,
-                                          fontSize: 13,
-                                          fontWeight: FontWeight.w600,
-                                        ),
-                                      ),
-                                    ),
-                                    const SizedBox(width: 6),
-                                    Icon(
-                                      Icons.unfold_more_rounded,
-                                      size: 15,
-                                      color: colors.secondary,
-                                    ),
-                                  ],
+                                child: SizedBox(
+                                  height: compact ? 48 : 56,
+                                  child: MoneyText(
+                                    value,
+                                    size: compact ? 36 : 40,
+                                    color: colors.ink,
+                                    respectPrivacy: true,
+                                  ),
                                 ),
                               ),
                             ),
-                            IconButton(
-                              tooltip: visible ? '隐藏金额' : '显示金额',
-                              onPressed: () => perform(
-                                context,
-                                () => store.change(
-                                  (d) => d.settings['visible'] = !visible,
-                                ),
-                              ),
-                              icon: Icon(
-                                visible
-                                    ? Icons.visibility_outlined
-                                    : Icons.visibility_off_outlined,
-                                color: colors.secondary,
-                                size: 20,
-                              ),
-                            ),
+                            privacyToggle,
                           ],
                         ),
-                        InkWell(
-                          onTap: () =>
-                              setState(() => assetView = (assetView + 1) % 3),
-                          child: SizedBox(
-                            width: double.infinity,
-                            height: compact ? 48 : 56,
-                            child: MoneyText(
-                              value,
-                              size: compact ? 36 : 40,
-                              color: colors.ink,
-                              respectPrivacy: true,
-                            ),
-                          ),
-                        ),
-                        if (!essential) ...[
-                          SizedBox(height: compact ? 10 : 18),
-                          assetSelector,
-                        ],
                         if (!minimal) ...[
                           const SizedBox(height: 12),
                           Divider(color: colors.ink.withValues(alpha: .08)),
@@ -939,16 +891,7 @@ class _HomePageState extends State<HomePage>
                   if (deferPending) pendingNotice,
                   if (!showMonthly) ...[
                     const SizedBox(height: 16),
-                    reveal(
-                      3,
-                      Row(
-                        children: [
-                          Expanded(child: monthlyTiles[0]),
-                          const SizedBox(width: 12),
-                          Expanded(child: monthlyTiles[1]),
-                        ],
-                      ),
-                    ),
+                    reveal(3, SummaryStrip(monthlyTiles)),
                   ],
                   if (essential) ...[
                     const SizedBox(height: 16),
@@ -1043,8 +986,10 @@ class _HomeSecondaryAction extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = WalletColors.of(context);
+    // A borderless tonal fill keeps these quieter than the outlined pair below.
     return _PressTile(
-      color: colors.panel,
+      color: colors.inset,
+      bordered: false,
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       onTap: onTap,
       child: ConstrainedBox(
@@ -1064,7 +1009,7 @@ class _HomeSecondaryAction extends StatelessWidget {
                 style: Theme.of(context).textTheme.bodyMedium!.copyWith(
                   fontSize: 13,
                   fontWeight: FontWeight.w600,
-                  color: colors.secondary,
+                  color: colors.ink,
                 ),
               ),
             ),
@@ -1124,11 +1069,13 @@ class _PressTile extends StatefulWidget {
   final EdgeInsetsGeometry padding;
   final VoidCallback onTap;
   final Widget child;
+  final bool bordered;
   const _PressTile({
     required this.color,
     required this.padding,
     required this.onTap,
     required this.child,
+    this.bordered = true,
   });
   @override
   State<_PressTile> createState() => _PressTileState();
@@ -1147,7 +1094,9 @@ class _PressTileState extends State<_PressTile> {
         decoration: BoxDecoration(
           color: widget.color,
           borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: WalletColors.of(context).border),
+          border: widget.bordered
+              ? Border.all(color: WalletColors.of(context).border)
+              : null,
         ),
         child: InkWell(
           onTap: widget.onTap,
@@ -1970,20 +1919,15 @@ class _Summary extends StatelessWidget {
   final String title;
   final int value;
   final Color color;
-  final bool respectPrivacy;
-  const _Summary(
-    this.title,
-    this.value,
-    this.color, {
-    this.respectPrivacy = true,
-  });
+
+  /// False when a [SummaryStrip] or [OverviewGrid] supplies the surface.
+  final bool panel;
+  const _Summary(this.title, this.value, this.color, {this.panel = true});
   @override
-  Widget build(BuildContext context) => Panel(
-    padding: const EdgeInsets.all(16),
-    color: WalletColors.of(context).panel,
-    child: Column(
+  Widget build(BuildContext context) {
+    final figure = Column(
       crossAxisAlignment: CrossAxisAlignment.start,
-      mainAxisAlignment: MainAxisAlignment.center,
+      mainAxisSize: MainAxisSize.min,
       children: [
         Row(
           children: [
@@ -2001,10 +1945,16 @@ class _Summary extends StatelessWidget {
           ],
         ),
         const SizedBox(height: 10),
-        MoneyText(value, size: 23, respectPrivacy: respectPrivacy),
+        MoneyText(value, size: 23),
       ],
-    ),
-  );
+    );
+    if (!panel) return figure;
+    return Panel(
+      padding: const EdgeInsets.all(16),
+      color: WalletColors.of(context).panel,
+      child: figure,
+    );
+  }
 }
 
 class BillsPage extends StatefulWidget {

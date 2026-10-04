@@ -366,6 +366,49 @@ class WalletPageTransitionsBuilder extends PageTransitionsBuilder {
   }
 }
 
+/// Linear 0 → 1 progress whose clock starts one frame late. The first frame
+/// of a page shown for the first time builds and lays it out, which can take
+/// most of a short transition; starting afterwards keeps the whole motion
+/// visible on first visits instead of only on later, cheaper ones.
+class SettledStart extends Simulation {
+  final double _seconds;
+  double? _first, _origin;
+  SettledStart(Duration duration)
+    : assert(duration > Duration.zero),
+      _seconds = duration.inMicroseconds / Duration.microsecondsPerSecond;
+
+  double _progress(double time) {
+    final first = _first ??= time;
+    if (time > first) _origin ??= time;
+    final origin = _origin;
+    return origin == null ? 0 : ((time - origin) / _seconds).clamp(0.0, 1.0);
+  }
+
+  @override
+  double x(double time) => _progress(time);
+  @override
+  double dx(double time) => 1 / _seconds;
+  @override
+  bool isDone(double time) => _progress(time) >= 1;
+}
+
+extension SettledPlayback on AnimationController {
+  /// Plays from 0 to 1 over [duration] once the next frame has been built.
+  TickerFuture playSettled() => animateWith(SettledStart(duration!));
+}
+
+/// Pushes start sliding only after the new page's first frame.
+class WalletPageRoute<T> extends MaterialPageRoute<T> {
+  WalletPageRoute({
+    required super.builder,
+    super.settings,
+    super.fullscreenDialog,
+  });
+  @override
+  Simulation? createSimulation({required bool forward}) =>
+      forward ? SettledStart(transitionDuration) : null;
+}
+
 /// Real background blur is confined to the clipped floating navigation.
 class GlassPanel extends StatelessWidget {
   static final _blur = ui.ImageFilter.blur(sigmaX: 10, sigmaY: 10);
@@ -449,6 +492,8 @@ class HeroPanel extends StatelessWidget {
   }
 }
 
+/// The hero stays the only raised surface; [tiles] are bare figures that this
+/// grid places on quieter panels.
 class OverviewGrid extends StatelessWidget {
   final Widget hero;
   final List<Widget> tiles;
@@ -471,9 +516,12 @@ class OverviewGrid extends StatelessWidget {
                     for (var i = 0; i < tiles.length; i++) ...[
                       if (i > 0) const SizedBox(height: 12),
                       Expanded(
-                        child: SizedBox(
-                          width: double.infinity,
-                          child: tiles[i],
+                        child: Panel(
+                          padding: const EdgeInsets.symmetric(horizontal: 18),
+                          child: Align(
+                            alignment: Alignment.centerLeft,
+                            child: tiles[i],
+                          ),
                         ),
                       ),
                     ],
@@ -485,20 +533,39 @@ class OverviewGrid extends StatelessWidget {
         );
       }
       return Column(
-        children: [
-          hero,
-          const SizedBox(height: 14),
-          Row(
-            children: [
-              for (var i = 0; i < tiles.length; i++) ...[
-                if (i > 0) const SizedBox(width: 12),
-                Expanded(child: tiles[i]),
-              ],
-            ],
-          ),
-        ],
+        children: [hero, const SizedBox(height: 12), SummaryStrip(tiles)],
       );
     },
+  );
+}
+
+/// Related figures share one panel, divided by hairlines instead of boxes.
+class SummaryStrip extends StatelessWidget {
+  final List<Widget> children;
+  const SummaryStrip(this.children, {super.key});
+  @override
+  Widget build(BuildContext context) => Panel(
+    padding: const EdgeInsets.symmetric(vertical: 14),
+    child: IntrinsicHeight(
+      child: Row(
+        children: [
+          for (var i = 0; i < children.length; i++) ...[
+            if (i > 0)
+              VerticalDivider(
+                width: 1,
+                thickness: 1,
+                color: WalletColors.of(context).border,
+              ),
+            Expanded(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 18),
+                child: children[i],
+              ),
+            ),
+          ],
+        ],
+      ),
+    ),
   );
 }
 
@@ -624,7 +691,7 @@ Future<T?> openPage<T>(
   FocusManager.instance.primaryFocus?.unfocus();
   return Navigator.of(
     context,
-  ).push<T>(MaterialPageRoute(builder: (_) => page, fullscreenDialog: modal));
+  ).push<T>(WalletPageRoute(builder: (_) => page, fullscreenDialog: modal));
 }
 
 void toast(BuildContext context, String text) =>
@@ -1026,7 +1093,10 @@ class TransactionRow extends StatelessWidget {
                 ),
               ),
               const SizedBox(width: 8),
-              Flexible(
+              // Sized to the amount so it sits on the right edge and the title
+              // keeps the remaining width; very long amounts scale down.
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 140),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.end,
                   children: [
@@ -1042,6 +1112,7 @@ class TransactionRow extends StatelessWidget {
                         style: TextStyle(
                           fontSize: 16,
                           fontWeight: FontWeight.w700,
+                          fontFeatures: const [ui.FontFeature.tabularFigures()],
                           color: tx.type == TxType.income
                               ? WalletColors.of(context).income
                               : tx.type == TxType.transfer

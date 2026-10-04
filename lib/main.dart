@@ -214,6 +214,7 @@ class _Shell extends StatefulWidget {
 }
 
 class _ShellState extends State<_Shell> with SingleTickerProviderStateMixin {
+  static const _addSize = 52.0, _addGap = 6.0;
   late final _transition = AnimationController(
     vsync: this,
     duration: const Duration(milliseconds: 260),
@@ -246,11 +247,12 @@ class _ShellState extends State<_Shell> with SingleTickerProviderStateMixin {
       _visited.add(value);
       index = value;
     });
-    // Start even when this destination is mounted for the first time.
+    // A first visit builds the destination in the next frame; the clock waits
+    // for it so first and later visits fade in alike.
     if (MediaQuery.disableAnimationsOf(context)) {
       _transition.value = 1;
     } else {
-      _transition.forward(from: 0);
+      _transition.playSettled();
     }
   }
 
@@ -419,55 +421,42 @@ class _ShellState extends State<_Shell> with SingleTickerProviderStateMixin {
                       horizontal: 6,
                       vertical: 7,
                     ),
-                    child: Row(
-                      children: [
-                        _nav(0, Icons.home_outlined, Icons.home_rounded, '首页'),
-                        _nav(
-                          1,
-                          Icons.donut_large_rounded,
-                          Icons.donut_large_rounded,
-                          '统计',
-                        ),
-                        Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 6),
-                          child: SizedBox.square(
-                            dimension: 52,
-                            child: FloatingActionButton(
-                              heroTag: 'main-add',
-                              tooltip: '记一笔',
-                              elevation: 0,
-                              backgroundColor: colors.ink,
-                              foregroundColor: colors.surface,
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(17),
-                              ),
-                              onPressed: () => openPage(
-                                context,
-                                const TransactionEditor(),
-                                modal: true,
-                              ),
-                              child: const Icon(Icons.add_rounded, size: 29),
-                            ),
-                          ),
-                        ),
-                        _nav(
-                          2,
-                          Icons.receipt_long_outlined,
-                          Icons.receipt_long_rounded,
-                          '账单',
-                        ),
-                        _nav(
-                          3,
-                          Icons.person_outline_rounded,
-                          Icons.person_rounded,
-                          '我的',
-                        ),
-                      ],
-                    ),
+                    child: _navRow(context),
                   ),
                 ),
               ),
       ),
+    );
+  }
+
+  Widget _navRow(BuildContext context) {
+    final colors = WalletColors.of(context);
+    return Row(
+      children: [
+        _nav(0, Icons.home_outlined, Icons.home_rounded, '首页'),
+        _nav(1, Icons.donut_large_rounded, Icons.donut_large_rounded, '统计'),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: _addGap),
+          child: SizedBox.square(
+            dimension: _addSize,
+            child: FloatingActionButton(
+              heroTag: 'main-add',
+              tooltip: '记一笔',
+              elevation: 0,
+              backgroundColor: colors.ink,
+              foregroundColor: colors.surface,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(17),
+              ),
+              onPressed: () =>
+                  openPage(context, const TransactionEditor(), modal: true),
+              child: const Icon(Icons.add_rounded, size: 29),
+            ),
+          ),
+        ),
+        _nav(2, Icons.receipt_long_outlined, Icons.receipt_long_rounded, '账单'),
+        _nav(3, Icons.person_outline_rounded, Icons.person_rounded, '我的'),
+      ],
     );
   }
 

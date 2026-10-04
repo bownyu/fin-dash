@@ -73,7 +73,7 @@ Future<void> reviewPaymentNotification(
   }
   final linked = original;
   await Navigator.of(context).push<void>(
-    MaterialPageRoute(
+    WalletPageRoute(
       settings: const RouteSettings(name: '/payment-notification-review'),
       builder: (_) => TransactionEditor(
         initial: refund

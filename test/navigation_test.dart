@@ -109,6 +109,9 @@ void main() {
         reason: 'tab $index must animate on its first frame',
       );
       expect(offset().dy, greaterThan(0));
+      // A slow first build must not consume the transition.
+      await tester.pump(const Duration(milliseconds: 200));
+      expect(opacity(), 0, reason: 'tab $index waits for its first frame');
       await tester.pump(const Duration(milliseconds: 100));
       expectSelectedNavigation(tester, index);
       expect(opacity(), allOf(greaterThan(0), lessThan(1)));
@@ -184,6 +187,9 @@ void main() {
     );
     await tester.pump();
     final page = find.byType(AccountsPage);
+    // A slow first build still leaves the whole slide to play.
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(tester.getTopLeft(page).dx, 390);
     await tester.pump(const Duration(milliseconds: 80));
     expect(tester.getTopLeft(page).dx, allOf(greaterThan(0), lessThan(390)));
     await tester.pumpAndSettle();
@@ -365,6 +371,8 @@ void main() {
             modal: modal,
           );
           await tester.pump();
+          // The slide's clock starts on the frame after the page is built.
+          await tester.pump(const Duration(milliseconds: 16));
           await tester.pump(const Duration(milliseconds: 80));
           expect(
             await markerIsVisible(tester),
