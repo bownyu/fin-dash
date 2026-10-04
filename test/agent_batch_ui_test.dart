@@ -116,7 +116,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(store.data.transactions.length, 40);
       expect(store.data.chats.length, 3);
-      expect(find.byType(AgentBatchCard), findsOneWidget);
+      expect(find.byType(AgentBatchCard), findsNothing);
       expect(tester.takeException(), null);
     },
   );

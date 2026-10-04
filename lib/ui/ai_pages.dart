@@ -234,6 +234,7 @@ class _ChatPageState extends State<ChatPage> {
         .where(
           (b) =>
               b['sessionId'] == ai.activeSessionId &&
+              ai.actions.review(b['id']).pending.isNotEmpty &&
               (b['legacyIds'] == null || (b['legacyIds'] as List).length > 1),
         )
         .toList();
@@ -262,13 +263,11 @@ class _ChatPageState extends State<ChatPage> {
         .toList();
     final actions = ai.actions.items.reversed
         .where((a) => (a['sessionId'] ?? 'legacy') == ai.activeSessionId)
+        .where((a) => a['status'] == 'pending')
         .where((a) => !covered.contains(a['id']))
         .toList();
     final unlinked = actions
-        .where(
-          (a) =>
-              a['status'] == 'pending' && !proposalOwners.containsKey(a['id']),
-        )
+        .where((a) => !proposalOwners.containsKey(a['id']))
         .toList();
     return EditorGuard(
       busy: false,
@@ -428,11 +427,18 @@ class _ChatPageState extends State<ChatPage> {
                     for (final task in ai.tasks.tasks.where(
                       (t) =>
                           t['sessionId'] == ai.activeSessionId &&
-                          (t['interaction'] != null ||
-                              t['preferenceReview'] != null ||
-                              t['result'] != null),
+                          t['ledgerEpoch'] == store.ledgerEpoch &&
+                          ((t['state'] == 'needsInput' &&
+                                  t['interaction'] != null) ||
+                              (t['state'] == 'ready' &&
+                                  t['preferenceReview'] != null &&
+                                  t['preferenceReview']['receipt'] == null)),
                     ))
-                      TaskCard(key: ValueKey(task['id']), taskId: task['id']),
+                      TaskCard(
+                        key: ValueKey(task['id']),
+                        taskId: task['id'],
+                        showResult: false,
+                      ),
                     for (final b in unlinkedBatches)
                       Padding(
                         padding: const EdgeInsets.only(bottom: 14),
