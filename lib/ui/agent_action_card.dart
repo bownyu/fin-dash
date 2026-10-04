@@ -33,7 +33,14 @@ class _AgentActionCardState extends State<AgentActionCard> {
   }
 
   void details() {
-    final store = AppScope.storeOf(context);
+    final store = AppScope.storeOf(
+      context,
+      domains: const {
+        WalletDomain.tasks,
+        WalletDomain.ledger,
+        WalletDomain.preferences,
+      },
+    );
     showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
@@ -68,10 +75,18 @@ class _AgentActionCardState extends State<AgentActionCard> {
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) => RuntimeBuilder(builder: buildContent);
+  Widget buildContent(BuildContext context) {
     final a = widget.action;
-    final ai = AppScope.of(context).ai;
-    final store = AppScope.storeOf(context);
+    final ai = AppScope.aiOf(context);
+    final store = AppScope.storeOf(
+      context,
+      domains: const {
+        WalletDomain.tasks,
+        WalletDomain.ledger,
+        WalletDomain.preferences,
+      },
+    );
     final disabled = busy || ai.busy;
     final pending = a['status'] == 'pending';
     final summary =

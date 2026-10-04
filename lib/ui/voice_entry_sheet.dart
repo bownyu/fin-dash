@@ -119,7 +119,7 @@ class _VoiceEntrySheetState extends State<VoiceEntrySheet>
 
   List<LedgerTx>? saved;
   VoiceBookkeeping get bookkeeping =>
-      VoiceBookkeeping(AppScope.storeOf(context), AppScope.of(context).ai);
+      VoiceBookkeeping(AppScope.storeOf(context), AppScope.aiOf(context));
 
   @override
   void initState() {
@@ -441,9 +441,7 @@ class _VoiceEntrySheetState extends State<VoiceEntrySheet>
     final recording = listening && captureState == 'listening';
     final queued =
         processing &&
-        AppScope.of(
-          context,
-        ).ai.voiceQueue.waiting.containsKey(parsingEntryId) &&
+        AppScope.aiOf(context).voiceQueue.waiting.containsKey(parsingEntryId) &&
         store.aiStatus != '解析语音账单…';
     // While a draft stays on screen during capture or parsing, the new words
     // are a correction to it.
@@ -575,7 +573,7 @@ class _VoiceEntrySheetState extends State<VoiceEntrySheet>
         ? FilledButton.tonal(
             onPressed: parsingEntryId == null
                 ? null
-                : () => AppScope.of(context).ai.cancelVoice(parsingEntryId!),
+                : () => AppScope.aiOf(context).cancelVoice(parsingEntryId!),
             child: const Text('停止解析'),
           )
         : saving

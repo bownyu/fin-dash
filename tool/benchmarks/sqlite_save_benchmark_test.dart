@@ -64,10 +64,10 @@ void main() {
         samples.sort();
         times.add(samples);
       }
-      expect((stores.last.storage as LocalWalletStorage).lastChangedRows, 1);
+      expect((stores.last.storage as LocalWalletStorage).lastChangedRows, 2);
       // ignore: avoid_print
       print(
-        '10000 records durable append median: JSON=${times[0][2]}us SQLite=${times[1][2]}us; changed rows=1 (plus recovery replica and revision metadata)',
+        '10000 records durable append median: JSON=${times[0][2]}us SQLite=${times[1][2]}us; changed rows=2 (transaction and ledger revision)',
       );
     } finally {
       await root.delete(recursive: true);

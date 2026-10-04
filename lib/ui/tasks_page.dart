@@ -11,11 +11,21 @@ import 'agent_batch_card.dart';
 class TasksPage extends StatelessWidget {
   const TasksPage({super.key});
   @override
-  Widget build(BuildContext context) {
-    final ai = AppScope.of(context).ai;
+  Widget build(BuildContext context) => RuntimeBuilder(builder: buildContent);
+  Widget buildContent(BuildContext context) {
+    final ai = AppScope.aiOf(context);
     final tasks = ai.tasks.tasks.reversed.toList();
     final drafts =
-        (AppScope.storeOf(context).data.extras['voiceDrafts'] as Map? ?? {})
+        (AppScope.storeOf(
+                      context,
+                      domains: const {
+                        WalletDomain.tasks,
+                        WalletDomain.ledger,
+                        WalletDomain.preferences,
+                      },
+                    ).data.extras['voiceDrafts']
+                    as Map? ??
+                {})
             .values
             .toList();
     return Scaffold(
@@ -106,12 +116,25 @@ class _TaskCardState extends State<TaskCard> {
   }
 
   @override
-  Widget build(BuildContext context) {
-    final ai = AppScope.of(context).ai, task = ai.tasks.get(widget.taskId);
+  Widget build(BuildContext context) => RuntimeBuilder(builder: buildContent);
+  Widget buildContent(BuildContext context) {
+    AppScope.storeOf(
+      context,
+      domains: const {WalletDomain.tasks, WalletDomain.ledger},
+    );
+    final ai = AppScope.aiOf(context), task = ai.tasks.get(widget.taskId);
     final interaction = task['interaction'], review = task['preferenceReview'];
     final state = task['state'];
     final expired =
-        task['ledgerEpoch'] != AppScope.storeOf(context).ledgerEpoch;
+        task['ledgerEpoch'] !=
+        AppScope.storeOf(
+          context,
+          domains: const {
+            WalletDomain.tasks,
+            WalletDomain.ledger,
+            WalletDomain.preferences,
+          },
+        ).ledgerEpoch;
     final label = expired
         ? '账本已恢复，需要重新准备'
         : switch (state) {

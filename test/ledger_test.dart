@@ -64,7 +64,7 @@ void main() {
       expect(store.balance(bank), 99850);
       expect(store.balance(cash), 10200);
       expect(store.query().map((entry) => entry.id), ['newer', 'older']);
-      store.query().clear();
+      expect(() => store.query().clear(), throwsUnsupportedError);
       expect(store.query().length, 2);
       expect(store.total(TxType.expense, range: month), 0);
       expect(store.total(TxType.income, range: month), 200);

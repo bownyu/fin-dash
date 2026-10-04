@@ -440,8 +440,8 @@ void main() {
     (tester) async {
       final store = await renderApp(tester);
       await tester.scrollUntilVisible(
-        find.text('查看全部账单 →'),
-        300,
+        find.text(store.query().first.title),
+        150,
         scrollable: find
             .descendant(
               of: find.byType(HomePage),
@@ -462,13 +462,14 @@ void main() {
             id: 'fresh-bill',
             title: '刚记的一笔',
             amount: 100,
-            date: DateTime.now(),
+            date: store.query().first.date.add(const Duration(minutes: 1)),
             type: TxType.expense,
             category: '餐饮',
             accountId: d.accounts.first.id,
           ),
         ),
       );
+      await tester.pump();
       await tester.pump();
       expect(find.text('刚记的一笔'), findsOneWidget);
       // Nothing animates behind the sheet.

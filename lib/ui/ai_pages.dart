@@ -39,10 +39,19 @@ class _ChatPageState extends State<ChatPage> {
   AiImage? attachment;
   String? composerSession;
   String? initialSession;
+  WalletData? _derivedData;
+  String? _derivedSession, _derivedLiveId;
+  late List<Json> messages, batches, actions, unlinked, unlinkedBatches;
+  late Map<String, String> proposalOwners, batchOwners;
+  late List<Widget> _messageWidgets;
+  void runtimeChanged() {
+    if (mounted) setState(() {});
+  }
+
   final drafts = <String, (String, AiImage?)>{};
 
   Future<void> pickImage() async {
-    final ai = AppScope.of(context).ai;
+    final ai = AppScope.aiOf(context);
     if (!ai.supportsImages) {
       toast(context, '请先在 AI 设置中启用支持图片输入的模型');
       return;
@@ -83,7 +92,7 @@ class _ChatPageState extends State<ChatPage> {
       started = true;
       input.text = widget.initialPrompt!;
     }
-    final ai = AppScope.of(context).ai;
+    final ai = AppScope.aiOf(context);
     if (composerSession != ai.activeSessionId) {
       initialSession ??= ai.activeSessionId;
       if (composerSession != null) {
@@ -104,13 +113,24 @@ class _ChatPageState extends State<ChatPage> {
     }
 
     if (observedAi != ai) {
+      observedAi?.store.runtimeUpdates.removeListener(runtimeChanged);
       observedAi?.liveUpdates.removeListener(followOutput);
       observedAi = ai;
       ai.liveUpdates.addListener(followOutput);
+      ai.store.runtimeUpdates.addListener(runtimeChanged);
     }
-    final length = AppScope.storeOf(context).data.chats
-        .where((m) => AiService.sessionOf(m) == ai.activeSessionId)
-        .length;
+    final length =
+        AppScope.storeOf(
+              context,
+              domains: const {
+                WalletDomain.conversations,
+                WalletDomain.tasks,
+                WalletDomain.memory,
+                WalletDomain.preferences,
+              },
+            ).data.chats
+            .where((m) => AiService.sessionOf(m) == ai.activeSessionId)
+            .length;
     if (length != messageCount) {
       messageCount = length;
       followOutput();
@@ -134,6 +154,7 @@ class _ChatPageState extends State<ChatPage> {
 
   @override
   void dispose() {
+    observedAi?.store.runtimeUpdates.removeListener(runtimeChanged);
     observedAi?.liveUpdates.removeListener(followOutput);
     input.dispose();
     scroll.dispose();
@@ -141,7 +162,7 @@ class _ChatPageState extends State<ChatPage> {
   }
 
   Future<void> send([String? prompt]) async {
-    final ai = AppScope.of(context).ai;
+    final ai = AppScope.aiOf(context);
     final text =
         prompt ??
         (input.text.trim().isEmpty && attachment != null
@@ -171,7 +192,7 @@ class _ChatPageState extends State<ChatPage> {
   }
 
   Future<void> retry() async {
-    final ai = AppScope.of(context).ai;
+    final ai = AppScope.aiOf(context);
     final draft = input.text, image = attachment;
     final wasStored = ai.lastPromptStored;
     await ai.retryLast();
@@ -200,7 +221,7 @@ class _ChatPageState extends State<ChatPage> {
       return;
     }
     if (!mounted) return;
-    final ai = AppScope.of(context).ai;
+    final ai = AppScope.aiOf(context);
     final previousSession = ai.activeSessionId;
     if (await perform(context, ai.newConversation) && mounted) {
       drafts.remove(previousSession);
@@ -214,61 +235,161 @@ class _ChatPageState extends State<ChatPage> {
 
   @override
   Widget build(BuildContext context) {
-    final store = AppScope.storeOf(context), ai = AppScope.of(context).ai;
-    final messages = store.data.chats
-        .where(
-          (m) =>
-              m['id'] != ai.liveMessage?['id'] &&
-              AiService.sessionOf(m) == ai.activeSessionId,
-        )
-        .toList();
-    if (ai.liveMessage != null &&
-        AiService.sessionOf(ai.liveMessage!) == ai.activeSessionId) {
-      messages.add(ai.liveMessage!);
-    }
-    final proposalOwners = <String, String>{
-      for (final m in messages)
-        for (final id in _proposalIds(m)) id: m['id'] as String,
-    };
-    final batches = ai.actions.batches
-        .where(
-          (b) =>
-              b['sessionId'] == ai.activeSessionId &&
-              ai.actions.review(b['id']).pending.isNotEmpty &&
-              (b['legacyIds'] == null || (b['legacyIds'] as List).length > 1),
-        )
-        .toList();
-    final covered = {
-      for (final b in batches)
-        ...ai.actions.review(b['id']).items.map((a) => a['id']),
-    };
-    final batchOwners = <String, String>{};
-    for (final b in batches) {
-      final origin = messages
-          .where((m) => m['id'] == b['sourceMessageId'])
-          .firstOrNull;
-      final feedback = messages
-          .where((m) => m['role'] == 'assistant' && m['batchId'] == b['id'])
-          .lastOrNull;
-      if (origin != null || feedback != null) {
-        batchOwners[b['id']] = (origin ?? feedback)!['id'];
+    final store = AppScope.storeOf(
+          context,
+          domains: const {
+            WalletDomain.conversations,
+            WalletDomain.tasks,
+            WalletDomain.memory,
+            WalletDomain.preferences,
+          },
+        ),
+        ai = AppScope.aiOf(context);
+    if (!identical(_derivedData, store.data) ||
+        _derivedSession != ai.activeSessionId ||
+        _derivedLiveId != ai.liveMessage?['id']) {
+      _derivedData = store.data;
+      _derivedSession = ai.activeSessionId;
+      _derivedLiveId = ai.liveMessage?['id'];
+      messages = store.data.chats
+          .where(
+            (m) =>
+                m['id'] != ai.liveMessage?['id'] &&
+                AiService.sessionOf(m) == ai.activeSessionId,
+          )
+          .toList();
+      if (ai.liveMessage != null &&
+          AiService.sessionOf(ai.liveMessage!) == ai.activeSessionId) {
+        messages.add(ai.liveMessage!);
       }
+      proposalOwners = <String, String>{
+        for (final m in messages)
+          for (final id in _proposalIds(m)) id: m['id'] as String,
+      };
+      batches = ai.actions.batches
+          .where(
+            (b) =>
+                b['sessionId'] == ai.activeSessionId &&
+                ai.actions.review(b['id']).pending.isNotEmpty &&
+                (b['legacyIds'] == null || (b['legacyIds'] as List).length > 1),
+          )
+          .toList();
+      final covered = {
+        for (final b in batches)
+          ...ai.actions.review(b['id']).items.map((a) => a['id']),
+      };
+      batchOwners = <String, String>{};
+      for (final b in batches) {
+        final origin = messages
+            .where((m) => m['id'] == b['sourceMessageId'])
+            .firstOrNull;
+        final feedback = messages
+            .where((m) => m['role'] == 'assistant' && m['batchId'] == b['id'])
+            .lastOrNull;
+        if (origin != null || feedback != null) {
+          batchOwners[b['id']] = (origin ?? feedback)!['id'];
+        }
+      }
+      unlinkedBatches = batches
+          .where(
+            (b) =>
+                !batchOwners.containsKey(b['id']) &&
+                ai.actions.review(b['id']).pending.isNotEmpty,
+          )
+          .toList();
+      actions = ai.actions.items.reversed
+          .where((a) => (a['sessionId'] ?? 'legacy') == ai.activeSessionId)
+          .where((a) => a['status'] == 'pending')
+          .where((a) => !covered.contains(a['id']))
+          .toList();
+      unlinked = actions
+          .where((a) => !proposalOwners.containsKey(a['id']))
+          .toList();
+      _messageWidgets = [
+        if (messages.isEmpty && unlinked.isEmpty) ...[
+          Builder(
+            builder: (context) {
+              final (title, detail) = _opener(ai);
+              return EmptyState(
+                title,
+                detail,
+                icon: Icons.auto_awesome_rounded,
+              );
+            },
+          ),
+          Panel(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  '从这里开始',
+                  style: TextStyle(fontWeight: FontWeight.w600),
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  '先在 AI 设置中连接模型服务，然后像和朋友聊天一样，说说你的近况和想改变的事。',
+                  style: TextStyle(color: muted, fontSize: 13),
+                ),
+                TextButton(
+                  onPressed: () => openPage(context, const AiSettingsPage()),
+                  child: const Text('打开 AI 设置 →'),
+                ),
+              ],
+            ),
+          ),
+        ],
+        ...messages.map((m) {
+          final linkedActions = actions
+              .where((a) => proposalOwners[a['id']] == m['id'])
+              .toList();
+          final linkedBatches = batches
+              .where((b) => batchOwners[b['id']] == m['id'])
+              .toList();
+          final key = ValueKey('chat-message:${m['id']}');
+          if (m['id'] == ai.liveMessage?['id']) {
+            return ValueListenableBuilder<int>(
+              key: key,
+              valueListenable: ai.liveUpdates,
+              builder: (context, _, child) => _Message(
+                ai.liveMessage ?? m,
+                actions: linkedActions,
+                batches: linkedBatches,
+              ),
+            );
+          }
+          return _Message(
+            m,
+            key: key,
+            actions: linkedActions,
+            batches: linkedBatches,
+          );
+        }),
+        for (final task in ai.tasks.tasks.where(
+          (t) =>
+              t['sessionId'] == ai.activeSessionId &&
+              t['ledgerEpoch'] == store.ledgerEpoch &&
+              ((t['state'] == 'needsInput' && t['interaction'] != null) ||
+                  (t['state'] == 'ready' &&
+                      t['preferenceReview'] != null &&
+                      t['preferenceReview']['receipt'] == null)),
+        ))
+          TaskCard(
+            key: ValueKey(task['id']),
+            taskId: task['id'],
+            showResult: false,
+          ),
+        for (final b in unlinkedBatches)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 14),
+            child: AgentBatchCard(key: ValueKey(b['id']), batchId: b['id']),
+          ),
+        for (final a in unlinked)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 14),
+            child: AgentActionCard(key: ValueKey(a['id']), action: a),
+          ),
+      ];
     }
-    final unlinkedBatches = batches
-        .where(
-          (b) =>
-              !batchOwners.containsKey(b['id']) &&
-              ai.actions.review(b['id']).pending.isNotEmpty,
-        )
-        .toList();
-    final actions = ai.actions.items.reversed
-        .where((a) => (a['sessionId'] ?? 'legacy') == ai.activeSessionId)
-        .where((a) => a['status'] == 'pending')
-        .where((a) => !covered.contains(a['id']))
-        .toList();
-    final unlinked = actions
-        .where((a) => !proposalOwners.containsKey(a['id']))
-        .toList();
     return EditorGuard(
       busy: false,
       hasChanges: () =>
@@ -365,96 +486,7 @@ class _ChatPageState extends State<ChatPage> {
                   reverse: messages.isNotEmpty,
                   padding: const EdgeInsets.fromLTRB(20, 10, 20, 24),
                   children: [
-                    if (messages.isEmpty && unlinked.isEmpty) ...[
-                      Builder(
-                        builder: (context) {
-                          final (title, detail) = _opener(ai);
-                          return EmptyState(
-                            title,
-                            detail,
-                            icon: Icons.auto_awesome_rounded,
-                          );
-                        },
-                      ),
-                      Panel(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const Text(
-                              '从这里开始',
-                              style: TextStyle(fontWeight: FontWeight.w600),
-                            ),
-                            const SizedBox(height: 8),
-                            const Text(
-                              '先在 AI 设置中连接模型服务，然后像和朋友聊天一样，说说你的近况和想改变的事。',
-                              style: TextStyle(color: muted, fontSize: 13),
-                            ),
-                            TextButton(
-                              onPressed: () =>
-                                  openPage(context, const AiSettingsPage()),
-                              child: const Text('打开 AI 设置 →'),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
-                    ...messages.map((m) {
-                      final linkedActions = actions
-                          .where((a) => proposalOwners[a['id']] == m['id'])
-                          .toList();
-                      final linkedBatches = batches
-                          .where((b) => batchOwners[b['id']] == m['id'])
-                          .toList();
-                      final key = ValueKey('chat-message:${m['id']}');
-                      if (m['id'] == ai.liveMessage?['id']) {
-                        return ValueListenableBuilder<int>(
-                          key: key,
-                          valueListenable: ai.liveUpdates,
-                          builder: (context, _, child) => _Message(
-                            ai.liveMessage ?? m,
-                            actions: linkedActions,
-                            batches: linkedBatches,
-                          ),
-                        );
-                      }
-                      return _Message(
-                        m,
-                        key: key,
-                        actions: linkedActions,
-                        batches: linkedBatches,
-                      );
-                    }),
-                    for (final task in ai.tasks.tasks.where(
-                      (t) =>
-                          t['sessionId'] == ai.activeSessionId &&
-                          t['ledgerEpoch'] == store.ledgerEpoch &&
-                          ((t['state'] == 'needsInput' &&
-                                  t['interaction'] != null) ||
-                              (t['state'] == 'ready' &&
-                                  t['preferenceReview'] != null &&
-                                  t['preferenceReview']['receipt'] == null)),
-                    ))
-                      TaskCard(
-                        key: ValueKey(task['id']),
-                        taskId: task['id'],
-                        showResult: false,
-                      ),
-                    for (final b in unlinkedBatches)
-                      Padding(
-                        padding: const EdgeInsets.only(bottom: 14),
-                        child: AgentBatchCard(
-                          key: ValueKey(b['id']),
-                          batchId: b['id'],
-                        ),
-                      ),
-                    for (final a in unlinked)
-                      Padding(
-                        padding: const EdgeInsets.only(bottom: 14),
-                        child: AgentActionCard(
-                          key: ValueKey(a['id']),
-                          action: a,
-                        ),
-                      ),
+                    ..._messageWidgets,
                     if (ai.busy)
                       Padding(
                         padding: const EdgeInsets.only(top: 14),
@@ -700,7 +732,7 @@ class _Message extends StatelessWidget {
                   ? '你'
                   : message['isReport'] == true
                   ? '分析报告'
-                  : AppScope.storeOf(context).data.agent['name']} · ${DateFormat('HH:mm').format(localDate(message['timestamp']))}',
+                  : AppScope.storeOf(context, domains: const {WalletDomain.memory}).data.agent['name']} · ${DateFormat('HH:mm').format(localDate(message['timestamp']))}',
               style: Theme.of(context).textTheme.bodySmall,
             ),
           ),
@@ -756,7 +788,7 @@ class _ChatImageState extends State<_ChatImage> {
     super.didChangeDependencies();
     if (loaded != widget.id) {
       loaded = widget.id;
-      image = AppScope.of(context).ai.images.read(widget.id);
+      image = AppScope.aiOf(context).images.read(widget.id);
     }
   }
 
@@ -822,7 +854,10 @@ class _ChatImageState extends State<_ChatImage> {
   );
 }
 
+final _proposalCache = Expando<Set<String>>();
 Set<String> _proposalIds(Json message) {
+  final cached = _proposalCache[message];
+  if (cached != null && message['status'] != 'streaming') return cached;
   final ids = <String>{};
   if (message['role'] == 'assistant' && message['actionId'] is String) {
     ids.add(message['actionId'] as String);
@@ -841,6 +876,7 @@ Set<String> _proposalIds(Json message) {
       // Partial streamed arguments/results do not yet identify a proposal.
     }
   }
+  if (message['status'] != 'streaming') _proposalCache[message] = ids;
   return ids;
 }
 
@@ -886,7 +922,7 @@ class _AssistantContent extends StatelessWidget {
     final blocks = message['blocks'] as List? ?? [];
     final proposals =
         actions ??
-        AppScope.of(context).ai.actions.items
+        AppScope.aiOf(context).actions.items
             .where((a) => _proposalIds(message).contains(a['id']))
             .toList();
     final hasTrace =
@@ -933,14 +969,16 @@ class _AssistantContent extends StatelessWidget {
           const Text('等待模型输出…', style: TextStyle(color: muted)),
         if (['error', 'cancelled'].contains(message['status']) &&
             (batches ?? []).isEmpty)
-          TextButton(
-            onPressed: AppScope.of(context).ai.busy
-                ? null
-                : () => perform(
-                    context,
-                    () => AppScope.of(context).ai.retryMessage(message['id']),
-                  ),
-            child: const Text('重试这条消息'),
+          RuntimeBuilder(
+            builder: (context) => TextButton(
+              onPressed: AppScope.aiOf(context).busy
+                  ? null
+                  : () => perform(
+                      context,
+                      () => AppScope.aiOf(context).retryMessage(message['id']),
+                    ),
+              child: const Text('重试这条消息'),
+            ),
           ),
       ],
     );
@@ -975,7 +1013,7 @@ class _ProcessingTrace extends StatelessWidget {
       useSafeArea: true,
       showDragHandle: true,
       builder: (context) => ValueListenableBuilder<int>(
-        valueListenable: AppScope.of(context).ai.liveUpdates,
+        valueListenable: AppScope.aiOf(context).liveUpdates,
         builder: (context, _, child) {
           AppScope.storeOf(context);
           final blocks = message['blocks'] as List? ?? [];
@@ -1146,8 +1184,10 @@ class ChatHistoryPage extends StatelessWidget {
   final bool returnToChat;
   const ChatHistoryPage({super.key, this.returnToChat = false});
   @override
-  Widget build(BuildContext context) {
-    final ai = AppScope.of(context).ai;
+  Widget build(BuildContext context) => RuntimeBuilder(builder: buildContent);
+  Widget buildContent(BuildContext context) {
+    AppScope.storeOf(context, domains: const {WalletDomain.conversations});
+    final ai = AppScope.aiOf(context);
     final sessions = ai.sessions;
     return Scaffold(
       appBar: AppBar(title: const Text('历史对话')),
@@ -1214,7 +1254,7 @@ class AgentStatePage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final store = AppScope.storeOf(context), a = store.data.agent;
-    final commitments = AppScope.of(context).ai.commitments;
+    final commitments = AppScope.aiOf(context).commitments;
     Widget remove(String label, String field, dynamic id) => IconButton(
       tooltip: '删除$label',
       icon: const Icon(Icons.delete_outline_rounded, color: muted),
@@ -1448,7 +1488,7 @@ class AgentStatePage extends StatelessWidget {
           const SizedBox(height: 24),
           OutlinedButton(
             onPressed: () async {
-              if (AppScope.of(context).ai.busy) {
+              if (AppScope.aiOf(context).busy) {
                 toast(context, '请先停止当前分析');
                 return;
               }

@@ -14,8 +14,13 @@ class _AgentActionsPageState extends State<AgentActionsPage> {
   bool history = false;
 
   @override
-  Widget build(BuildContext context) {
-    final actions = AppScope.of(context).ai.actions;
+  Widget build(BuildContext context) => RuntimeBuilder(builder: buildContent);
+  Widget buildContent(BuildContext context) {
+    AppScope.storeOf(
+      context,
+      domains: const {WalletDomain.tasks, WalletDomain.ledger},
+    );
+    final actions = AppScope.aiOf(context).actions;
     final batches = actions.batches
         .where(
           (b) => b['legacyIds'] == null || (b['legacyIds'] as List).length > 1,

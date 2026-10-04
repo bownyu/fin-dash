@@ -13,10 +13,20 @@ class _SavedAnalysesPageState extends State<SavedAnalysesPage> {
   String? running, error;
   Json? result;
   @override
-  Widget build(BuildContext context) {
-    final ai = AppScope.of(context).ai;
+  Widget build(BuildContext context) => RuntimeBuilder(builder: buildContent);
+  Widget buildContent(BuildContext context) {
+    final ai = AppScope.aiOf(context);
     final saved =
-        AppScope.storeOf(context).data.extras['savedRecipes'] as List? ?? [];
+        AppScope.storeOf(
+              context,
+              domains: const {
+                WalletDomain.tasks,
+                WalletDomain.ledger,
+                WalletDomain.preferences,
+              },
+            ).data.extras['savedRecipes']
+            as List? ??
+        [];
     return Scaffold(
       appBar: AppBar(title: const Text('常用分析')),
       body: ListView(

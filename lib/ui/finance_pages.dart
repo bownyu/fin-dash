@@ -7,7 +7,6 @@ import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
 import '../data/wallet_store.dart';
 import '../domain/models.dart';
-import '../domain/command_context.dart';
 import '../services/file_export.dart';
 import '../services/payment_notifications.dart';
 import 'payment_review_page.dart';
@@ -108,6 +107,7 @@ class _HomePageState extends State<HomePage>
       TxType.expense,
       range: DateRange.forPeriod(spendingPeriod, DateTime.now()),
     );
+    final suggestions = store.suggestions;
     final recent = store.query().take(12).toList();
     final fresh = freshBills(store, recent);
     final pendingPayments = PaymentNotifications.pendingCount(store.data);
@@ -416,7 +416,7 @@ class _HomePageState extends State<HomePage>
                 tooltip: '提醒中心',
                 onPressed: () => openPage(context, const RemindersPage()),
                 icon: Badge(
-                  isLabelVisible: store.suggestions.isNotEmpty,
+                  isLabelVisible: suggestions.isNotEmpty,
                   smallSize: 6,
                   backgroundColor: colors.accent,
                   child: Icon(
@@ -560,7 +560,7 @@ class _HomePageState extends State<HomePage>
           ),
         );
         final content = <Widget>[
-          if (store.suggestions.isNotEmpty) ...[
+          if (suggestions.isNotEmpty) ...[
             const SizedBox(height: 18),
             reveal(
               3,
@@ -576,13 +576,13 @@ class _HomePageState extends State<HomePage>
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text(
-                            store.suggestions.first['title'],
+                            suggestions.first['title'],
                             style: const TextStyle(fontWeight: FontWeight.w600),
                           ),
                           Text(
                             privateFinancialText(
                               context,
-                              store.suggestions.first['text'],
+                              suggestions.first['text'],
                             ),
                             style: Theme.of(context).textTheme.bodySmall,
                           ),
@@ -1620,7 +1620,10 @@ class _StatsPageState extends State<StatsPage> {
         range = DateRange.forPeriod(period, anchor);
     final grouped = store.breakdown(type, range),
         total = store.total(type, range: range),
-        count = store.query(range: range, type: type).length;
+        list = store.query(range: range, type: type);
+    final count = list.length;
+    final income = store.total(TxType.income, range: range);
+    final expense = store.total(TxType.expense, range: range);
     Color categoryColor(String name, int i) => colorOf(
       store.data.categories
               .where((c) => c.name == name && c.type == type)
@@ -1646,7 +1649,7 @@ class _StatsPageState extends State<StatsPage> {
           : range.end.difference(range.start).inDays,
       0,
     );
-    for (final t in store.query(range: range, type: type)) {
+    for (final t in list) {
       final i = period == Period.day
           ? t.date.hour
           : period == Period.year
@@ -1743,21 +1746,9 @@ class _StatsPageState extends State<StatsPage> {
         const SizedBox(height: 12),
         Row(
           children: [
-            Expanded(
-              child: _Summary(
-                '收入',
-                store.total(TxType.income, range: range),
-                mint,
-              ),
-            ),
+            Expanded(child: _Summary('收入', income, mint)),
             const SizedBox(width: 10),
-            Expanded(
-              child: _Summary(
-                '支出',
-                store.total(TxType.expense, range: range),
-                coral,
-              ),
-            ),
+            Expanded(child: _Summary('支出', expense, coral)),
           ],
         ),
         const SizedBox(height: 16),
@@ -1825,7 +1816,7 @@ class _StatsPageState extends State<StatsPage> {
                 ),
               const SizedBox(height: 8),
               Text(
-                '结余 ${privateMoney(context, store.total(TxType.income, range: range) - store.total(TxType.expense, range: range))} · 转账不计入收支',
+                '结余 ${privateMoney(context, income - expense)} · 转账不计入收支',
                 style: Theme.of(context).textTheme.bodySmall,
               ),
             ],
@@ -1975,6 +1966,11 @@ class BillsPageState extends State<BillsPage> {
   final search = TextEditingController();
   Timer? _searchTimer;
   String _query = '';
+  Object? _listKey;
+  late List<LedgerTx> _list;
+  late Map<String, List<LedgerTx>> _groups;
+  late List<(String, LedgerTx?)> _entries;
+  late Map<String, int> _dailyExpenses;
   DateRange? range;
   TxType? type;
   String? category, accountId;
@@ -2260,25 +2256,40 @@ class BillsPageState extends State<BillsPage> {
       context,
       domains: const {WalletDomain.ledger, WalletDomain.preferences},
     );
-    final list = store.query(
-      range: range,
-      type: type,
-      category: category,
-      accountId: accountId,
-      search: _query,
+    final key = (
+      store.data.transactions,
+      store.data.accounts,
+      range?.start,
+      range?.end,
+      type,
+      category,
+      accountId,
+      _query,
     );
-    final groups = groupTxs(list);
-    // Flatten day headers and records so even one large day remains lazy.
-    final entries = <(String, LedgerTx?)>[
-      for (final group in groups.entries) ...[
-        (group.key, null),
-        for (final tx in group.value) (group.key, tx),
-      ],
-    ];
-    final dailyExpenses = {
-      for (final group in groups.entries)
-        group.key: store.total(TxType.expense, transactions: group.value),
-    };
+    if (_listKey != key) {
+      _listKey = key;
+      _list = store.query(
+        range: range,
+        type: type,
+        category: category,
+        accountId: accountId,
+        search: _query,
+      );
+      _groups = groupTxs(_list);
+      // Flatten day headers and records so even one large day remains lazy.
+      _entries = <(String, LedgerTx?)>[
+        for (final group in _groups.entries) ...[
+          (group.key, null),
+          for (final tx in group.value) (group.key, tx),
+        ],
+      ];
+      _dailyExpenses = {
+        for (final group in _groups.entries)
+          group.key: store.total(TxType.expense, transactions: group.value),
+      };
+    }
+    final list = _list, entries = _entries, dailyExpenses = _dailyExpenses;
+    final groups = _groups;
     final active = selected != null;
     return Column(
       children: [

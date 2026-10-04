@@ -252,7 +252,14 @@ class ProfilePage extends StatelessWidget {
   const ProfilePage({super.key});
   @override
   Widget build(BuildContext context) {
-    final store = AppScope.storeOf(context);
+    final store = AppScope.storeOf(
+      context,
+      domains: const {
+        WalletDomain.ledger,
+        WalletDomain.preferences,
+        WalletDomain.memory,
+      },
+    );
     Widget menu(
       IconData icon,
       String title,
@@ -347,16 +354,18 @@ class ProfilePage extends StatelessWidget {
           padding: EdgeInsets.zero,
           child: Column(
             children: [
-              menu(
-                Icons.auto_awesome_outlined,
-                '与顾问聊聊',
-                store.aiStatus ?? '分析账单、发现变化、制定计划',
-                const ChatPage(),
+              RuntimeBuilder(
+                builder: (context) => menu(
+                  Icons.auto_awesome_outlined,
+                  '与顾问聊聊',
+                  store.aiStatus ?? '分析账单、发现变化、制定计划',
+                  const ChatPage(),
+                ),
               ),
               menu(
                 Icons.tune_rounded,
                 'AI 设置',
-                AppScope.of(context).ai.config['model'],
+                AppScope.aiOf(context).config['model'],
                 const AiSettingsPage(),
               ),
               menu(
@@ -429,7 +438,7 @@ class ProfilePage extends StatelessWidget {
           onPressed: () async {
             if (await confirm(context, '返回欢迎页？', '账单和账户仍保存在本机，下次进入即可继续。')) {
               if (context.mounted) {
-                AppScope.of(context).ai.cancel();
+                AppScope.aiOf(context).cancel();
                 await perform(
                   context,
                   () => store.change((d) => d.settings['locked'] = true),
@@ -471,7 +480,14 @@ class _WelcomePageState extends State<WelcomePage> {
 
   @override
   Widget build(BuildContext context) {
-    final store = AppScope.storeOf(context),
+    final store = AppScope.storeOf(
+          context,
+          domains: const {
+            WalletDomain.ledger,
+            WalletDomain.preferences,
+            WalletDomain.memory,
+          },
+        ),
         returning = store.data.profile['name'] != null;
     return Scaffold(
       body: SafeArea(
@@ -1271,7 +1287,8 @@ class AiSettingsPage extends StatelessWidget {
   const AiSettingsPage({super.key});
   @override
   Widget build(BuildContext context) {
-    final ai = AppScope.of(context).ai;
+    AppScope.storeOf(context, domains: const {WalletDomain.preferences});
+    final ai = AppScope.aiOf(context);
     return Scaffold(
       appBar: AppBar(title: const Text('AI 设置')),
       body: PageList(
@@ -1447,10 +1464,10 @@ class _AiConfigurationEditorState extends State<AiConfigurationEditor> {
 
   Future<void> load(String value) async {
     setState(() => loading = true);
-    final scope = AppScope.of(context);
+    final ai = AppScope.aiOf(context);
     final c = widget.isNew
         ? {...customProviderDefaults, 'name': '', 'baseURL': ''}
-        : scope.ai.configuration(value);
+        : ai.configuration(value);
     name.text = c['name'];
     url.text = c['baseURL'];
     model.text = c['model'];
@@ -1461,7 +1478,7 @@ class _AiConfigurationEditorState extends State<AiConfigurationEditor> {
     reasoningEffort = c['reasoningEffort'] ?? 'default';
     reasoningSummary = c['reasoningSummary'] == true;
     try {
-      final key = widget.isNew ? null : await scope.ai.vault.read(value);
+      final key = widget.isNew ? null : await ai.vault.read(value);
       if (mounted && provider == value) keyInput.text = key ?? '';
     } catch (_) {
       if (mounted) toast(context, '无法读取密钥，请重新填写');
@@ -1474,8 +1491,8 @@ class _AiConfigurationEditorState extends State<AiConfigurationEditor> {
 
   Future<void> save({bool close = true}) async {
     if (saving || testing || loading) return;
-    final scope = AppScope.of(context);
-    if (scope.ai.busy) {
+    final ai = AppScope.aiOf(context);
+    if (ai.busy) {
       toast(context, '请先停止当前 AI 请求');
       return;
     }
@@ -1491,11 +1508,7 @@ class _AiConfigurationEditorState extends State<AiConfigurationEditor> {
     final enteredKey = keyInput.text.trim();
     final ok = await perform(
       context,
-      () => scope.ai.saveConfiguration(
-        snapshot,
-        enteredKey,
-        providerId: provider,
-      ),
+      () => ai.saveConfiguration(snapshot, enteredKey, providerId: provider),
       success: '配置已保存并启用',
     );
     if (!mounted) return;
@@ -1520,7 +1533,7 @@ class _AiConfigurationEditorState extends State<AiConfigurationEditor> {
 
   Future<void> testConnection() async {
     if (saving || testing || loading) return;
-    final ai = AppScope.of(context).ai;
+    final ai = AppScope.aiOf(context);
     final snapshot = formConfiguration, enteredKey = keyInput.text.trim();
     setState(() {
       testing = true;
@@ -1768,9 +1781,9 @@ class _AiConfigurationEditorState extends State<AiConfigurationEditor> {
                         if (context.mounted) {
                           await perform(
                             context,
-                            () => AppScope.of(
+                            () => AppScope.aiOf(
                               context,
-                            ).ai.vault.write(provider, ''),
+                            ).vault.write(provider, ''),
                             success: '密钥已清除',
                           );
                         }
@@ -1922,7 +1935,7 @@ class _BackupPageState extends State<BackupPage> {
         utf8.encode(
           await exportBackupBundle(
             AppScope.storeOf(context),
-            AppScope.of(context).ai.images,
+            AppScope.aiOf(context).images,
             includeImages: includeImages,
           ),
         ),
@@ -1942,7 +1955,7 @@ class _BackupPageState extends State<BackupPage> {
   }
 
   Future<void> import() async {
-    if (AppScope.of(context).ai.busy) {
+    if (AppScope.aiOf(context).busy) {
       toast(context, '请先停止当前 AI 请求');
       return;
     }
@@ -2017,10 +2030,10 @@ class _BackupPageState extends State<BackupPage> {
         ),
       );
       if (approved == true && mounted) {
-        final scope = AppScope.of(context);
+        final ai = AppScope.aiOf(context);
         final ledger = AppScope.storeOf(context);
         for (final image in bundle.images.entries) {
-          await scope.ai.images.save(image.key, image.value);
+          await ai.images.save(image.key, image.value);
         }
         await ledger.restore(preview);
         if (mounted) {

@@ -51,9 +51,22 @@ class AgentActions {
   WalletData? _reviewData;
   final Map<String, AgentBatchReview> _reviewCache = {};
   Map<String, Json>? _reviewBatches;
+  List<Json>? _cachedItems, _cachedBatches;
+  void _checkCache() {
+    if (identical(_reviewData, store.data)) return;
+    _reviewData = store.data;
+    _reviewCache.clear();
+    _reviewBatches = null;
+    _cachedItems = _cachedBatches = null;
+  }
+
   AgentActions(this.store);
 
-  List<Json> get items => _items(store.data).reversed.toList();
+  List<Json> get items {
+    _checkCache();
+    return _cachedItems ??= List.unmodifiable(_items(store.data).reversed);
+  }
+
   static List<Json> _items(WalletMetadata d) =>
       (d.extras['agentActions'] as List? ?? [])
           .map((e) => Json.from(e as Map))
@@ -138,7 +151,13 @@ class AgentActions {
           .toList();
 
   /// Older proposals are grouped by their original reply without a write on read.
-  List<Json> get batches => _allBatches(store.data).reversed.toList();
+  List<Json> get batches {
+    _checkCache();
+    return _cachedBatches ??= List.unmodifiable(
+      _allBatches(store.data).reversed,
+    );
+  }
+
   static List<Json> _allBatches(WalletData d) {
     final result = _batches(d);
     final owners = <String, Json>{};
@@ -252,16 +271,12 @@ class AgentActions {
       .toString();
 
   AgentBatchReview review(String id) {
-    if (!identical(_reviewData, store.data)) {
-      _reviewData = store.data;
-      _reviewCache.clear();
-      _reviewBatches = null;
-    }
+    _checkCache();
     if (_reviewCache.containsKey(id)) return _reviewCache[id]!;
     final d = store.data;
     // One scan of the chat history per committed snapshot, not one per batch.
     // Reversed so the first batch with an id wins, as with firstWhere.
-    _reviewBatches ??= {for (final b in _allBatches(d).reversed) b['id']: b};
+    _reviewBatches ??= {for (final b in batches.reversed) b['id']: b};
     final b = _reviewBatches![id] ?? (throw const FormatException('方案不存在'));
     final entries = _inBatch(d, b);
     final problems = <String, String>{};

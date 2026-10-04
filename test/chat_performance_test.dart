@@ -7,11 +7,52 @@ import 'package:http/http.dart' as http;
 import 'package:fin_dash/domain/command_context.dart';
 import 'package:fin_dash/services/ai_service.dart';
 import 'package:fin_dash/ui/ai_pages.dart';
+import 'package:fin_dash/ui/finance_pages.dart';
+import 'navigation_test.dart' show renderApp;
 import 'helpers.dart';
 import 'agent_chat_interaction_test.dart' show chatHarness;
 import 'ai_streaming_test.dart' show StreamingClient, event, chunk;
 
 void main() {
+  testWidgets(
+    'AI writes leave retained tabs and status leaves messages intact',
+    (tester) async {
+      final store = await renderApp(tester);
+      for (final index in [1, 2, 0]) {
+        await tester.tap(find.byKey(Key('nav-$index')));
+        await tester.pumpAndSettle();
+      }
+      await tester.tap(find.text('AI 顾问').first);
+      await tester.pumpAndSettle();
+      var tabs = 0, messages = 0;
+      final previous = debugOnRebuildDirtyWidget;
+      debugOnRebuildDirtyWidget = (element, builtOnce) {
+        previous?.call(element, builtOnce);
+        if (element.widget is HomePage ||
+            element.widget is StatsPage ||
+            element.widget is BillsPage) {
+          tabs++;
+        }
+        if (element.widget.runtimeType.toString() == '_Message') messages++;
+      };
+      addTearDown(() => debugOnRebuildDirtyWidget = previous);
+      await store.changeMetadata(
+        (d) => d.chats.add({
+          'id': 'perf-user',
+          'role': 'user',
+          'content': '你好',
+          'timestamp': DateTime.now().millisecondsSinceEpoch,
+        }),
+      );
+      await tester.pumpAndSettle();
+      expect(tabs, 0);
+      messages = 0;
+      store.setAiStatus('处理中');
+      await tester.pump();
+      expect(tabs, 0);
+      expect(messages, 0);
+    },
+  );
   test('json equality matches digest semantics without hashing', () {
     expect(
       jsonEquals(

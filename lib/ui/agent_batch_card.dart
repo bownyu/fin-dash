@@ -54,8 +54,17 @@ class _AgentBatchCardState extends State<AgentBatchCard> {
   }
 
   @override
-  Widget build(BuildContext context) {
-    final ai = AppScope.of(context).ai, store = AppScope.storeOf(context);
+  Widget build(BuildContext context) => RuntimeBuilder(builder: buildContent);
+  Widget buildContent(BuildContext context) {
+    final ai = AppScope.aiOf(context),
+        store = AppScope.storeOf(
+          context,
+          domains: const {
+            WalletDomain.tasks,
+            WalletDomain.ledger,
+            WalletDomain.preferences,
+          },
+        );
     final review = ai.actions.review(widget.batchId), b = review.batch;
     final pending = review.pending;
     final appliedCount = review.items
@@ -286,7 +295,7 @@ class _AgentBatchReviewPageState extends State<AgentBatchReviewPage> {
   void didChangeDependencies() {
     super.didChangeDependencies();
     if (snapshot != null) return;
-    snapshot = AppScope.of(context).ai.actions.review(widget.batchId);
+    snapshot = AppScope.aiOf(context).actions.review(widget.batchId);
     selected = widget.initial?.token == snapshot!.token
         ? {...widget.initial!.ids}
         : snapshot!.suggested;
@@ -296,7 +305,7 @@ class _AgentBatchReviewPageState extends State<AgentBatchReviewPage> {
   }
 
   void refresh({String? reviewedId}) {
-    final latest = AppScope.of(context).ai.actions.review(widget.batchId);
+    final latest = AppScope.aiOf(context).actions.review(widget.batchId);
     setState(() {
       final ids = latest.pending.map((a) => a['id']).toSet();
       selected = selected.intersection(ids.cast<String>())
@@ -355,7 +364,14 @@ class _AgentBatchReviewPageState extends State<AgentBatchReviewPage> {
   }
 
   void details(Json a) {
-    final store = AppScope.storeOf(context);
+    final store = AppScope.storeOf(
+      context,
+      domains: const {
+        WalletDomain.tasks,
+        WalletDomain.ledger,
+        WalletDomain.preferences,
+      },
+    );
     showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
@@ -401,7 +417,15 @@ class _AgentBatchReviewPageState extends State<AgentBatchReviewPage> {
   }
 
   Future<void> editItem(Json a) async {
-    final ai = AppScope.of(context).ai, store = AppScope.storeOf(context);
+    final ai = AppScope.aiOf(context),
+        store = AppScope.storeOf(
+          context,
+          domains: const {
+            WalletDomain.tasks,
+            WalletDomain.ledger,
+            WalletDomain.preferences,
+          },
+        );
     final token = snapshot!.token;
     final current = snapshot!.problems.containsKey(a['id']);
     if (current) {
@@ -515,8 +539,17 @@ class _AgentBatchReviewPageState extends State<AgentBatchReviewPage> {
   }
 
   @override
-  Widget build(BuildContext context) {
-    final ai = AppScope.of(context).ai, store = AppScope.storeOf(context);
+  Widget build(BuildContext context) => RuntimeBuilder(builder: buildContent);
+  Widget buildContent(BuildContext context) {
+    final ai = AppScope.aiOf(context),
+        store = AppScope.storeOf(
+          context,
+          domains: const {
+            WalletDomain.tasks,
+            WalletDomain.ledger,
+            WalletDomain.preferences,
+          },
+        );
     final current = ai.actions.review(widget.batchId);
     final review = snapshot!, changed = review.token != current.token;
     final preparing = current.batch['generation'] == 'preparing';

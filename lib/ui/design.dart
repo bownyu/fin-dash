@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:collection';
 import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -7,6 +8,7 @@ import '../data/wallet_store.dart';
 import '../domain/models.dart';
 import '../domain/command_context.dart';
 import '../services/ai_service.dart';
+export '../domain/command_context.dart' show WalletDomain;
 
 const primary = Color(0xFFA75F43);
 const mint = Color(0xFF527563);
@@ -38,13 +40,24 @@ String formSnapshot(List<Object?> values) => jsonEncode(values);
 
 /// Editable amounts remain visible; read-only ledger summaries use this scope.
 String privateMoney(BuildContext context, int value, {bool symbol = true}) =>
-    AppScope.storeOf(context).data.settings['visible'] == false
+    AppScope.storeOf(
+          context,
+          domains: const {WalletDomain.preferences},
+        ).data.settings['visible'] ==
+        false
     ? (symbol ? '¥ ••••••' : '••••••')
     : money(value, symbol: symbol);
 
+final _financialPattern = RegExp(r'[-+]?¥\s*[\d,]+(?:\.\d{2})?');
+final _transactionTime = DateFormat('HH:mm');
+
 String privateFinancialText(BuildContext context, String text) =>
-    AppScope.storeOf(context).data.settings['visible'] == false
-    ? text.replaceAll(RegExp(r'[-+]?¥\s*[\d,]+(?:\.\d{2})?'), '¥ ••••••')
+    AppScope.storeOf(
+          context,
+          domains: const {WalletDomain.preferences},
+        ).data.settings['visible'] ==
+        false
+    ? text.replaceAll(_financialPattern, '¥ ••••••')
     : text;
 IconData iconOf(String name) => switch (name) {
   'restaurant' || 'fastfood' => Icons.restaurant_rounded,
@@ -581,6 +594,10 @@ class AppScope extends StatefulWidget {
   });
   static AppScopeData of(BuildContext context) =>
       InheritedModel.inheritFrom<AppScopeData>(context)!;
+  static AiService aiOf(BuildContext context) =>
+      context.getInheritedWidgetOfExactType<AppScopeData>()!.ai;
+
+  /// domains: const {} reads the store without subscribing to any changes.
   static WalletStore storeOf(
     BuildContext context, {
     Set<WalletDomain>? domains,
@@ -594,6 +611,17 @@ class AppScope extends StatefulWidget {
 
   @override
   State<AppScope> createState() => _AppScopeState();
+}
+
+/// Runtime changes rebuild only this component's subtree.
+class RuntimeBuilder extends StatelessWidget {
+  final WidgetBuilder builder;
+  const RuntimeBuilder({super.key, required this.builder});
+  @override
+  Widget build(BuildContext context) => ListenableBuilder(
+    listenable: AppScope.storeOf(context, domains: const {}).runtimeUpdates,
+    builder: (context, _) => builder(context),
+  );
 }
 
 class _AppScopeState extends State<AppScope> {
@@ -907,7 +935,11 @@ class MoneyText extends StatelessWidget {
   Widget build(BuildContext context) {
     final visible =
         !respectPrivacy ||
-        AppScope.storeOf(context).data.settings['visible'] != false;
+        AppScope.storeOf(
+              context,
+              domains: const {WalletDomain.preferences},
+            ).data.settings['visible'] !=
+            false;
     return FittedBox(
       fit: BoxFit.scaleDown,
       alignment: Alignment.centerLeft,
@@ -921,23 +953,15 @@ class MoneyText extends StatelessWidget {
           children: [...previous, ?current],
         ),
         child: visible
-            ? TweenAnimationBuilder<int>(
+            ? Text(
+                money(value),
                 key: const ValueKey(true),
-                tween: IntTween(begin: value, end: value),
-                duration: Duration(
-                  milliseconds: MediaQuery.disableAnimationsOf(context)
-                      ? 0
-                      : 220,
-                ),
-                builder: (_, amount, _) => Text(
-                  money(amount),
-                  style: TextStyle(
-                    fontSize: size,
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: -.5,
-                    color: color,
-                    fontFeatures: const [ui.FontFeature.tabularFigures()],
-                  ),
+                style: TextStyle(
+                  fontSize: size,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: -.5,
+                  color: color,
+                  fontFeatures: const [ui.FontFeature.tabularFigures()],
                 ),
               )
             : Text(
@@ -955,6 +979,15 @@ class MoneyText extends StatelessWidget {
 }
 
 class Avatar extends StatelessWidget {
+  static final _decoded = <String, Uint8List>{};
+  static Uint8List _bytes(String value) {
+    final cached = _decoded.remove(value);
+    final bytes = cached ?? base64Decode(value.split(',').last);
+    _decoded[value] = bytes;
+    if (_decoded.length > 12) _decoded.remove(_decoded.keys.first);
+    return bytes;
+  }
+
   final String? value;
   final double size;
   const Avatar(this.value, {super.key, this.size = 44});
@@ -972,10 +1005,13 @@ class Avatar extends StatelessWidget {
     if (value?.startsWith('data:image') == true) {
       try {
         content = Image.memory(
-          base64Decode(value!.split(',').last),
+          _bytes(value!),
           width: size,
           height: size,
           fit: BoxFit.cover,
+          cacheWidth: (size * MediaQuery.devicePixelRatioOf(context)).ceil(),
+          cacheHeight: (size * MediaQuery.devicePixelRatioOf(context)).ceil(),
+          gaplessPlayback: true,
         );
       } catch (_) {
         /* Keep fallback. */
@@ -1027,13 +1063,14 @@ class TransactionRow extends StatelessWidget {
   });
   @override
   Widget build(BuildContext context) {
-    final store = AppScope.storeOf(context);
+    final store = AppScope.storeOf(
+      context,
+      domains: const {WalletDomain.ledger, WalletDomain.preferences},
+    );
     final accounts = tx.type == TxType.transfer
         ? '${store.account(tx.fromId)?.name ?? '未关联'} → ${store.account(tx.toId)?.name ?? '未关联'}'
         : store.account(tx.accountId)?.name ?? '未关联账户';
-    final category = store.data.categories
-        .where((c) => c.name == tx.category && c.type == tx.type)
-        .firstOrNull;
+    final category = store.category(tx.category, tx.type);
     final color = neutralIcon
         ? WalletColors.of(context).secondary
         : tx.type == TxType.transfer
@@ -1123,7 +1160,7 @@ class TransactionRow extends StatelessWidget {
                     ),
                     const SizedBox(height: 4),
                     Text(
-                      DateFormat('HH:mm').format(tx.date),
+                      _transactionTime.format(tx.date),
                       style: Theme.of(context).textTheme.bodySmall,
                     ),
                   ],

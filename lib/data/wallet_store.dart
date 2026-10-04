@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:convert';
 import 'dart:math';
 import 'package:flutter/foundation.dart';
@@ -17,6 +18,20 @@ class WalletStore extends ChangeNotifier {
   List<WalletAccount>? _derivedAccounts;
   List<LedgerTx>? _derivedTransactions;
   int _ledgerRevision = 0;
+  List<WalletCategory>? _derivedCategories;
+  Map<(String, TxType), WalletCategory>? _categoriesByName;
+  final _totals = <(TxType, DateTime?, DateTime?), int>{};
+  final _breakdowns = <(TxType, DateTime, DateTime), Map<String, int>>{};
+  WalletData? _suggestionsData;
+  String? _suggestionsDay;
+  List<Json>? _suggestions;
+  WalletCategory? category(String name, TxType type) {
+    _checkDerivedData();
+    _categoriesByName ??= {
+      for (final c in data.categories) (c.name, c.type): c,
+    };
+    return _categoriesByName![(name, type)];
+  }
 
   /// Changes only when financial records change; metadata has its own lifetime.
   int get ledgerRevision => _ledgerRevision;
@@ -289,14 +304,20 @@ class WalletStore extends ChangeNotifier {
   // Committed writes replace _data. Failed saves and AI status updates keep
   // the current snapshot, so cached ledger results remain valid.
   void _checkDerivedData() {
-    final sameAccounts = listEquals(_derivedAccounts, _data.accounts);
-    final sameTransactions = listEquals(
+    if (!identical(_derivedCategories, data.categories)) {
+      _derivedCategories = data.categories;
+      _categoriesByName = null;
+    }
+    final sameAccounts = identical(_derivedAccounts, _data.accounts);
+    final sameTransactions = identical(
       _derivedTransactions,
       _data.transactions,
     );
     _derivedAccounts = _data.accounts;
     _derivedTransactions = _data.transactions;
     if (sameAccounts && sameTransactions) return;
+    _totals.clear();
+    _breakdowns.clear();
     _balanceEffects = null;
     _orderedTransactions = null;
     _accountsById = null;
@@ -347,6 +368,13 @@ class WalletStore extends ChangeNotifier {
     String search = '',
   }) {
     _checkDerivedData();
+    if (range == null &&
+        type == null &&
+        accountId == null &&
+        category == null &&
+        search.isEmpty) {
+      return UnmodifiableListView(_ordered);
+    }
     final normalizedSearch = search.toLowerCase();
     // Build normalized text once per committed snapshot, not per keystroke.
     if (search.isNotEmpty) {
@@ -371,25 +399,33 @@ class WalletStore extends ChangeNotifier {
         .toList();
   }
 
-  int total(TxType type, {DateRange? range, List<LedgerTx>? transactions}) =>
-      (transactions ?? _data.transactions)
-          .where(
-            (t) =>
-                t.type == type &&
-                (transactions != null ||
-                    range == null ||
-                    range.contains(t.date)),
-          )
-          .fold(0, (sum, t) => sum + t.amount);
+  int total(TxType type, {DateRange? range, List<LedgerTx>? transactions}) {
+    _checkDerivedData();
+    int calculate() => (transactions ?? _data.transactions)
+        .where(
+          (t) =>
+              t.type == type &&
+              (transactions != null || range == null || range.contains(t.date)),
+        )
+        .fold(0, (sum, t) => sum + t.amount);
+    if (transactions != null) return calculate();
+    return _totals.putIfAbsent((type, range?.start, range?.end), calculate);
+  }
+
   Map<String, int> breakdown(TxType type, DateRange range) {
+    _checkDerivedData();
+    final key = (type, range.start, range.end);
+    if (_breakdowns.containsKey(key)) return _breakdowns[key]!;
     final result = <String, int>{};
     for (final t in _data.transactions.where(
       (t) => t.type == type && range.contains(t.date),
     )) {
       result[t.category] = (result[t.category] ?? 0) + t.amount;
     }
-    return Map.fromEntries(
-      result.entries.toList()..sort((a, b) => b.value.compareTo(a.value)),
+    return _breakdowns[key] = Map.unmodifiable(
+      Map.fromEntries(
+        result.entries.toList()..sort((a, b) => b.value.compareTo(a.value)),
+      ),
     );
   }
 
@@ -525,6 +561,16 @@ class WalletStore extends ChangeNotifier {
   }
 
   List<Json> get suggestions {
+    final day = dayKey(DateTime.now());
+    if (identical(_suggestionsData, data) && day == _suggestionsDay) {
+      return _suggestions!;
+    }
+    _suggestionsData = data;
+    _suggestionsDay = day;
+    return _suggestions = _buildSuggestions();
+  }
+
+  List<Json> _buildSuggestions() {
     final month = DateRange.forPeriod(Period.month, DateTime.now());
     final budget = (_data.settings['budget'] as num? ?? 0).toInt();
     final spend = total(TxType.expense, range: month);

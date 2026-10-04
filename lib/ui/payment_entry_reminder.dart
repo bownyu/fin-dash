@@ -47,7 +47,7 @@ class _PaymentEntryReminderState extends State<PaymentEntryReminder>
       route = nextRoute;
       widget.routes.subscribe(this, nextRoute);
     }
-    final store = AppScope.storeOf(context);
+    final store = AppScope.storeOf(context, domains: const {});
     if (service == null || service!.store != store) {
       service = PaymentNotifications(store, bridge: widget.bridge);
       WidgetsBinding.instance.addPostFrameCallback((_) {
