@@ -2,12 +2,16 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:fin_dash/agent/task_runtime.dart';
 import 'package:fin_dash/data/storage_base.dart';
 import 'package:fin_dash/data/wallet_store.dart';
 import 'package:fin_dash/services/ai_service.dart';
 import 'package:fin_dash/ui/agent_action_card.dart';
+import 'package:fin_dash/ui/agent_actions_page.dart';
 import 'package:fin_dash/ui/ai_pages.dart';
 import 'package:fin_dash/ui/design.dart';
+import 'package:fin_dash/ui/query_result_card.dart';
+import 'package:fin_dash/ui/tasks_page.dart';
 import 'helpers.dart';
 
 Widget chatHarness(WalletStore store, AiService ai) => AppScope(
@@ -29,6 +33,113 @@ Widget chatHarness(WalletStore store, AiService ai) => AppScope(
 );
 
 void main() {
+  testWidgets('completed query stays out of chat after reopen', (tester) async {
+    final storage = MemoryStorage();
+    final store = await emptyStore(storage);
+    final ai = AiService(store, TestVault());
+    final taskId = await ai.tasks.start(
+      '请分析今天的收入与支出。',
+      sessionId: ai.activeSessionId,
+    );
+    await store.changeMetadata((d) {
+      final task = (d.extras['tasks'] as List).single;
+      task['result'] = {
+        'scope': {'currency': 'CNY'},
+        'coverage': {'status': 'complete'},
+        'data': [
+          {'title': '吃面', 'amountCents': 1800},
+        ],
+      };
+      d.chats.add({
+        'id': 'analysis',
+        'role': 'assistant',
+        'sessionId': ai.activeSessionId,
+        'content': '今天支出 18 元。',
+        'timestamp': DateTime.now().millisecondsSinceEpoch,
+        'status': 'complete',
+      });
+    });
+    await ai.tasks.checkpoint(taskId, TaskState.completed);
+    final reloaded = await emptyStore(storage);
+    final restoredAi = AiService(reloaded, TestVault());
+    await tester.pumpWidget(chatHarness(reloaded, restoredAi));
+    await tester.pumpAndSettle();
+    expect(find.byType(TaskCard), findsNothing);
+    expect(find.byType(QueryResultCard), findsNothing);
+    expect(
+      find.textContaining('今天支出 18 元。', findRichText: true),
+      findsOneWidget,
+    );
+    await tester.tap(find.byTooltip('任务与回执'));
+    await tester.pumpAndSettle();
+    expect(find.byType(TasksPage), findsOneWidget);
+    expect(find.byType(QueryResultCard), findsOneWidget);
+    expect(find.text('处理完成'), findsOneWidget);
+    expect(tester.takeException(), null);
+  });
+
+  testWidgets(
+    'chat shows only active task confirmations without query tables',
+    (tester) async {
+      tester.view.physicalSize = const Size(320, 900);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final store = await emptyStore();
+      await store.saveAccount(bank);
+      final ai = AiService(store, TestVault());
+      final taskId = await ai.tasks.start(
+        '记住回答偏好',
+        sessionId: ai.activeSessionId,
+      );
+      await ai.tasks.preparePreference(taskId, 'add_memory', {
+        'fact': '喜欢简短回答',
+      });
+      await store.changeMetadata((d) {
+        final task = (d.extras['tasks'] as List).single;
+        task['result'] = {
+          'data': {'expenseCents': 1800},
+        };
+        task['recipeProposal'] = {'name': '今日分析'};
+        d.chats.add({
+          'id': 'preference',
+          'role': 'assistant',
+          'sessionId': ai.activeSessionId,
+          'content': '请确认保存回答偏好。',
+          'timestamp': DateTime.now().millisecondsSinceEpoch,
+          'status': 'complete',
+        });
+      });
+      await tester.pumpWidget(chatHarness(store, ai));
+      await tester.pumpAndSettle();
+      expect(find.byType(TaskCard), findsOneWidget);
+      expect(find.byType(QueryResultCard), findsNothing);
+      expect(find.text('保存为常用分析'), findsNothing);
+      await tester.tap(find.text('确认保存这些信息'));
+      await tester.pumpAndSettle();
+      expect(store.data.agent['memories'].single['fact'], '喜欢简短回答');
+      expect(find.byType(TaskCard), findsNothing);
+
+      final clarifyId = await ai.tasks.start(
+        '午餐20元',
+        sessionId: ai.activeSessionId,
+      );
+      await ai.tasks.request(clarifyId, {
+        'title': '从哪个账户扣款？',
+        'fields': [
+          {'key': 'accountId', 'label': '扣款账户', 'type': 'accountChoice'},
+        ],
+      });
+      await tester.pumpAndSettle();
+      expect(find.text('从哪个账户扣款？'), findsOneWidget);
+      expect(find.text('继续准备'), findsOneWidget);
+      await ai.tasks.checkpoint(clarifyId, TaskState.cancelled);
+      await tester.pumpAndSettle();
+      expect(find.byType(TaskCard), findsNothing);
+      expect(tester.takeException(), null);
+    },
+  );
+
   testWidgets(
     'proposal is confirmed directly in chat with persisted decision and result',
     (tester) async {
@@ -72,6 +183,7 @@ void main() {
       await tester.tap(find.text('确认执行'));
       await tester.pumpAndSettle();
       expect(store.account('bank')!.name, '工资卡');
+      expect(find.byType(AgentActionCard), findsNothing);
       expect(store.data.chats[1]['role'], 'user');
       expect(store.data.chats[1]['content'], contains('确认执行'));
       expect(store.data.chats.last['content'], contains('已执行并保存到账本'));
@@ -159,12 +271,23 @@ void main() {
     expect(find.byType(AgentActionCard), findsOneWidget);
     await tester.tap(find.text('确认执行'));
     await tester.pumpAndSettle();
+    expect(find.byType(AgentActionCard), findsNothing);
+    await tester.tap(find.byTooltip('更多'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('操作管理'));
+    await tester.pumpAndSettle();
+    expect(find.byType(AgentActionsPage), findsOneWidget);
+    await tester.tap(find.text('操作历史'));
+    await tester.pumpAndSettle();
     await tester.ensureVisible(find.text('撤销本次操作'));
     await tester.tap(find.text('撤销本次操作'));
     await tester.pumpAndSettle();
     expect(store.data.settings['budget'], 0);
     expect(ai.actions.items.single['status'], 'undone');
     expect(store.data.chats.last['content'], contains('已撤销，相关数据已恢复'));
+    await tester.tap(find.byType(BackButton));
+    await tester.pumpAndSettle();
+    expect(find.byType(AgentActionCard), findsNothing);
     expect(tester.takeException(), null);
   });
 

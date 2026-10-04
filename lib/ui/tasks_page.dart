@@ -64,7 +64,13 @@ class TasksPage extends StatelessWidget {
 class TaskCard extends StatefulWidget {
   final String taskId;
   final bool showPlan;
-  const TaskCard({super.key, required this.taskId, this.showPlan = false});
+  final bool showResult;
+  const TaskCard({
+    super.key,
+    required this.taskId,
+    this.showPlan = false,
+    this.showResult = true,
+  });
   @override
   State<TaskCard> createState() => _TaskCardState();
 }
@@ -131,9 +137,9 @@ class _TaskCardState extends State<TaskCard> {
             ),
             const SizedBox(height: 6),
             Text(label),
-            if (task['result'] is Map)
+            if (widget.showResult && task['result'] is Map)
               QueryResultCard(result: Json.from(task['result'])),
-            if (task['recipeProposal'] != null)
+            if (widget.showResult && task['recipeProposal'] != null)
               TextButton(
                 onPressed: busy
                     ? null
