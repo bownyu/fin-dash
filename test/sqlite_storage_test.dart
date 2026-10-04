@@ -72,6 +72,15 @@ void main() {
         d.chats.insert(1, {'id': 'middle', 'content': '新消息'});
       });
       expect((await open()).data.chats, store.data.chats);
+      final ledger = store.data;
+      final revision = store.ledgerRevision;
+      await store.changeMetadata((d) => d.settings['theme'] = 'dark');
+      expect(store.data.transactions, same(ledger.transactions));
+      expect(store.data.accounts, same(ledger.accounts));
+      expect(store.ledgerRevision, revision);
+      expect(storage.lastChangedRows, 1);
+      expect(storage.lastScannedRows, lessThan(100));
+      expect((await open()).data.toJson(), store.data.toJson());
     },
   );
 

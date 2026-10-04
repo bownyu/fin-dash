@@ -54,6 +54,8 @@ void main() {
     (tester) async {
       final storage = MemoryStorage();
       final store = await renderApp(tester, storage: storage);
+      final ledger = store.data;
+      final revision = store.ledgerRevision;
       final transactions = store.data.transactions
           .map((tx) => tx.toJson())
           .toList();
@@ -63,9 +65,16 @@ void main() {
       expect(find.text('浅色 · 米白'), findsOneWidget);
       expect(find.text('深色 · 暖灰'), findsOneWidget);
       await tester.tap(find.byKey(const Key('theme-dark')));
+      await tester.pump();
+      expect(appearanceOf(tester), Brightness.dark);
       await tester.pumpAndSettle();
       expect(appearanceOf(tester), Brightness.dark);
       expect(find.text('选择你的外观'), findsNothing);
+      expect(store.data.accounts, same(ledger.accounts));
+      expect(store.data.transactions, same(ledger.transactions));
+      expect(store.data.categories, same(ledger.categories));
+      expect(store.data.quickEntries, same(ledger.quickEntries));
+      expect(store.ledgerRevision, revision);
       expect(
         store.data.transactions.map((tx) => tx.toJson()).toList(),
         transactions,
@@ -90,6 +99,50 @@ void main() {
       expect(tester.takeException(), isNull);
     },
   );
+
+  testWidgets('theme switching does not rebuild retained pages on each frame', (
+    tester,
+  ) async {
+    final store = await renderApp(tester);
+    for (final index in [1, 2, 3, 0]) {
+      await tester.tap(find.byKey(Key('nav-$index')));
+      await tester.pumpAndSettle();
+    }
+    final pages = [HomePage, StatsPage, BillsPage, ProfilePage];
+    final states = [
+      tester.state(find.byType(HomePage)),
+      tester.state(find.byType(StatsPage, skipOffstage: false)),
+      tester.state(find.byType(BillsPage, skipOffstage: false)),
+    ];
+    final builds = <Type, int>{};
+    final previous = debugOnRebuildDirtyWidget;
+    debugOnRebuildDirtyWidget = (element, builtOnce) {
+      previous?.call(element, builtOnce);
+      final type = element.widget.runtimeType;
+      if (pages.contains(type)) builds[type] = (builds[type] ?? 0) + 1;
+    };
+    addTearDown(() => debugOnRebuildDirtyWidget = previous);
+    await store.changeMetadata((d) => d.settings['theme'] = 'dark');
+    await tester.pump();
+    expect(appearanceOf(tester), Brightness.dark);
+    final firstFrameBuilds = Map<Type, int>.of(builds);
+    expect(firstFrameBuilds.keys, unorderedEquals(pages));
+    expect(firstFrameBuilds.values, everyElement(1));
+    for (var frame = 0; frame < 16; frame++) {
+      await tester.pump(const Duration(milliseconds: 16));
+    }
+    expect(builds, firstFrameBuilds);
+    expect(tester.state(find.byType(HomePage)), same(states[0]));
+    expect(
+      tester.state(find.byType(StatsPage, skipOffstage: false)),
+      same(states[1]),
+    );
+    expect(
+      tester.state(find.byType(BillsPage, skipOffstage: false)),
+      same(states[2]),
+    );
+    expect(tester.takeException(), isNull);
+  });
 
   testWidgets(
     'failed theme save leaves the previous appearance and picker intact',

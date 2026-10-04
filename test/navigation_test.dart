@@ -50,6 +50,35 @@ Future<bool> markerIsVisible(WidgetTester tester) async {
   }))!;
 }
 
+void expectSelectedNavigation(WidgetTester tester, int selected) {
+  for (var index = 0; index < 4; index++) {
+    final item = find.byKey(Key('nav-$index'));
+    final colors = WalletColors.of(tester.element(item));
+    final background = tester.widget<DecoratedBox>(
+      find.descendant(of: item, matching: find.byType(DecoratedBox)),
+    );
+    expect(
+      (background.decoration as BoxDecoration).color,
+      index == selected ? colors.inset : Colors.transparent,
+      reason: 'Only the current tab may paint a selection background.',
+    );
+    final foreground = index == selected ? colors.ink : colors.secondary;
+    expect(
+      tester
+          .widget<Icon>(find.descendant(of: item, matching: find.byType(Icon)))
+          .color,
+      foreground,
+    );
+    expect(
+      tester
+          .widget<Text>(find.descendant(of: item, matching: find.byType(Text)))
+          .style!
+          .color,
+      foreground,
+    );
+  }
+}
+
 void main() {
   testWidgets('first visits and revisits animate the selected tab', (
     tester,
@@ -73,6 +102,7 @@ void main() {
     for (final index in [1, 2, 3, 0, 1]) {
       await tester.tap(find.byKey(Key('nav-$index')));
       await tester.pump();
+      expectSelectedNavigation(tester, index);
       expect(
         opacity(),
         0,
@@ -80,6 +110,7 @@ void main() {
       );
       expect(offset().dy, greaterThan(0));
       await tester.pump(const Duration(milliseconds: 100));
+      expectSelectedNavigation(tester, index);
       expect(opacity(), allOf(greaterThan(0), lessThan(1)));
       await tester.pumpAndSettle();
       expect(opacity(), 1);
@@ -96,6 +127,7 @@ void main() {
     for (final index in [1, 2, 3, 2, 0]) {
       await tester.tap(find.byKey(Key('nav-$index')));
       await tester.pump(const Duration(milliseconds: 32));
+      expectSelectedNavigation(tester, index);
     }
     await tester.pumpAndSettle();
     expect(tester.state(find.byType(HomePage)), same(home));
@@ -119,6 +151,7 @@ void main() {
     await renderApp(tester);
     await tester.tap(find.byKey(const Key('nav-1')));
     await tester.pump();
+    expectSelectedNavigation(tester, 1);
     expect(
       tester
           .widget<FadeTransition>(find.byKey(const Key('main-tab-transition')))

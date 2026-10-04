@@ -65,9 +65,13 @@ class ThemeOptions extends StatelessWidget {
         dark: dark,
         selected: selected == value,
         onTap: () async {
+          if (store.data.settings['theme'] == value) {
+            onSelected?.call();
+            return;
+          }
           final saved = await perform(
             context,
-            () => store.change((d) => d.settings['theme'] = value),
+            () => store.changeMetadata((d) => d.settings['theme'] = value),
           );
           if (saved && context.mounted) onSelected?.call();
         },

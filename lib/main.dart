@@ -132,6 +132,9 @@ class _FinDashAppState extends State<FinDashApp> {
       localizationsDelegates: GlobalMaterialLocalizations.delegates,
       theme: _lightTheme,
       darkTheme: _darkTheme,
+      // Interpolating ThemeData rebuilds every themed page on every frame,
+      // including retained tabs, and keeps repainting the glass navigation.
+      themeAnimationStyle: AnimationStyle.noAnimation,
       themeMode: switch (widget.store.data.settings['theme']) {
         'dark' => ThemeMode.dark,
         'system' => ThemeMode.system,
@@ -476,10 +479,16 @@ class _ShellState extends State<_Shell> with SingleTickerProviderStateMixin {
             key: Key('nav-$value'),
             onTap: () => select(value),
             borderRadius: BorderRadius.circular(24),
-            child: AnimatedContainer(
-              duration: Duration(
-                milliseconds: MediaQuery.disableAnimationsOf(context) ? 0 : 220,
-              ),
+            splashFactory: NoSplash.splashFactory,
+            overlayColor: WidgetStateProperty.resolveWith(
+              (states) =>
+                  states.contains(WidgetState.focused) ||
+                      states.contains(WidgetState.hovered)
+                  ? WalletColors.of(context).ink.withValues(alpha: .04)
+                  : Colors.transparent,
+            ),
+            // Selection moves on the same frame; fading each item overlaps.
+            child: Container(
               padding: const EdgeInsets.symmetric(vertical: 7),
               decoration: BoxDecoration(
                 color: value == index
