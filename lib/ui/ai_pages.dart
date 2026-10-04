@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
+import 'package:markdown/markdown.dart' as md;
 import 'package:intl/intl.dart';
 import 'package:image_picker/image_picker.dart';
 import '../application/preference_changes.dart';
@@ -845,8 +846,28 @@ class _ReplyText extends StatelessWidget {
   @override
   Widget build(BuildContext context) => streaming
       ? Text(data, style: const TextStyle(height: 1.5))
-      : MarkdownBody(data: data, selectable: true);
+      : MarkdownBody(
+          data: data,
+          selectable: true,
+          inlineSyntaxes: _inlineSyntaxes,
+        );
 }
+
+/// CommonMark rejects `**` beside CJK punctuation, as in `**本周：0 元。**上周`,
+/// which models write often; bold pairs here ignore the flanking rules.
+class _CjkStrongSyntax extends md.InlineSyntax {
+  _CjkStrongSyntax()
+    : super(r'\*\*(?=\S)(.+?)(?<=\S)\*\*', startCharacter: 0x2A);
+  @override
+  bool onMatch(md.InlineParser parser, Match match) {
+    parser.addNode(
+      md.Element('strong', md.InlineParser(match[1]!, parser.document).parse()),
+    );
+    return true;
+  }
+}
+
+final _inlineSyntaxes = <md.InlineSyntax>[_CjkStrongSyntax()];
 
 class _AssistantContent extends StatelessWidget {
   final Json message;
@@ -974,6 +995,7 @@ class _ProcessingTrace extends StatelessWidget {
                           child: MarkdownBody(
                             data: '${blocks[i]['text']}',
                             selectable: true,
+                            inlineSyntaxes: _inlineSyntaxes,
                           ),
                         ),
                       ],
