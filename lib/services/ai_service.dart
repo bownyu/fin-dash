@@ -14,6 +14,7 @@ import '../agent/prompts.dart';
 import '../agent/voice_prompt.dart';
 import '../agent/context_assembler.dart';
 import '../agent/model_queue.dart';
+import '../application/preference_changes.dart';
 import 'agent_actions.dart';
 import 'agent_input.dart';
 import 'agent_memory.dart';
@@ -165,8 +166,10 @@ class AiService {
       entry['updatedAt'] = message['timestamp'];
       if (message['role'] == 'user' &&
           (entry['title'] == '对话' || entry['title'] == '新对话')) {
-        final text = '${message['content']}'.replaceAll('\n', ' ');
-        entry['title'] = text.length > 30 ? '${text.substring(0, 30)}…' : text;
+        entry['title'] = clip(
+          '${message['content']}'.replaceAll('\n', ' '),
+          30,
+        );
       }
     }
     return result.values.toList()..sort(
@@ -763,15 +766,8 @@ class AiService {
             throw const FormatException('服务返回了缺失或重复的工具调用 ID，未继续执行');
           }
           if (name.startsWith('propose_') ||
-              [
-                'add_memory',
-                'update_memory',
-                'forget_memory',
-                'update_user_cognition',
-                'learn_behavior',
-                'update_plan',
-                'revise_changes',
-              ].contains(name)) {
+              name == 'revise_changes' ||
+              PreferenceChanges.tools.contains(name)) {
             changedMemoryOrLedger = true;
           }
           block?['status'] = 'running';
@@ -1069,29 +1065,157 @@ class AiService {
     }
   }
 
-  String _systemPrompt(DateRange? range) => PromptAssembler.build(
-    tools: capabilities.registry.tools,
-    context: {
-      'now': DateTime.now().toIso8601String(),
-      'timezone': 'local',
-      'currency': 'CNY',
-      'ledgerEpoch': store.ledgerEpoch,
-      'ledgerRevision': store.ledgerRevision,
-      'taskId': _taskId,
-      'range': range == null
+  String _systemPrompt(DateRange? range) {
+    final now = DateTime.now(), agent = store.data.agent;
+    final note = '${agent['customPrompt'] ?? ''}'.trim();
+    return PromptAssembler.build(
+      tools: capabilities.registry.tools,
+      tone: agent['tone'],
+      context: {
+        'now': now.toIso8601String(),
+        'timezone': 'local',
+        'currency': 'CNY',
+        'ledgerEpoch': store.ledgerEpoch,
+        'ledgerRevision': store.ledgerRevision,
+        'taskId': _taskId,
+        'range': range == null
+            ? null
+            : {
+                'startInclusive': range.start.toIso8601String(),
+                'endExclusive': range.end.toIso8601String(),
+              },
+        'user': _userBriefing(now),
+        'evidence': [
+          for (final m in memory.search(
+            lastPrompt ?? '',
+            limit: 8,
+            maxChars: 1500,
+          ))
+            {
+              'id': m['id'],
+              'fact': m['fact'],
+              'importance': m['importance'] ?? 'medium',
+            },
+        ],
+        'style': {
+          'name': agent['name'],
+          if (note.isNotEmpty) 'note': clip(note, 200),
+        },
+        'limitations': ['历史图片不会自动提供给模型'],
+      },
+    );
+  }
+
+  List<Json> get commitments => [
+    for (final c in store.data.agent['commitments'] as List? ?? [])
+      if (c is Map) Json.from(c),
+  ];
+  List<Json> get dueCommitments {
+    final today = dayKey(DateTime.now());
+    return commitments
+        .where(
+          (c) =>
+              c['status'] == 'active' &&
+              '${c['checkDate']}'.compareTo(today) <= 0,
+        )
+        .toList();
+  }
+
+  /// The latest user message from an earlier day, in any conversation.
+  Json? previousChat(DateTime now) {
+    final today = dayKey(now);
+    return store.data.chats.reversed
+        .where(
+          (m) =>
+              m['role'] == 'user' &&
+              dayKey(localDate(m['timestamp'])).compareTo(today) < 0,
+        )
+        .firstOrNull;
+  }
+
+  // What the advisor already knows, so small talk needs no lookups. Every
+  // field is bounded to keep the context within PromptAssembler's budget.
+  Json _userBriefing(DateTime now) {
+    final d = store.data, a = d.agent, today = dayKey(now);
+    List<String> texts(Iterable<dynamic>? items, int take, int max) => [
+      for (final item in items ?? const [])
+        clip(
+          item is Map
+              ? '${item['description'] ?? item['text'] ?? ''}'
+              : '$item',
+          max,
+        ),
+    ].where((s) => s.isNotEmpty).take(take).toList();
+    final month = DateRange.forPeriod(Period.month, now);
+    final spend = store.total(TxType.expense, range: month);
+    final budget = (d.settings['budget'] as num? ?? 0).toInt();
+    final goals = d.goals
+        .where((g) => ['active', 'paused'].contains(g['status']))
+        .take(5);
+    final open = commitments.where((c) => c['status'] == 'active').toList()
+      ..sort((x, y) => '${x['checkDate']}'.compareTo('${y['checkDate']}'));
+    final previous = previousChat(now);
+    final previousDay = previous == null
+        ? null
+        : localDate(previous['timestamp']);
+    return {
+      'name': d.profile['name'],
+      'description': clip('${a['description'] ?? ''}', 150),
+      'tags': texts(a['tags'] as List?, 10, 20),
+      'preferences': texts(a['preferences'] as List?, 8, 40),
+      'focusAreas': texts(a['focusAreas'] as List?, 8, 20),
+      'insights': texts((a['insights'] as List?)?.reversed, 6, 60),
+      'goals': [
+        for (final g in goals)
+          {
+            'id': g['id'],
+            'description': clip('${g['description']}', 50),
+            'status': g['status'],
+            'targetCents': ?g['targetCents'],
+            'deadline': ?g['deadline'],
+            if (g['motivation'] != null)
+              'motivation': clip('${g['motivation']}', 50),
+          },
+      ],
+      'commitments': [
+        for (final c in open.take(5))
+          {
+            'id': c['id'],
+            'text': clip('${c['text']}', 60),
+            'checkDate': c['checkDate'],
+            'due': '${c['checkDate']}'.compareTo(today) <= 0,
+          },
+      ],
+      'commitmentsDone': commitments.where((c) => c['status'] == 'done').length,
+      'month': {
+        'expenseGrossCents': spend,
+        'incomeCents': store.total(TxType.income, range: month),
+        if (budget > 0) ...{
+          'budgetCents': budget,
+          'budgetUsedPercent': (spend * 100 / budget).round(),
+        },
+      },
+      'lastChat': previousDay == null
           ? null
           : {
-              'startInclusive': range.start.toIso8601String(),
-              'endExclusive': range.end.toIso8601String(),
+              'date': dayKey(previousDay),
+              'daysAgo': DateTime(now.year, now.month, now.day)
+                  .difference(
+                    DateTime(
+                      previousDay.year,
+                      previousDay.month,
+                      previousDay.day,
+                    ),
+                  )
+                  .inDays,
+              'topic': clip('${previous!['content']}', 40),
             },
-      'evidence': memory.search(lastPrompt ?? '', limit: 5, maxChars: 2000),
-      'style': {
-        'name': store.data.agent['name'],
-        'tone': store.data.agent['tone'],
-      },
-      'limitations': ['历史图片不会自动提供给模型'],
-    },
-  );
+      'newcomer':
+          previous == null &&
+          d.goals.isEmpty &&
+          (a['memories'] as List? ?? []).isEmpty,
+    };
+  }
 
   Future<void> resumeTask(String taskId, String prompt) async {
     if (busy) throw const FormatException('请先停止当前生成；任务和补充内容已保留');
@@ -1260,9 +1384,12 @@ class AiService {
       case 'get_self_model':
         return {
           'name': store.data.agent['name'],
-          'role': '个人财务助手',
-          'tone': store.data.agent['tone'],
-          'principles': ['使用真实账本', '尊重隐私', '账本写入须用户确认提案', '不编造能力', '事实与推测分开'],
+          'role': '长期财务伙伴',
+          'tone':
+              (PromptAssembler.tones[store.data.agent['tone']] ??
+                      PromptAssembler.tones['professional']!)
+                  .$1,
+          'principles': ['先关心人，再谈数字', '使用真实账本', '尊重隐私', '写入须用户确认', '事实与推测分开'],
           'preferences': store.data.agent['preferences'],
         };
       case 'get_chat_history':
@@ -1550,6 +1677,7 @@ const toolLabels = {
   'update_memory': '修正记忆…',
   'forget_memory': '删除记忆…',
   'update_plan': '更新目标…',
+  'set_commitment': '准备约定…',
 };
 Json _tool(
   String name,
@@ -1784,19 +1912,23 @@ final toolDefinitions = <Json>[
     'date': {'type': 'string'},
   }),
   _tool('detect_anomaly', '根据实际支出检测大额异常', {}),
-  _tool('update_user_cognition', '保存用户明确告知的信息；可添加或删除标签洞察', {
-    'description': {'type': 'string'},
-    for (final key in [
-      'add_tags',
-      'remove_tags',
-      'add_insights',
-      'remove_insights',
-    ])
-      key: {
-        'type': 'array',
-        'items': {'type': 'string'},
-      },
-  }),
+  _tool(
+    'update_user_cognition',
+    '画像、标签只写用户亲口告知的信息；insights 可写有账单依据的行为规律，须注明依据和时间范围，不写性格判断；过时内容用 remove_* 删除',
+    {
+      'description': {'type': 'string'},
+      for (final key in [
+        'add_tags',
+        'remove_tags',
+        'add_insights',
+        'remove_insights',
+      ])
+        key: {
+          'type': 'array',
+          'items': {'type': 'string'},
+        },
+    },
+  ),
   _tool(
     'learn_behavior',
     '保存用户明确告知的交互偏好',
@@ -1844,7 +1976,7 @@ final toolDefinitions = <Json>[
   ),
   _tool(
     'update_plan',
-    '创建或修改用户确认的财务目标',
+    '创建或修改用户确认的长期财务目标；修改时传 id',
     {
       'id': {'type': 'string'},
       'description': {'type': 'string'},
@@ -1852,7 +1984,24 @@ final toolDefinitions = <Json>[
         'type': 'string',
         'enum': ['active', 'completed', 'paused', 'abandoned'],
       },
+      'target_cents': {'type': 'integer', 'minimum': 1},
+      'deadline': {'type': 'string', 'description': 'YYYY-MM-DD'},
+      'motivation': {'type': 'string', 'description': '用户想实现它的原因'},
     },
     ['description'],
+  ),
+  _tool(
+    'set_commitment',
+    '准备或更新与用户商定的短期小行动，如"本周外卖不超过 3 次"。新建需 text 和 check_date；回访后传 id 与 status，可在 note 记录结果',
+    {
+      'id': {'type': 'string'},
+      'text': {'type': 'string'},
+      'check_date': {'type': 'string', 'description': '回访日期 YYYY-MM-DD'},
+      'status': {
+        'type': 'string',
+        'enum': ['active', 'done', 'missed', 'dropped'],
+      },
+      'note': {'type': 'string'},
+    },
   ),
 ];

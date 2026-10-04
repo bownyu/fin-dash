@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:intl/intl.dart';
 import 'package:image_picker/image_picker.dart';
+import '../application/preference_changes.dart';
 import '../domain/models.dart';
 import '../services/ai_service.dart';
 import 'design.dart';
@@ -365,10 +366,15 @@ class _ChatPageState extends State<ChatPage> {
                   padding: const EdgeInsets.fromLTRB(20, 10, 20, 24),
                   children: [
                     if (messages.isEmpty && unlinked.isEmpty) ...[
-                      EmptyState(
-                        '给每一笔钱，一个更好的计划',
-                        '我可以分析真实账单、读取账户设置，并根据文字或截图准备可核对的账户和账单变更。',
-                        icon: Icons.auto_awesome_rounded,
+                      Builder(
+                        builder: (context) {
+                          final (title, detail) = _opener(ai);
+                          return EmptyState(
+                            title,
+                            detail,
+                            icon: Icons.auto_awesome_rounded,
+                          );
+                        },
                       ),
                       Panel(
                         child: Column(
@@ -380,7 +386,7 @@ class _ChatPageState extends State<ChatPage> {
                             ),
                             const SizedBox(height: 8),
                             const Text(
-                              '先在 AI 设置中连接模型服务，再告诉我你想改善的收支问题。',
+                              '先在 AI 设置中连接模型服务，然后像和朋友聊天一样，说说你的近况和想改变的事。',
                               style: TextStyle(color: muted, fontSize: 13),
                             ),
                             TextButton(
@@ -501,16 +507,16 @@ class _ChatPageState extends State<ChatPage> {
                     scrollDirection: Axis.horizontal,
                     padding: const EdgeInsets.symmetric(horizontal: 20),
                     children: [
-                      for (final prompt in ['今日分析', '本周总结', '异常检测'])
+                      for (final starter in {
+                        if (ai.dueCommitments.isNotEmpty)
+                          '约定回顾': '聊聊我们之前约定的进展吧。',
+                        ..._starters,
+                      }.entries)
                         Padding(
                           padding: const EdgeInsets.only(right: 8),
                           child: ActionChip(
-                            label: Text(prompt),
-                            onPressed: () => send(switch (prompt) {
-                              '今日分析' => '请分析今天的收入与支出。',
-                              '本周总结' => '请总结本周的收支与主要变化。',
-                              _ => '请根据真实账单检测最近30天异常支出。',
-                            }),
+                            label: Text(starter.key),
+                            onPressed: () => send(starter.value),
                           ),
                         ),
                     ],
@@ -565,7 +571,7 @@ class _ChatPageState extends State<ChatPage> {
                           maxLength: 3000,
                           textInputAction: TextInputAction.newline,
                           decoration: const InputDecoration(
-                            hintText: '分析账单，或描述想调整的账户…',
+                            hintText: '聊聊收支和目标，或说说想记的账…',
                             counterText: '',
                           ),
                         ),
@@ -589,6 +595,43 @@ class _ChatPageState extends State<ChatPage> {
 }
 
 // Build only the messages near the viewport. Keys keep image/selection state when rows move.
+const _starters = {
+  '聊聊目标': '想和你聊聊我的财务目标，看看现在进展怎么样。',
+  '这周花得怎样': '这周我花得怎么样？有什么值得注意的吗？',
+  '有点焦虑': '最近对钱有点焦虑，想和你聊聊。',
+  '定个小计划': '帮我定一个这周就能做到的小计划吧。',
+};
+
+// Built from local data so the first screen feels personal without a model call.
+(String, String) _opener(AiService ai) {
+  final now = DateTime.now(), data = ai.store.data;
+  final name = '${data.profile['name'] ?? ''}'.trim();
+  final greeting = switch (now.hour) {
+    < 5 || >= 23 => '夜深了',
+    < 11 => '早上好',
+    < 14 => '中午好',
+    < 18 => '下午好',
+    _ => '晚上好',
+  };
+  final title = name.isEmpty ? greeting : '$greeting，$name';
+  final due = ai.dueCommitments.firstOrNull;
+  if (due != null) {
+    return (title, '之前约好的「${due['text']}」到回访的时候了，想聊聊进展吗？');
+  }
+  final previous = ai.previousChat(now);
+  if (previous != null) {
+    return (
+      title,
+      '上次我们聊到「${clip('${previous['content']}', 24)}」，今天想接着聊，还是换个话题？',
+    );
+  }
+  final goal = data.goals.where((g) => g['status'] == 'active').firstOrNull;
+  if (goal != null) {
+    return (title, '「${goal['description']}」还在进行中，想看看离它还有多远吗？');
+  }
+  return (title, '我会记住你的目标和我们聊过的事。可以从最近的开销、一个想实现的目标，或者只是对钱的感受聊起。');
+}
+
 class _LazyChatList extends StatelessWidget {
   final ScrollController controller;
   final EdgeInsets padding;
@@ -1143,6 +1186,27 @@ class AgentStatePage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final store = AppScope.storeOf(context), a = store.data.agent;
+    final commitments = AppScope.of(context).ai.commitments;
+    Widget remove(String label, String field, dynamic id) => IconButton(
+      tooltip: '删除$label',
+      icon: const Icon(Icons.delete_outline_rounded, color: muted),
+      onPressed: () async {
+        if (await confirm(
+              context,
+              '删除这条$label？',
+              '顾问后续对话将不再使用它。',
+              action: '删除',
+            ) &&
+            context.mounted) {
+          await perform(
+            context,
+            () => store.change(
+              (d) => (d.agent[field] as List).removeWhere((x) => x['id'] == id),
+            ),
+          );
+        }
+      },
+    );
     Widget strings(String title, List<dynamic> list, String empty) => Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -1206,7 +1270,7 @@ class AgentStatePage extends StatelessWidget {
                         style: Theme.of(context).textTheme.titleLarge,
                       ),
                       const Text(
-                        '个人财务助手 · 以真实账本为依据',
+                        '长期财务伙伴 · 以真实账本为依据',
                         style: TextStyle(color: muted, fontSize: 12),
                       ),
                     ],
@@ -1253,7 +1317,11 @@ class AgentStatePage extends StatelessWidget {
                         .toList(),
                   ),
           ),
-          strings('核心洞察', a['insights'] as List? ?? [], '足够的数据和明确的信息，会帮助形成洞察。'),
+          strings(
+            '洞察与观察',
+            a['insights'] as List? ?? [],
+            '顾问从账单中看出的规律，经你确认后会记在这里。',
+          ),
           const SectionTitle('事实记忆'),
           Panel(
             child: (a['memories'] as List? ?? []).isEmpty
@@ -1268,33 +1336,38 @@ class AgentStatePage extends StatelessWidget {
                           '重要性：${m['importance'] ?? 'medium'}',
                           style: Theme.of(context).textTheme.bodySmall,
                         ),
-                        trailing: IconButton(
-                          tooltip: '删除记忆',
-                          icon: const Icon(
-                            Icons.delete_outline_rounded,
-                            color: muted,
-                          ),
-                          onPressed: () async {
-                            if (await confirm(
-                              context,
-                              '删除这条记忆？',
-                              '顾问后续分析将不再使用它。',
-                              action: '删除',
-                            )) {
-                              if (context.mounted) {
-                                await perform(
-                                  context,
-                                  () => store.change(
-                                    (d) => (d.agent['memories'] as List)
-                                        .removeWhere((x) => x['id'] == m['id']),
-                                  ),
-                                );
-                              }
-                            }
-                          },
-                        ),
+                        trailing: remove('记忆', 'memories', m['id']),
                       );
                     }).toList(),
+                  ),
+          ),
+          const SectionTitle('我们的约定'),
+          Panel(
+            child: commitments.isEmpty
+                ? const Text(
+                    '和顾问商定的小行动会记在这里，到回访日顾问会问问进展。',
+                    style: TextStyle(color: muted),
+                  )
+                : Column(
+                    children: commitments.reversed
+                        .map(
+                          (c) => ListTile(
+                            contentPadding: EdgeInsets.zero,
+                            title: Text('${c['text']}'),
+                            subtitle: Text(
+                              [
+                                PreferenceChanges
+                                        .commitmentStatuses[c['status']] ??
+                                    '进行中',
+                                '回访 ${c['checkDate']}',
+                                if (c['note'] != null) '${c['note']}',
+                              ].join(' · '),
+                              style: Theme.of(context).textTheme.bodySmall,
+                            ),
+                            trailing: remove('约定', 'commitments', c['id']),
+                          ),
+                        )
+                        .toList(),
                   ),
           ),
           const SectionTitle('近期消费模式'),
@@ -1354,7 +1427,7 @@ class AgentStatePage extends StatelessWidget {
               if (await confirm(
                 context,
                 '重置顾问记忆？',
-                '清除画像、标签、偏好和记忆。账单、账户、目标与历史对话会保留。',
+                '清除画像、标签、偏好、记忆和约定。账单、账户、目标与历史对话会保留。',
                 action: '重置',
                 destructive: true,
               )) {

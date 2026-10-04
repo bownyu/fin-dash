@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
+import '../agent/prompts.dart';
 import '../app_version.dart';
 import '../services/backup_bundle.dart';
 import 'ota_page.dart';
@@ -1029,6 +1030,9 @@ class GoalsPage extends StatelessWidget {
           ? ''
           : moneyInput(initial!['targetCents']),
     );
+    final motivation = TextEditingController(
+      text: initial?['motivation'] ?? '',
+    );
     var status = initial?['status'] ?? 'active';
     final result = await showDialog<Json>(
       context: context,
@@ -1054,6 +1058,16 @@ class GoalsPage extends StatelessWidget {
                   decoration: const InputDecoration(
                     labelText: '目标金额（可选）',
                     prefixText: '¥ ',
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: motivation,
+                  maxLength: 200,
+                  maxLines: 2,
+                  decoration: const InputDecoration(
+                    labelText: '为什么想实现它？（可选）',
+                    hintText: '想放弃时，顾问会提起它',
                   ),
                 ),
                 const SizedBox(height: 16),
@@ -1097,6 +1111,9 @@ class GoalsPage extends StatelessWidget {
                   'id': initial?['id'] ?? newId(),
                   'description': description.text.trim(),
                   'targetCents': cents,
+                  'motivation': motivation.text.trim().isEmpty
+                      ? null
+                      : motivation.text.trim(),
                   'status': status,
                   'createdAt':
                       initial?['createdAt'] ?? DateTime.now().toIso8601String(),
@@ -1111,6 +1128,7 @@ class GoalsPage extends StatelessWidget {
     );
     description.dispose();
     target.dispose();
+    motivation.dispose();
     if (result != null && context.mounted) {
       await perform(
         context,
@@ -1183,10 +1201,22 @@ class GoalsPage extends StatelessWidget {
                         ),
                       ],
                     ),
-                    if (g['targetCents'] != null)
+                    if (g['targetCents'] != null || g['deadline'] != null)
                       Text(
-                        '目标 ${privateMoney(context, g['targetCents'])}',
+                        [
+                          if (g['targetCents'] != null)
+                            '目标 ${privateMoney(context, g['targetCents'])}',
+                          if (g['deadline'] != null) '期限 ${g['deadline']}',
+                        ].join(' · '),
                         style: const TextStyle(color: muted),
+                      ),
+                    if (g['motivation'] != null)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 6),
+                        child: Text(
+                          '因为：${g['motivation']}',
+                          style: const TextStyle(color: muted, fontSize: 13),
+                        ),
                       ),
                     if (g['aiAssessment'] != null)
                       Padding(
@@ -1780,7 +1810,9 @@ class _PersonaPageState extends State<PersonaPage> {
     name.text = a['name'];
     focus.text = (a['focusAreas'] as List? ?? []).join('、');
     prompt.text = a['customPrompt'] ?? '';
-    tone = a['tone'] ?? 'professional';
+    tone = PromptAssembler.tones.containsKey(a['tone'])
+        ? a['tone']
+        : 'professional';
     baseline = snapshot;
   }
 
@@ -1810,12 +1842,9 @@ class _PersonaPageState extends State<PersonaPage> {
             WalletSelectField<String>(
               initialValue: tone,
               decoration: const InputDecoration(labelText: '交流风格'),
-              items: const [
-                DropdownMenuItem(value: 'professional', child: Text('专业理性')),
-                DropdownMenuItem(value: 'humorous', child: Text('轻松幽默')),
-                DropdownMenuItem(value: 'strict', child: Text('严格督促')),
-                DropdownMenuItem(value: 'encouraging', child: Text('温暖鼓励')),
-                DropdownMenuItem(value: 'roasting', child: Text('毒舌管家')),
+              items: [
+                for (final e in PromptAssembler.tones.entries)
+                  DropdownMenuItem(value: e.key, child: Text(e.value.$1)),
               ],
               onChanged: (v) => tone = v!,
             ),

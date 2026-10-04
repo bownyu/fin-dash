@@ -35,7 +35,7 @@ class CapabilityHost {
           id: name,
           name: name,
           description: PreferenceChanges.tools.contains(name)
-              ? '准备待审阅的信息变更；必须由用户在本地确认后保存'
+              ? '${f['description']}。只准备待审阅的变更，必须由用户在本地确认后保存'
               : f['description'],
           effect:
               name.startsWith('propose_') ||

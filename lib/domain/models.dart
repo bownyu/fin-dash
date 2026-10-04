@@ -44,6 +44,8 @@ String dayKey(DateTime date) =>
 DateTime localDate(dynamic raw) => raw is num
     ? DateTime.fromMillisecondsSinceEpoch(raw.toInt())
     : DateTime.parse('$raw').toLocal();
+String clip(String text, int max) =>
+    text.length > max ? '${text.substring(0, max)}…' : text;
 
 enum TxType { expense, income, transfer }
 
@@ -572,6 +574,7 @@ Json defaultAgent() => {
   'description': '',
   'preferences': <String>[],
   'memories': <Json>[],
+  'commitments': <Json>[],
   'events': <Json>[],
   'dismissedSuggestions': <String>[],
 };

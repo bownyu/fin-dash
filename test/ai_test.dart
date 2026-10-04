@@ -81,6 +81,76 @@ void main() {
     },
   );
   test(
+    'briefing stays within budget and commitments are reviewed before follow-up',
+    () async {
+      final store = await configuredAiStore();
+      final long = '很长的资料' * 100;
+      await store.changeMetadata((d) {
+        d.agent['tone'] = 'encouraging';
+        d.agent['customPrompt'] = long * 4;
+        d.agent['description'] = long;
+        for (final field in ['tags', 'preferences', 'insights', 'focusAreas']) {
+          d.agent[field] = [for (var i = 0; i < 30; i++) '$i$long'];
+        }
+        d.agent['memories'] = [
+          for (var i = 0; i < 50; i++)
+            {'id': 'm$i', 'fact': '$i$long', 'importance': 'core'},
+        ];
+        d.goals.addAll([
+          for (var i = 0; i < 20; i++)
+            {
+              'id': 'g$i',
+              'description': '旅行基金$long',
+              'status': 'active',
+              'motivation': long,
+            },
+        ]);
+      });
+      final today = dayKey(DateTime.now());
+      final prompts = <String>[];
+      final ai = AiService(
+        store,
+        TestVault('key'),
+        clientFactory: () => MockClient((request) async {
+          final body = jsonDecode(request.body);
+          prompts.add(body['messages'][0]['content']);
+          if (prompts.length > 1) return reply({'content': '好的'});
+          return reply({
+            'content': null,
+            'tool_calls': [
+              {
+                'id': 'c',
+                'type': 'function',
+                'function': {
+                  'name': 'set_commitment',
+                  'arguments': jsonEncode({
+                    'text': '本周外卖不超过 3 次',
+                    'check_date': today,
+                  }),
+                },
+              },
+            ],
+          });
+        }),
+      );
+      await ai.send('这周想少点外卖');
+      expect(ai.error, null);
+      expect(prompts.first, allOf(contains('温暖鼓励'), contains('旅行基金')));
+      expect(ai.commitments, isEmpty);
+      final task = ai.tasks.tasks.single;
+      expect(task['preferenceReview']['summary'], contains('约定：本周外卖不超过 3 次'));
+      await ai.tasks.applyPreference(
+        task['id'],
+        task['preferenceReview']['id'],
+      );
+      final id = ai.dueCommitments.single['id'];
+      await ai.send('你好');
+      expect(ai.error, null);
+      expect(prompts.last, contains('"id":"$id","text":"本周外卖不超过 3 次"'));
+      expect(prompts.last, contains('"due":true'));
+    },
+  );
+  test(
     'network error retains user message and retry does not duplicate it',
     () async {
       final store = await configuredAiStore();

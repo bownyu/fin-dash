@@ -288,11 +288,7 @@ class TaskRuntime {
         'args': args,
         'beforeHash': digest(PreferenceChanges.state(d, tool)),
         'before': PreferenceChanges.state(d, tool),
-        'summary':
-            args['fact'] ??
-            args['preference'] ??
-            args['description'] ??
-            '删除或修正已保存的信息',
+        'summary': PreferenceChanges.summary(d, tool, args),
       };
       task['preferenceReview'] = request;
       task['state'] = 'ready';
