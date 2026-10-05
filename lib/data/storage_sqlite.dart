@@ -8,6 +8,8 @@ import '../domain/models.dart';
 import 'backup.dart';
 import 'storage_base.dart';
 import 'ledger_changes.dart';
+import 'sqlite_worker.dart';
+import 'sqlite_rows.dart';
 export 'storage_base.dart';
 
 typedef _Loaded = ({WalletData? data, int revision, String generation});
@@ -26,6 +28,7 @@ typedef _CommitStats = ({int changedRows, int scannedRows});
 /// worker. The UI publishes its candidate only after both durable files commit.
 class LocalWalletStorage
     implements RecordWalletStorage, QueryWalletStorage, RestorePointStorage {
+  static final _worker = SqliteWorker.shared;
   final Directory? directory;
   _Loaded? _loaded;
   int lastChangedRows = 0;
@@ -53,11 +56,7 @@ class LocalWalletStorage
 
   @override
   Future<WalletData?> loadSnapshot() async {
-    final loaded = await compute(
-      _load,
-      await _path,
-      debugLabel: 'wallet-sqlite-load',
-    );
+    final loaded = await _worker.run(_load, await _path);
     _loaded = loaded;
     return loaded.data;
   }
@@ -66,7 +65,7 @@ class LocalWalletStorage
   Future<void> commitSnapshot(WalletData previous, WalletData next) async {
     if (_loaded == null) await loadSnapshot();
     final loaded = _loaded!;
-    final result = await compute(_commit, (
+    final result = await _worker.run(_commit, (
       path: await _path,
       revision: loaded.revision,
       generation: loaded.generation,
@@ -74,7 +73,7 @@ class LocalWalletStorage
       next: next,
       replace: false,
       metadataOnly: false,
-    ), debugLabel: 'wallet-sqlite-commit');
+    ));
     lastChangedRows = result.changedRows;
     lastScannedRows = result.scannedRows;
     _loaded = (
@@ -88,12 +87,13 @@ class LocalWalletStorage
   Future<void> commitChanges(LedgerChangeSet changes) async {
     if (_loaded == null) await loadSnapshot();
     final loaded = _loaded!;
-    final result = await compute(_commitRecords, (
+    final result = await _worker.run(_commitRecords, (
       await _path,
       loaded.revision,
       loaded.generation,
-      changes,
-    ), debugLabel: 'wallet-record-commit');
+      _financialChanges(changes),
+      MetadataDelta.between(changes.previous, changes.next),
+    ));
     lastChangedRows = result.changedRows;
     lastScannedRows = result.scannedRows;
     _loaded = (
@@ -106,12 +106,12 @@ class LocalWalletStorage
   @override
   Future<Json> queryRecords(Json request) async {
     if (_loaded == null) await loadSnapshot();
-    return compute(_queryRecords, (
+    return _worker.run(_queryRecords, (
       await _path,
       _loaded!.revision,
       _loaded!.generation,
       request,
-    ), debugLabel: 'wallet-record-query');
+    ));
   }
 
   @override
@@ -126,15 +126,13 @@ class LocalWalletStorage
     final loaded = _loaded!;
     // Bootstrap must include default categories and any initial financial data.
     if (loaded.revision == 0) return commitSnapshot(previous, next);
-    final result = await compute(_commit, (
-      path: await _path,
-      revision: loaded.revision,
-      generation: loaded.generation,
-      previous: _metadataSnapshot(previous),
-      next: _metadataSnapshot(next),
-      replace: false,
-      metadataOnly: true,
-    ), debugLabel: 'wallet-sqlite-metadata');
+    final result = await _worker.run(_commitRecords, (
+      await _path,
+      loaded.revision,
+      loaded.generation,
+      _emptyChanges(),
+      MetadataDelta.between(previous, next),
+    ));
     lastChangedRows = result.changedRows;
     lastScannedRows = result.scannedRows;
     _loaded = (
@@ -151,15 +149,12 @@ class LocalWalletStorage
       try {
         await loadSnapshot();
       } catch (_) {
-        _loaded = await compute(_restoreDamaged, (
-          path,
-          next,
-        ), debugLabel: 'wallet-sqlite-restore');
+        _loaded = await _worker.run(_restoreDamaged, (path, next));
         return;
       }
     }
     final loaded = _loaded!;
-    final result = await compute(_commit, (
+    final result = await _worker.run(_commit, (
       path: path,
       revision: loaded.revision,
       generation: loaded.generation,
@@ -167,7 +162,7 @@ class LocalWalletStorage
       next: next,
       replace: true,
       metadataOnly: false,
-    ), debugLabel: 'wallet-sqlite-restore');
+    ));
     lastChangedRows = result.changedRows;
     lastScannedRows = result.scannedRows;
     _loaded = (
@@ -181,12 +176,12 @@ class LocalWalletStorage
   @override
   Future<String?> load() async {
     final data = await loadSnapshot();
-    return data == null ? null : compute(_export, data);
+    return data == null ? null : _worker.run(_export, data);
   }
 
   @override
   Future<void> save(String data) async =>
-      replaceSnapshot(await compute(_import, data));
+      replaceSnapshot(await _worker.run(_import, data));
 }
 
 // No financial references enter the isolate message graph on a metadata write.
@@ -200,12 +195,18 @@ WalletData _metadataSnapshot(WalletMetadata metadata) => WalletData(
 String _export(WalletData data) => jsonEncode(data.toJson());
 WalletData _import(String raw) => parseBackup(raw).data;
 
+final _initializedPaths = <String>{};
 Database _open(String path) {
   final db = sqlite3.open(path);
   try {
     db.execute('PRAGMA busy_timeout = 5000');
     final version = db.select('PRAGMA user_version').first.values.first as int;
     if (version > 1) throw UnsupportedError('数据库版本较新，请更新应用');
+    if (_initializedPaths.contains(path) &&
+        db
+            .select("SELECT name FROM sqlite_master WHERE name='wallet_rows'")
+            .isNotEmpty)
+      return db;
     db.execute('PRAGMA journal_mode = DELETE');
     db.execute('PRAGMA synchronous = FULL');
     db.execute(
@@ -233,6 +234,7 @@ Database _open(String path) {
       );
     }
     db.execute('PRAGMA user_version = 1');
+    _initializedPaths.add(path);
     return db;
   } catch (_) {
     db.close();
@@ -255,7 +257,7 @@ void _setMeta(Database db, String key, String value, String schema) =>
 String _checksum(String bucket, String id, String kind, String body) => sha256
     .convert(utf8.encode(jsonEncode([bucket, id, kind, body])))
     .toString();
-String _childBucket(String parent, String key) => jsonEncode([parent, key]);
+String _childBucket(String parent, String key) => childBucket(parent, key);
 
 _Loaded _read(Database db) {
   if (db.select('PRAGMA quick_check').any((r) => r.values.first != 'ok')) {
@@ -478,8 +480,8 @@ const _mapFields = [
   'providerConfigs',
   'extras',
 ];
-typedef _Key = (String, String);
-typedef _Entry = ({Object? value, String kind});
+typedef _Key = RowKey;
+typedef _Entry = RowEntry;
 
 Object? _json(Object? value) => switch (value) {
   WalletAccount v => v.toJson(),
@@ -510,56 +512,32 @@ bool _same(Object? a, Object? b) {
   return a == b;
 }
 
-Map<_Key, _Entry> _rows(WalletData data) {
-  final result = <_Key, _Entry>{};
-  void list(String bucket, List values) {
-    final used = <String>{};
-    for (var i = 0; i < values.length; i++) {
-      final item = values[i];
-      final String? rawId = switch (item) {
-        WalletAccount v => v.id,
-        LedgerTx v => v.id,
-        WalletCategory v => v.id,
-        QuickEntry v => v.id,
-        Map v =>
-          (v['id'] ?? v['eventId']) is String
-              ? (v['id'] ?? v['eventId']) as String
-              : null,
-        _ => null,
-      };
-      var id = rawId == null ? 'index:$i' : 'id:$rawId';
-      if (!used.add(id)) {
-        id = 'duplicate:$i';
-        used.add(id);
-      }
-      result[(bucket, id)] = (value: item, kind: 'value');
-    }
-  }
-
-  list('accounts', data.accounts);
-  list('transactions', data.transactions);
-  list('categories', data.categories);
-  list('quickEntries', data.quickEntries);
-  list('goals', data.goals);
-  list('chats', data.chats);
-  for (final (name, map) in [
-    ('profile', data.profile),
-    ('settings', data.settings),
-    ('agent', data.agent),
-    ('providerConfigs', data.providerConfigs),
-    ('extras', data.extras),
-  ]) {
-    for (final entry in map.entries) {
-      if (entry.value is List) {
-        result[(name, entry.key)] = (value: null, kind: 'list');
-        list(_childBucket(name, entry.key), entry.value);
-      } else {
-        result[(name, entry.key)] = (value: entry.value, kind: 'value');
-      }
-    }
-  }
-  return result;
-}
+Map<_Key, _Entry> _rows(WalletData data) => walletRows(data);
+WalletData _financialSnapshot(WalletData d) => WalletData(
+  accounts: d.accounts,
+  transactions: d.transactions,
+  categories: d.categories,
+  quickEntries: d.quickEntries,
+  profile: {},
+  settings: {},
+  agent: {},
+);
+LedgerChangeSet _financialChanges(LedgerChangeSet c) => LedgerChangeSet(
+  _financialSnapshot(c.previous),
+  _financialSnapshot(c.next),
+  movedTransactionIds: c.movedTransactionIds,
+  movedAccountIds: c.movedAccountIds,
+  movedCategoryIds: c.movedCategoryIds,
+  movedQuickIds: c.movedQuickIds,
+);
+LedgerChangeSet _emptyChanges() => LedgerChangeSet(
+  WalletData(categories: []),
+  WalletData(categories: []),
+  movedTransactionIds: {},
+  movedAccountIds: {},
+  movedCategoryIds: {},
+  movedQuickIds: {},
+);
 
 void _validateChange(_Commit request) {
   final next = request.next, previous = request.previous;
@@ -810,10 +788,17 @@ Json _queryRecords((String, int, String, Json) request) {
   }
 }
 
-_CommitStats _commitRecords((String, int, String, LedgerChangeSet) request) {
-  final (path, revision, generation, changes) = request;
+_CommitStats _commitRecords(
+  (String, int, String, LedgerChangeSet, MetadataDelta) request,
+) {
+  final (path, revision, generation, changes, metadata) = request;
   if (revision == 0) throw StateError('记录提交需要已初始化的账本');
-  final previous = _rows(changes.previous), next = _rows(changes.next);
+  final previous = walletRows(changes.previous, metadata: false),
+      next = walletRows(changes.next, metadata: false);
+  for (final key in metadata.deletes) {
+    previous[key] = (value: null, kind: 'removed');
+  }
+  next.addAll(metadata.upserts);
   const financial = {'accounts', 'transactions', 'categories', 'quickEntries'};
   final moved = {
     'accounts': changes.movedAccountIds,
@@ -822,7 +807,7 @@ _CommitStats _commitRecords((String, int, String, LedgerChangeSet) request) {
     'quickEntries': changes.movedQuickIds,
   };
   final db = _open(path);
-  var scanned = previous.length + next.length, changed = 0;
+  var scanned = previous.length + next.length + metadata.scanned, changed = 0;
   try {
     db.execute('ATTACH DATABASE ? AS recovery', ['$path.bak']);
     db.execute('PRAGMA recovery.journal_mode = DELETE');
@@ -840,6 +825,7 @@ _CommitStats _commitRecords((String, int, String, LedgerChangeSet) request) {
       for (final bucket in {
         ...previous.keys.map((k) => k.$1),
         ...next.keys.map((k) => k.$1),
+        ...metadata.orderedIds.keys,
       }) {
         if (financial.contains(bucket)) {
           maxima[bucket] =
@@ -938,8 +924,13 @@ _CommitStats _commitRecords((String, int, String, LedgerChangeSet) request) {
         }
       }
       final ranks = <_Key, int>{};
-      for (final bucket in next.keys.map((k) => k.$1).toSet()) {
-        final keys = next.keys.where((k) => k.$1 == bucket).toList();
+      for (final bucket in {
+        ...next.keys.map((k) => k.$1),
+        ...metadata.orderedIds.keys,
+      }) {
+        final keys = metadata.orderedIds.containsKey(bucket)
+            ? metadata.orderedIds[bucket]!.map((id) => (bucket, id)).toList()
+            : next.keys.where((k) => k.$1 == bucket).toList();
         var maximum =
             maxima[bucket] ??
             positions.entries
@@ -991,6 +982,20 @@ _CommitStats _commitRecords((String, int, String, LedgerChangeSet) request) {
               body,
               _checksum(key.$1, key.$2, value.kind, body),
             ],
+          );
+        }
+        changed++;
+      }
+      // Rank-only changes keep the existing body and checksum.
+      for (final entry in ranks.entries) {
+        if (financial.contains(entry.key.$1) ||
+            next.containsKey(entry.key) ||
+            positions[entry.key] == entry.value)
+          continue;
+        for (final schema in ['main', 'recovery']) {
+          db.execute(
+            'UPDATE $schema.wallet_rows SET position=? WHERE bucket=? AND id=?',
+            [entry.value, entry.key.$1, entry.key.$2],
           );
         }
         changed++;
