@@ -68,33 +68,62 @@ class TaskRuntime {
     String? sessionId,
   }) async {
     final id = taskId ?? newId();
-    await store.changeMetadata((d) {
-      final list = (d.extras['tasks'] as List? ?? [])
-          .map((v) => Json.from(v))
-          .toList();
-      final existing = list.where((t) => t['id'] == id).firstOrNull;
-      if (existing != null) {
-        _epoch(existing, store.ledgerEpoch);
-        if (['completed', 'cancelled'].contains(existing['state'])) {
-          throw const FormatException('任务已结束，请开始新任务');
-        }
-        existing['state'] = TaskState.preparing.name;
-      } else {
-        list.add({
-          'id': id,
-          'goal': goal,
-          'source': source,
-          'sessionId': sessionId,
-          'ledgerEpoch': store.ledgerEpoch,
-          'state': TaskState.preparing.name,
-          'attempts': 0,
-          'toolCalls': 0,
-          'createdAt': DateTime.now().toIso8601String(),
-        });
-      }
-      d.extras['tasks'] = list;
-    });
+    await store.changeMetadata(
+      (d) => startOn(
+        d,
+        goal,
+        id: id,
+        epoch: store.ledgerEpoch,
+        source: source,
+        sessionId: sessionId,
+      ),
+    );
     return id;
+  }
+
+  static void startOn(
+    WalletMetadata d,
+    String goal, {
+    required String id,
+    required String epoch,
+    String source = 'chat',
+    String? sessionId,
+  }) {
+    final list = (d.extras['tasks'] as List? ?? []);
+    final existing = list.where((t) => t['id'] == id).firstOrNull;
+    if (existing != null) {
+      _epoch(existing, epoch);
+      if (['completed', 'cancelled'].contains(existing['state'])) {
+        throw const FormatException('任务已结束，请开始新任务');
+      }
+      existing['state'] = TaskState.preparing.name;
+    } else {
+      list.add({
+        'id': id,
+        'goal': goal,
+        'source': source,
+        'sessionId': sessionId,
+        'ledgerEpoch': epoch,
+        'state': TaskState.preparing.name,
+        'attempts': 0,
+        'toolCalls': 0,
+        'createdAt': DateTime.now().toIso8601String(),
+      });
+    }
+    d.extras['tasks'] = list;
+  }
+
+  final _counts = <String, Map<String, int>>{};
+  // A crash can lose at most the current round's counters. Limits are enforced
+  // in memory and checkpointed with that round, without a commit per tool.
+  void flushCounts(WalletMetadata d, String id) {
+    final counts = _counts[id];
+    if (counts == null) return;
+    final task = (d.extras['tasks'] as List).firstWhere((t) => t['id'] == id);
+    _epoch(Json.from(task), store.ledgerEpoch);
+    for (final entry in counts.entries) {
+      task[entry.key] = entry.value;
+    }
   }
 
   static void _epoch(Json task, String epoch) {
@@ -109,9 +138,8 @@ class TaskRuntime {
 
   Future<void> checkpoint(String id, TaskState state, {String? resultRef}) =>
       store.changeMetadata((d) {
-        final list = (d.extras['tasks'] as List? ?? [])
-            .map((v) => Json.from(v))
-            .toList();
+        flushCounts(d, id);
+        final list = (d.extras['tasks'] as List? ?? []);
         final task = list.firstWhere((t) => t['id'] == id);
         _epoch(task, store.ledgerEpoch);
         if (['completed', 'cancelled'].contains(task['state'])) return;
@@ -120,33 +148,31 @@ class TaskRuntime {
         d.extras['tasks'] = list;
       });
 
-  Future<void> consume(String id, {bool modelRound = false}) =>
-      store.changeMetadata((d) {
-        final list = (d.extras['tasks'] as List? ?? [])
-            .map((v) => Json.from(v))
-            .toList();
-        final task = list.firstWhere((t) => t['id'] == id);
-        _epoch(task, store.ledgerEpoch);
-        if (task['state'] != 'preparing') {
-          throw const ErrorEnvelope(ErrorCode.interrupted, '任务正在等待用户或已经停止');
-        }
-        final key = modelRound ? 'attempts' : 'toolCalls';
-        final next = (task[key] as int? ?? 0) + 1;
-        if (next > (modelRound ? 12 : 40)) {
-          throw const ErrorEnvelope(
-            ErrorCode.limitExceeded,
-            '本次处理已达到上限，请在任务页选择继续',
-            phase: 'task',
-          );
-        }
-        task[key] = next;
-        d.extras['tasks'] = list;
-      });
+  Future<void> consume(String id, {bool modelRound = false}) async {
+    final task = get(id);
+    _epoch(task, store.ledgerEpoch);
+    if (task['state'] != 'preparing')
+      throw const ErrorEnvelope(ErrorCode.interrupted, '任务正在等待用户或已经停止');
+    final counts = _counts.putIfAbsent(
+      id,
+      () => {
+        'attempts': task['attempts'] as int? ?? 0,
+        'toolCalls': task['toolCalls'] as int? ?? 0,
+      },
+    );
+    final key = modelRound ? 'attempts' : 'toolCalls';
+    final next = counts[key]! + 1;
+    if (next > (modelRound ? 12 : 40))
+      throw const ErrorEnvelope(
+        ErrorCode.limitExceeded,
+        '本次处理已达到上限，请在任务页选择继续',
+        phase: 'task',
+      );
+    counts[key] = next;
+  }
 
   Future<void> continueTask(String id) => store.changeMetadata((d) {
-    final tasks = (d.extras['tasks'] as List? ?? [])
-        .map((v) => Json.from(v))
-        .toList();
+    final tasks = (d.extras['tasks'] as List? ?? []);
     final task = tasks.firstWhere((t) => t['id'] == id);
     _epoch(task, store.ledgerEpoch);
     if (['completed', 'cancelled'].contains(task['state'])) {
@@ -154,6 +180,7 @@ class TaskRuntime {
     }
     task['totalAttempts'] =
         (task['totalAttempts'] as int? ?? 0) + (task['attempts'] as int? ?? 0);
+    _counts.remove(id);
     task['attempts'] = 0;
     task['toolCalls'] = 0;
     task['recipeFailures'] = 0;
@@ -188,9 +215,7 @@ class TaskRuntime {
     }
     Json? result;
     await store.changeMetadata((d) {
-      final list = (d.extras['tasks'] as List? ?? [])
-          .map((v) => Json.from(v))
-          .toList();
+      final list = (d.extras['tasks'] as List? ?? []);
       final task = list.firstWhere((t) => t['id'] == taskId);
       _epoch(task, store.ledgerEpoch);
       final previous = task['interaction'] as Map?;
@@ -232,9 +257,7 @@ class TaskRuntime {
   ) async {
     Json? answer;
     await store.changeMetadata((d) {
-      final list = (d.extras['tasks'] as List? ?? [])
-          .map((v) => Json.from(v))
-          .toList();
+      final list = (d.extras['tasks'] as List? ?? []);
       final task = list.firstWhere((t) => t['id'] == taskId);
       _epoch(task, store.ledgerEpoch);
       final interaction = task['interaction'];

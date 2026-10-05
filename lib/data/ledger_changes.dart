@@ -128,7 +128,7 @@ class LedgerChangeSet {
     required this.movedQuickIds,
   });
   static WalletData draft(WalletData current) =>
-      current.withMetadata(current.cloneMetadata())
+      current.withMetadata(current.draftMetadata())
         ..accounts = LedgerList(current.accounts, (a) => a.id)
         ..transactions = LedgerList(current.transactions, (t) => t.id)
         ..categories = LedgerList(current.categories, (c) => c.id)
@@ -146,12 +146,12 @@ class LedgerChangeSet {
         t = next.transactions as LedgerList<LedgerTx>,
         c = next.categories as LedgerList<WalletCategory>,
         q = next.quickEntries as LedgerList<QuickEntry>;
-    final old = previous.withMetadata(previous.cloneMetadata())
+    final old = previous.withMetadata(previous)
       ..accounts = a.before.values.toList()
       ..transactions = t.before.values.toList()
       ..categories = c.before.values.toList()
       ..quickEntries = q.before.values.toList();
-    final fresh = next.withMetadata(next.cloneMetadata())
+    final fresh = next.withMetadata(next)
       ..accounts = a.after.values.toList()
       ..transactions = t.after.values.toList()
       ..categories = c.after.values.toList()

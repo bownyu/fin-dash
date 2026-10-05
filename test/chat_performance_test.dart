@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:fin_dash/domain/command_context.dart';
 import 'package:fin_dash/services/ai_service.dart';
 import 'package:fin_dash/ui/ai_pages.dart';
@@ -14,6 +15,50 @@ import 'agent_chat_interaction_test.dart' show chatHarness;
 import 'ai_streaming_test.dart' show StreamingClient, event, chunk;
 
 void main() {
+  test(
+    'two rounds and three read tools persist counters with checkpoints',
+    () async {
+      final store = await configuredAiStore();
+      var commits = 0, rounds = 0;
+      store.addListener(() => commits++);
+      final ai = AiService(
+        store,
+        TestVault('key'),
+        clientFactory: () => MockClient(
+          (_) async => http.Response(
+            jsonEncode({
+              'choices': [
+                {
+                  'message': rounds++ == 0
+                      ? {
+                          'tool_calls': [
+                            for (var i = 0; i < 3; i++)
+                              {
+                                'id': 'read-$i',
+                                'type': 'function',
+                                'function': {
+                                  'name': 'get_accounts_overview',
+                                  'arguments': '{}',
+                                },
+                              },
+                          ],
+                        }
+                            : {'content': 'done'},
+                },
+              ],
+            }),
+            200,
+          ),
+        ),
+      );
+      await ai.send('看看账户');
+      expect(ai.error, null);
+      expect(rounds, 2);
+      expect(commits, 3);
+      expect(ai.tasks.tasks.single['attempts'], 2);
+      expect(ai.tasks.tasks.single['toolCalls'], 3);
+    },
+  );
   testWidgets(
     'AI writes leave retained tabs and status leaves messages intact',
     (tester) async {

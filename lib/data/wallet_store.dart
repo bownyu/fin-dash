@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'dart:math';
 import 'package:flutter/foundation.dart';
 import '../domain/models.dart';
+import '../domain/cow_json.dart';
 import '../domain/ledger_operations.dart';
 import '../domain/command_context.dart';
 import 'backup.dart';
@@ -111,7 +112,7 @@ class WalletStore extends ChangeNotifier {
 
   Future<void> changeMetadata(void Function(WalletMetadata) mutate) =>
       _commit((current) {
-        final next = current.cloneMetadata();
+        final next = current.draftMetadata();
         mutate(next);
         return current.withMetadata(next);
       }, metadataOnly: true);
@@ -123,9 +124,12 @@ class WalletStore extends ChangeNotifier {
     final work = _tail.then((_) async {
       if (startupError != null) throw StateError('请先恢复账本');
       final next = prepare(_data);
+      next.materializeMetadata(previous: _data);
       if (_financialChange(_data, next)) {
         LedgerOperations.ensureUnlocked(_data);
-        next.extras['ledgerRevision'] = _ledgerRevision + 1;
+        next.extras = CowMap(next.extras as FrozenMap)
+          ..['ledgerRevision'] = _ledgerRevision + 1;
+        next.materializeMetadata(previous: _data);
       }
       final backend = storage;
       final changes = metadataOnly ? null : LedgerChangeSet.from(_data, next);
@@ -147,47 +151,40 @@ class WalletStore extends ChangeNotifier {
   }
 
   void _publish(WalletData next) {
+    next.materializeMetadata(previous: _data);
     final ledgerChanged = _financialChange(_data, next);
     final previous = _data;
     if (ledgerChanged) _ledgerRevision++;
     next.freeze(previous: previous);
     _data = next;
     for (final domain in WalletDomain.values) {
-      // Runs on the UI isolate for every commit; hashing the full chat history
-      // here stalled frames while the assistant was saving each step.
-      bool changedJson(Object? a, Object? b) => !jsonEquals(a, b);
-      Json select(WalletData d, List<String> keys) => {
-        for (final k in keys) k: d.extras[k],
-      };
+      bool extrasChanged(List<String> keys) =>
+          keys.any((k) => !identical(previous.extras[k], next.extras[k]));
       final changed = switch (domain) {
         WalletDomain.ledger => ledgerChanged,
         WalletDomain.conversations =>
-          changedJson(previous.chats, next.chats) ||
-              changedJson(
-                select(previous, [
-                  'chatSessions',
-                  'activeChatSessionId',
-                  'chatDrafts',
-                ]),
-                select(next, [
-                  'chatSessions',
-                  'activeChatSessionId',
-                  'chatDrafts',
-                ]),
-              ),
+          !identical(previous.chats, next.chats) ||
+              extrasChanged([
+                'chatSessions',
+                'activeChatSessionId',
+                'chatDrafts',
+              ]),
         WalletDomain.preferences =>
-          changedJson(previous.settings, next.settings) ||
-              changedJson(previous.profile, next.profile) ||
-              changedJson(previous.providerConfigs, next.providerConfigs),
-        WalletDomain.memory => changedJson(previous.agent, next.agent),
-        WalletDomain.tasks => changedJson(
-          select(previous, ['tasks', 'agentActions', 'agentActionBatches']),
-          select(next, ['tasks', 'agentActions', 'agentActionBatches']),
-        ),
-        WalletDomain.sources => changedJson(
-          select(previous, ['paymentNotifications', 'paymentReminderSeen']),
-          select(next, ['paymentNotifications', 'paymentReminderSeen']),
-        ),
+          !identical(previous.settings, next.settings) ||
+              !identical(previous.profile, next.profile) ||
+              !identical(previous.providerConfigs, next.providerConfigs),
+        WalletDomain.memory => !identical(previous.agent, next.agent),
+        WalletDomain.tasks => extrasChanged([
+          'tasks',
+          'agentActions',
+          'agentActionBatches',
+          'voiceDrafts',
+          'savedAnalyses',
+        ]),
+        WalletDomain.sources => extrasChanged([
+          'paymentNotifications',
+          'paymentReminderSeen',
+        ]),
       };
       if (changed) domainUpdates[domain]!.notifyListeners();
     }
@@ -202,7 +199,7 @@ class WalletStore extends ChangeNotifier {
         changed(previous.categories, next.categories) ||
         changed(previous.quickEntries, next.quickEntries) ||
         previous.settings['budget'] != next.settings['budget'] ||
-        !jsonEquals(previous.goals, next.goals);
+        !identical(previous.goals, next.goals);
   }
 
   /// A synchronous unit of work: no network or user wait can hold this queue.
@@ -216,9 +213,7 @@ class WalletStore extends ChangeNotifier {
       if (context.ledgerEpoch != ledgerEpoch) {
         throw const FormatException('账本已恢复，请重新审阅');
       }
-      final receipts = (d.extras['operationReceipts'] as List? ?? [])
-          .map((r) => Json.from(r))
-          .toList();
+      final receipts = (d.extras['operationReceipts'] as List? ?? []);
       final existing = receipts
           .where((r) => r['operationId'] == context.operationId)
           .firstOrNull;
@@ -226,7 +221,7 @@ class WalletStore extends ChangeNotifier {
         if (existing['payloadHash'] != context.payloadHash) {
           throw const FormatException('操作 ID 已用于不同内容');
         }
-        receipt = existing;
+        receipt = Json.from(existing);
         return;
       }
       for (final expected in context.expectedRecords.entries) {

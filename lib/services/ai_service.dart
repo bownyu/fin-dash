@@ -393,6 +393,8 @@ class AiService {
       } else {
         d.chats[index] = snapshot;
       }
+      if (snapshot['taskId'] is String)
+        tasks.flushCounts(d, snapshot['taskId']);
       AgentActions.syncRun(d, snapshot);
       for (final task in d.extras['tasks'] as List? ?? []) {
         if (task['id'] != snapshot['taskId'] ||
@@ -446,11 +448,7 @@ class AiService {
       if (attachment != null && settings['supportsImages'] != true) {
         throw const FormatException('请在 AI 设置中选择支持图片的模型并启用图片输入');
       }
-      _taskId = await tasks.start(
-        prompt.trim(),
-        taskId: _taskId,
-        sessionId: sessionId,
-      );
+      _taskId ??= newId();
       key = await vault.read(requestProvider) ?? '';
       if (generation != _generation) return;
       if (key.trim().isEmpty) {
@@ -468,8 +466,15 @@ class AiService {
           await images.save(imageId, attachment.bytes);
           if (generation != _generation) return;
         }
-        await store.changeMetadata(
-          (d) => d.chats.add({
+        await store.changeMetadata((d) {
+          TaskRuntime.startOn(
+            d,
+            prompt.trim(),
+            id: _taskId!,
+            epoch: store.ledgerEpoch,
+            sessionId: sessionId,
+          );
+          d.chats.add({
             'id': _imageMessageId,
             'role': 'user',
             'content': prompt.trim(),
@@ -478,8 +483,10 @@ class AiService {
             'imageId': ?imageId,
             if (attachment != null) 'imageMimeType': attachment.mimeType,
             'timestamp': DateTime.now().millisecondsSinceEpoch,
-          }),
-        );
+          });
+        });
+      } else {
+        await tasks.start(prompt.trim(), taskId: _taskId, sessionId: sessionId);
       }
       _lastPromptStored = true;
       if (generation != _generation) return;
@@ -517,10 +524,11 @@ class AiService {
       if (previous != null) {
         run['batchIds'] = List.from(previous['batchIds'] as List? ?? []);
       }
-      for (final id in {run['id'], ...run['batchIds'] as List? ?? []}) {
-        await actions.setGeneration(id, 'preparing');
-        if (generation != _generation) return;
-      }
+      await actions.setGenerations({
+        run['id'] as String,
+        ...List<String>.from(run['batchIds'] as List? ?? []),
+      }, 'preparing');
+      if (generation != _generation) return;
       var resumedRounds = 0;
       if (previous != null && previous['contextKey'] == run['contextKey']) {
         final checkpoint = List<Json>.from(

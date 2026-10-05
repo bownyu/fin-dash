@@ -1,4 +1,5 @@
 import 'dart:math';
+import 'cow_json.dart';
 
 typedef Json = Map<String, dynamic>;
 String newId() =>
@@ -397,17 +398,33 @@ class WalletMetadata {
        _goals = goals ?? [],
        _chats = chats ?? [];
 
+  void materializeMetadata({WalletMetadata? previous}) {
+    _profile = freezeValue(_profile, previous: previous?.profile) as Json;
+    _settings = freezeValue(_settings, previous: previous?.settings) as Json;
+    _agent = freezeValue(_agent, previous: previous?.agent) as Json;
+    _providerConfigs =
+        freezeValue(_providerConfigs, previous: previous?.providerConfigs)
+            as Json;
+    _extras = freezeValue(_extras, previous: previous?.extras) as Json;
+    _goals = freezeList<Json>(_goals, previous: previous?.goals);
+    _chats = freezeList<Json>(_chats, previous: previous?.chats);
+  }
+
   void freezeMetadata() {
     if (_frozen) return;
-    _profile = _freezeJson(_profile);
-    _settings = _freezeJson(_settings);
-    _agent = _freezeJson(_agent);
-    _providerConfigs = _freezeJson(_providerConfigs);
-    _extras = _freezeJson(_extras);
-    _goals = List.unmodifiable(_goals.map(_freezeJson));
-    _chats = List.unmodifiable(_chats.map(_freezeJson));
+    materializeMetadata();
     _frozen = true;
   }
+
+  WalletMetadata draftMetadata() => WalletMetadata(
+    profile: CowMap(freezeValue(profile) as FrozenMap),
+    settings: CowMap(freezeValue(settings) as FrozenMap),
+    agent: CowMap(freezeValue(agent) as FrozenMap),
+    providerConfigs: CowMap(freezeValue(providerConfigs) as FrozenMap),
+    extras: CowMap(freezeValue(extras) as FrozenMap),
+    goals: CowList<Json>(freezeList<Json>(goals)),
+    chats: CowList<Json>(freezeList<Json>(chats)),
+  );
 
   WalletMetadata cloneMetadata() => WalletMetadata(
     profile: _copyJson(profile),
@@ -536,19 +553,29 @@ class WalletData extends WalletMetadata {
   /// Domain records contain only final scalar/immutable fields. Share those
   /// records, copy their lists, and recursively detach all mutable JSON trees.
   /// Avoid allocating and parsing a second full ledger-sized JSON string.
-  WalletData clone() => WalletData(
-    accounts: List.of(accounts),
-    transactions: List.of(transactions),
-    categories: List.of(categories),
-    quickEntries: List.of(quickEntries),
-    profile: _copyJson(profile),
-    settings: _copyJson(settings),
-    agent: _copyJson(agent),
-    providerConfigs: _copyJson(providerConfigs),
-    extras: _copyJson(extras),
-    goals: goals.map(_copyJson).toList(),
-    chats: chats.map(_copyJson).toList(),
-  );
+  WalletData clone() {
+    if (chats is FrozenList || chats is CowList) {
+      return WalletData(
+        accounts: List.of(accounts),
+        transactions: List.of(transactions),
+        categories: List.of(categories),
+        quickEntries: List.of(quickEntries),
+      ).withMetadata(draftMetadata());
+    }
+    return WalletData(
+      accounts: List.of(accounts),
+      transactions: List.of(transactions),
+      categories: List.of(categories),
+      quickEntries: List.of(quickEntries),
+      profile: _copyJson(profile),
+      settings: _copyJson(settings),
+      agent: _copyJson(agent),
+      providerConfigs: _copyJson(providerConfigs),
+      extras: _copyJson(extras),
+      goals: goals.map(_copyJson).toList(),
+      chats: chats.map(_copyJson).toList(),
+    );
+  }
 }
 
 Json _copyJson(Json value) => {
@@ -665,11 +692,3 @@ const accountPresets = <String, List<(String, String, String)>>{
     ('other_investment', '其它理财', 'more_horiz'),
   ],
 };
-Json _freezeJson(Json value) => Map.unmodifiable({
-  for (final entry in value.entries) entry.key: _freezeValue(entry.value),
-});
-dynamic _freezeValue(dynamic value) {
-  if (value is Map) return _freezeJson(Json.from(value));
-  if (value is List) return List.unmodifiable(value.map(_freezeValue));
-  return value;
-}
