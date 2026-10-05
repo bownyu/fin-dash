@@ -183,8 +183,9 @@ dynamic freezeValue(dynamic value, {dynamic previous}) {
         ? freezeList<Map<String, dynamic>>(value, previous: previous)
         : freezeList<dynamic>(value, previous: previous);
   }
-  if (value == null || value is String || value is num || value is bool)
-    return value;
+  if (value == null || value is String || value is num || value is bool) {
+    return value == previous ? previous : value;
+  }
   throw const FormatException('账本包含不支持的数据类型');
 }
 

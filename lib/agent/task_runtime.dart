@@ -2,6 +2,7 @@ import '../data/wallet_store.dart';
 import '../application/preference_changes.dart';
 import '../domain/command_context.dart';
 import '../domain/models.dart';
+import '../domain/history_retention.dart';
 import '../domain/query_contracts.dart';
 
 enum TaskState {
@@ -111,9 +112,20 @@ class TaskRuntime {
       });
     }
     d.extras['tasks'] = list;
+    pruneTasks(d);
   }
 
   final _counts = <String, Map<String, int>>{};
+  void committed() {
+    final current = {for (final task in tasks) task['id']: task};
+    _counts.removeWhere(
+      (id, _) =>
+          current[id] == null ||
+          current[id]!['ledgerEpoch'] != store.ledgerEpoch ||
+          !['preparing', 'applying'].contains(current[id]!['state']),
+    );
+  }
+
   // A crash can lose at most the current round's counters. Limits are enforced
   // in memory and checkpointed with that round, without a commit per tool.
   void flushCounts(WalletMetadata d, String id) {
@@ -146,6 +158,7 @@ class TaskRuntime {
         task['state'] = state.name;
         if (resultRef != null) task['resultRef'] = resultRef;
         d.extras['tasks'] = list;
+        pruneTasks(d);
       });
 
   Future<void> consume(String id, {bool modelRound = false}) async {
@@ -186,6 +199,7 @@ class TaskRuntime {
     task['recipeFailures'] = 0;
     task['state'] = 'preparing';
     d.extras['tasks'] = tasks;
+    pruneTasks(d);
   });
 
   Future<Json> request(String taskId, Json input) async {
@@ -245,6 +259,7 @@ class TaskRuntime {
       task['interaction'] = result;
       task['state'] = 'needsInput';
       d.extras['tasks'] = list;
+      pruneTasks(d);
     });
     return {'ok': true, 'status': 'needsInput', 'interaction': result};
   }
@@ -292,6 +307,7 @@ class TaskRuntime {
       task['interaction'] = null;
       task['state'] = 'preparing';
       d.extras['tasks'] = list;
+      pruneTasks(d);
     });
     return answer!;
   }
@@ -349,6 +365,7 @@ class TaskRuntime {
       'createdAt': DateTime.now().toIso8601String(),
     };
     task['state'] = 'completed';
+    pruneTasks(d);
   });
 
   Future<void> undoPreference(String taskId, String reviewId) =>

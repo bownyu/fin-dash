@@ -35,6 +35,11 @@ abstract interface class QueryWalletStorage {
   Future<Json> queryRecords(Json request);
 }
 
+abstract interface class MirrorWalletStorage {
+  String? get recoveryNotice;
+  Future<void> flushMirror();
+}
+
 String seal(String payload) => jsonEncode({
   'payload': payload,
   'checksum': sha256.convert(utf8.encode(payload)).toString(),

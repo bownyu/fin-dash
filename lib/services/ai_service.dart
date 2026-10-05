@@ -7,6 +7,7 @@ import 'package:http/http.dart' as http;
 import '../data/wallet_store.dart';
 import '../data/storage_base.dart';
 import '../domain/models.dart';
+import '../domain/history_retention.dart';
 import '../domain/query_contracts.dart';
 import '../agent/task_runtime.dart';
 import '../agent/capability_host.dart';
@@ -382,9 +383,15 @@ class AiService {
     });
   }
 
-  Future<void> _saveRun(Json run) {
-    final snapshot = Json.from(jsonDecode(jsonEncode(run)));
-    return store.changeMetadata((d) {
+  Future<void> _saveRun(Json run) async {
+    final persistent = Json.from(run)
+      ..remove(
+        run['protocol'] == responsesProtocol
+            ? 'modelMessages'
+            : 'responseItems',
+      );
+    final snapshot = Json.from(jsonDecode(jsonEncode(persistent)));
+    await store.changeMetadata((d) {
       final cutoff = DateTime.now().subtract(const Duration(days: 365));
       d.chats.removeWhere((m) => localDate(m['timestamp']).isBefore(cutoff));
       final index = d.chats.indexWhere((m) => m['id'] == snapshot['id']);
@@ -415,7 +422,10 @@ class AiService {
             : 'interrupted';
         task['checkpointMessageId'] = snapshot['id'];
       }
+      compactChatHistory(d, sessionId: sessionOf(snapshot));
+      pruneHistory(d);
     });
+    tasks.committed();
   }
 
   Future<void> send(
@@ -536,10 +546,29 @@ class AiService {
             (m) => Json.from(m),
           ),
         );
-        if (checkpoint.isNotEmpty && checkpoint.last['role'] == 'tool') {
-          resumedRounds = checkpoint
-              .where((m) => m['role'] == 'assistant')
-              .length;
+        final responseCheckpoint = List<Json>.from(
+          (previous['responseItems'] as List? ?? []).map<Json>(
+            (m) => Json.from(m),
+          ),
+        );
+        if ((protocol == chatProtocol &&
+                checkpoint.isNotEmpty &&
+                checkpoint.last['role'] == 'tool') ||
+            (protocol == responsesProtocol &&
+                responseCheckpoint.isNotEmpty &&
+                responseCheckpoint.last['type'] == 'function_call_output')) {
+          resumedRounds = protocol == chatProtocol
+              ? checkpoint.where((m) => m['role'] == 'assistant').length
+              : (previous['blocks'] as List? ?? [])
+                    .where(
+                      (b) => b['type'] == 'tool' && b['status'] == 'complete',
+                    )
+                    .fold<int>(
+                      0,
+                      (count, b) => count > (b['round'] as int? ?? 0)
+                          ? count
+                          : (b['round'] as int? ?? 0) + 1,
+                    );
           run['modelMessages'] = checkpoint;
           run['responseItems'] = List<Json>.from(
             (previous['responseItems'] as List? ?? []).map<Json>(

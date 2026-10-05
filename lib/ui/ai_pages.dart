@@ -7,6 +7,7 @@ import 'package:intl/intl.dart';
 import 'package:image_picker/image_picker.dart';
 import '../application/preference_changes.dart';
 import '../domain/models.dart';
+import '../domain/history_retention.dart';
 import '../services/ai_service.dart';
 import 'design.dart';
 import 'tasks_page.dart';
@@ -854,31 +855,7 @@ class _ChatImageState extends State<_ChatImage> {
   );
 }
 
-final _proposalCache = Expando<Set<String>>();
-Set<String> _proposalIds(Json message) {
-  final cached = _proposalCache[message];
-  if (cached != null && message['status'] != 'streaming') return cached;
-  final ids = <String>{};
-  if (message['role'] == 'assistant' && message['actionId'] is String) {
-    ids.add(message['actionId'] as String);
-  }
-  for (final block in message['blocks'] as List? ?? []) {
-    if (block['type'] != 'tool' || !'${block['name']}'.startsWith('propose_')) {
-      continue;
-    }
-    try {
-      final raw = block['result'];
-      final result = raw is String ? jsonDecode(raw) : raw;
-      if (result is Map && result['proposalId'] is String) {
-        ids.add(result['proposalId'] as String);
-      }
-    } catch (_) {
-      // Partial streamed arguments/results do not yet identify a proposal.
-    }
-  }
-  if (message['status'] != 'streaming') _proposalCache[message] = ids;
-  return ids;
-}
+Set<String> _proposalIds(Json message) => messageProposalIds(message);
 
 // Avoid reparsing a growing Markdown document for every token. Completed text remains selectable.
 class _ReplyText extends StatelessWidget {

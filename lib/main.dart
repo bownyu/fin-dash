@@ -1,3 +1,5 @@
+import 'dart:async';
+import 'package:flutter/scheduler.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
@@ -53,6 +55,14 @@ Future<void> main(List<String> args) async {
   } catch (e) {
     store.log('error', '恢复未完成方案失败，已保留原数据：$e');
   }
+  SchedulerBinding.instance.scheduleTask(
+    () => unawaited(
+      store.compactHistoryOnce().catchError((Object error) {
+        store.log('error', '历史压缩暂未完成，下次启动重试：$error');
+      }),
+    ),
+    Priority.idle,
+  );
   try {
     await VoiceWidgetRuntime.channel.invokeMethod<void>('ready');
   } on MissingPluginException {
@@ -80,6 +90,7 @@ class _FinDashAppState extends State<FinDashApp> {
   static final _lightTheme = walletTheme(Brightness.light);
   static final _darkTheme = walletTheme(Brightness.dark);
   late (bool, String?, Object?, bool, bool) _configuration;
+  late final AppLifecycleListener _lifecycle;
   final _paymentRoutes = RouteObserver<ModalRoute<void>>();
 
   (bool, String?, Object?, bool, bool) _readConfiguration() => (
@@ -94,6 +105,11 @@ class _FinDashAppState extends State<FinDashApp> {
   void initState() {
     super.initState();
     _configuration = _readConfiguration();
+    _lifecycle = AppLifecycleListener(
+      onPause: () => unawaited(widget.store.flushMirror()),
+      onHide: () => unawaited(widget.store.flushMirror()),
+      onResume: () => unawaited(widget.store.flushMirror()),
+    );
     widget.store.addListener(_storeChanged);
   }
 
@@ -115,6 +131,7 @@ class _FinDashAppState extends State<FinDashApp> {
 
   @override
   void dispose() {
+    _lifecycle.dispose();
     widget.store.removeListener(_storeChanged);
     super.dispose();
   }
@@ -239,6 +256,7 @@ class _ShellState extends State<_Shell> with SingleTickerProviderStateMixin {
   final _visited = <int>{0};
   final _tabViewKey = GlobalKey(debugLabel: 'main-tabs');
   int index = 0;
+  bool _noticeShown = false;
 
   void select(int value) {
     if (value == index) return;
@@ -259,6 +277,19 @@ class _ShellState extends State<_Shell> with SingleTickerProviderStateMixin {
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
+    final notice = AppScope.storeOf(context, domains: const {}).recoveryNotice;
+    if (!_noticeShown && notice != null) {
+      _noticeShown = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted)
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(notice),
+              duration: const Duration(seconds: 12),
+            ),
+          );
+      });
+    }
     if (MediaQuery.disableAnimationsOf(context)) _transition.value = 1;
   }
 

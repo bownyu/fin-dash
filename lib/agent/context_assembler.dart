@@ -2,10 +2,11 @@ import 'dart:convert';
 import '../domain/models.dart';
 
 abstract final class ContextAssembler {
+  static const replayTurns = 15;
   static List<Json> recentTurns(
     Iterable<Json> messages, {
     int byteBudget = 60000,
-    int maxTurns = 15,
+    int maxTurns = replayTurns,
   }) {
     final turns = <List<Json>>[];
     for (final m in messages) {

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:crypto/crypto.dart';
@@ -25,12 +26,20 @@ typedef _Commit = ({
 typedef _CommitStats = ({int changedRows, int scannedRows});
 
 /// All SQLite access, diffing, validation and changed-row encoding happen in a
-/// worker. The UI publishes its candidate only after both durable files commit.
+/// worker. The UI publishes its candidate only after the primary WAL transaction commits.
 class LocalWalletStorage
-    implements RecordWalletStorage, QueryWalletStorage, RestorePointStorage {
+    implements
+        RecordWalletStorage,
+        QueryWalletStorage,
+        RestorePointStorage,
+        MirrorWalletStorage {
   static final _worker = SqliteWorker.shared;
   final Directory? directory;
   _Loaded? _loaded;
+  @override
+  String? recoveryNotice;
+  @override
+  Future<void> flushMirror() async => _worker.run(_flushMirror, await _path);
   int lastChangedRows = 0;
 
   /// Payload rows compared plus SQL position rows read, excluding mirror writes.
@@ -56,9 +65,10 @@ class LocalWalletStorage
 
   @override
   Future<WalletData?> loadSnapshot() async {
-    final loaded = await _worker.run(_load, await _path);
-    _loaded = loaded;
-    return loaded.data;
+    final report = await _worker.run(_loadReport, await _path);
+    _loaded = report.loaded;
+    recoveryNotice = report.notice;
+    return report.loaded.data;
   }
 
   @override
@@ -170,6 +180,7 @@ class LocalWalletStorage
       revision: loaded.revision + 1,
       generation: loaded.generation,
     );
+    await flushMirror();
   }
 
   // Compatibility APIs are only for explicit snapshot import/export.
@@ -201,13 +212,21 @@ Database _open(String path) {
   try {
     db.execute('PRAGMA busy_timeout = 5000');
     final version = db.select('PRAGMA user_version').first.values.first as int;
-    if (version > 1) throw UnsupportedError('数据库版本较新，请更新应用');
+    if (version > 2) throw UnsupportedError('数据库版本较新，请更新应用');
+    db.execute('PRAGMA synchronous = FULL');
+    if (path.endsWith('findash_ledger.sqlite')) {
+      // SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE: close each handle without forcing a
+      // main-file fsync per write. FULL still syncs each committed WAL record.
+      db.config.setIntConfig(1006, 1);
+    }
+    if (sqlite3.version.versionNumber < 3027000)
+      throw UnsupportedError('SQLite 版本过旧，恢复副本需要 3.27 或更新版本');
     if (_initializedPaths.contains(path) &&
         db
             .select("SELECT name FROM sqlite_master WHERE name='wallet_rows'")
             .isNotEmpty)
       return db;
-    db.execute('PRAGMA journal_mode = DELETE');
+    db.execute('PRAGMA journal_mode = WAL');
     db.execute('PRAGMA synchronous = FULL');
     db.execute(
       'CREATE TABLE IF NOT EXISTS wallet_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)',
@@ -233,7 +252,7 @@ Database _open(String path) {
         "CREATE INDEX IF NOT EXISTS wallet_tx_$field ON wallet_rows(json_extract(body,'\$.$field')) WHERE bucket='transactions'",
       );
     }
-    db.execute('PRAGMA user_version = 1');
+    db.execute('PRAGMA user_version = 2');
     _initializedPaths.add(path);
     return db;
   } catch (_) {
@@ -337,29 +356,162 @@ Future<WalletData?> _legacy(String path) async {
   return null;
 }
 
-_Loaded _initializeEmpty(String path) {
-  final mirror = _open('$path.bak');
-  mirror.close();
-  final db = _open(path);
+final _mirrorTimers = <String, Timer>{};
+final _recoveryNotices = <String, String>{};
+void _scheduleMirror(String path) {
+  _mirrorTimers.remove(path)?.cancel();
+  _mirrorTimers[path] = Timer(const Duration(seconds: 3), () {
+    _mirrorTimers.remove(path);
+    if (!File(path).existsSync()) return;
+    try {
+      _syncMirror(path);
+    } catch (error) {
+      // Committed WAL data stays durable. The next commit/resume retries.
+      stderr.writeln('FinDash 恢复副本同步失败：$error');
+    }
+  });
+}
+
+void _flushMirror(String path) {
+  _mirrorTimers.remove(path)?.cancel();
+  if (File(path).existsSync()) _syncMirror(path);
+}
+
+void _syncMirror(String path) {
+  final temporary = '$path.bak.tmp-${newId()}';
+  final lock = File('$path.mirror-lock').openSync(mode: FileMode.append);
+  var locked = false;
   try {
+    lock.lockSync(FileLock.exclusive);
+    locked = true;
+    // The lock makes abandoned snapshots from a crashed worker safe to remove.
+    for (final file in File(path).parent.listSync().whereType<File>()) {
+      if (file.uri.pathSegments.last.startsWith(
+        '${File(path).uri.pathSegments.last}.bak.tmp-',
+      )) {
+        file.deleteSync();
+      }
+    }
+    final db = _open(path);
+    try {
+      db.execute('VACUUM main INTO ?', [temporary]);
+    } finally {
+      db.close();
+    }
+    final candidate = _readFile(temporary);
+    final current = _open(path);
+    try {
+      current.execute('BEGIN IMMEDIATE');
+      // A restore in another process may have replaced the generation.
+      if (_meta(current, 'generation') != candidate.generation) {
+        _scheduleMirror(path);
+        return;
+      }
+      final mirror = File('$path.bak');
+      if (mirror.existsSync()) {
+        try {
+          final existing = _readFile(mirror.path);
+          if (existing.generation == candidate.generation &&
+              existing.revision >= candidate.revision) {
+            return;
+          }
+        } catch (error) {
+          if (error is UnsupportedError) rethrow;
+        }
+      }
+      File(temporary).renameSync(mirror.path);
+    } finally {
+      current.close(); // The read-only generation check rolls back its lock.
+    }
+  } finally {
+    if (locked) lock.unlockSync();
+    lock.closeSync();
+    _initializedPaths.remove(temporary);
+    for (final suffix in ['', '-wal', '-shm']) {
+      final file = File('$temporary$suffix');
+      if (file.existsSync()) file.deleteSync();
+    }
+  }
+}
+
+List<(String, String)> _quarantine(String path) {
+  final stamp = DateTime.now().microsecondsSinceEpoch;
+  final moved = <(String, String)>[];
+  for (final suffix in ['', '-wal', '-shm']) {
+    final file = File('$path$suffix');
+    if (file.existsSync()) {
+      final destination = '$path.damaged-$stamp$suffix';
+      file.renameSync(destination);
+      moved.add((file.path, destination));
+    }
+  }
+  _initializedPaths.remove(path);
+  return moved;
+}
+
+// The v1 pair must agree before accepting the irreversible storage upgrade.
+void _upgradeLegacy(String path) {
+  if (!File(path).existsSync()) return;
+  final db = sqlite3.open(path);
+  try {
+    int version;
+    try {
+      version = db.select('PRAGMA user_version').first.values.first as int;
+    } on SqliteException {
+      return;
+    } // The normal recovery path diagnoses corruption.
+    if (version != 1) return;
+    if (!File('$path.bak').existsSync())
+      throw const FormatException('升级前缺少恢复副本，请使用备份恢复');
+    db.execute('PRAGMA busy_timeout = 5000');
     db.execute('ATTACH DATABASE ? AS recovery', ['$path.bak']);
-    db.execute('PRAGMA recovery.synchronous = FULL');
     db.execute('BEGIN IMMEDIATE');
     try {
-      // Another process may have completed initialization since our first read.
+      if (db.select('PRAGMA recovery.user_version').first.values.first != 1) {
+        throw UnsupportedError('升级前恢复副本版本不一致，请更新应用或从备份恢复');
+      }
+      _read(db);
+      if (db
+              .select('PRAGMA recovery.quick_check')
+              .any((r) => r.values.first != 'ok') ||
+          _meta(db, 'revision') != _meta(db, 'revision', 'recovery') ||
+          _meta(db, 'generation') != _meta(db, 'generation', 'recovery')) {
+        throw const FormatException('升级前账本与恢复副本不一致，请使用备份恢复');
+      }
+      for (final pair in [('main', 'recovery'), ('recovery', 'main')]) {
+        if (db
+            .select(
+              'SELECT bucket,id,position,kind,body,checksum FROM ${pair.$1}.wallet_rows EXCEPT SELECT bucket,id,position,kind,body,checksum FROM ${pair.$2}.wallet_rows LIMIT 1',
+            )
+            .isNotEmpty) {
+          throw const FormatException('升级前账本与恢复副本内容不一致');
+        }
+      }
+      db.execute('PRAGMA user_version = 2');
+      db.execute('COMMIT');
+    } catch (_) {
+      db.execute('ROLLBACK');
+      rethrow;
+    }
+  } finally {
+    db.close();
+  }
+  _initializedPaths.remove(path);
+}
+
+_Loaded _initializeEmpty(String path) {
+  final db = _open(path);
+  try {
+    db.execute('BEGIN IMMEDIATE');
+    try {
       if (_meta(db, 'initialized') == '1') {
         final current = _read(db);
         db.execute('COMMIT');
         return current;
       }
-      if (_meta(db, 'initialized', 'recovery') == '1') {
-        throw const FormatException('恢复副本已初始化，请重新打开账本');
-      }
       final generation = _meta(db, 'generation') ?? newId();
-      for (final schema in ['main', 'recovery']) {
-        _setMeta(db, 'generation', generation, schema);
-        _setMeta(db, 'revision', '0', schema);
-      }
+      _setMeta(db, 'generation', generation, 'main');
+      _setMeta(db, 'revision', '0', 'main');
       db.execute('COMMIT');
       return (data: null, revision: 0, generation: generation);
     } catch (_) {
@@ -371,98 +523,87 @@ _Loaded _initializeEmpty(String path) {
   }
 }
 
-_Loaded _readConsistent(String path) {
-  final db = _open(path);
-  try {
-    db.execute('ATTACH DATABASE ? AS recovery', ['$path.bak']);
-    db.execute('BEGIN');
-    final loaded = _read(db);
-    final futureVersion =
-        db.select('PRAGMA recovery.user_version').first.values.first as int;
-    if (futureVersion > 1) throw UnsupportedError('数据库版本较新，请更新应用');
-    if (db
-        .select('PRAGMA recovery.quick_check')
-        .any((r) => r.values.first != 'ok')) {
-      throw const FormatException('恢复副本完整性检查失败');
-    }
-    for (final pair in [('main', 'recovery'), ('recovery', 'main')]) {
-      if (db
-          .select(
-            'SELECT bucket,id,position,kind,body,checksum FROM ${pair.$1}.wallet_rows EXCEPT SELECT bucket,id,position,kind,body,checksum FROM ${pair.$2}.wallet_rows LIMIT 1',
-          )
-          .isNotEmpty) {
-        throw const FormatException('账本与恢复副本内容不一致');
-      }
-    }
-    if (_meta(db, 'revision', 'recovery') != '${loaded.revision}' ||
-        _meta(db, 'generation', 'recovery') != loaded.generation) {
-      throw const FormatException('账本与恢复副本版本不一致，请使用备份恢复');
-    }
-    db.execute('COMMIT');
-    return loaded;
-  } finally {
-    db.close();
-  }
+Future<({_Loaded loaded, String? notice})> _loadReport(String path) async {
+  _recoveryNotices.remove(path);
+  final loaded = await _load(path);
+  return (loaded: loaded, notice: _recoveryNotices.remove(path));
 }
 
 Future<_Loaded> _load(String path) async {
   File(path).parent.createSync(recursive: true);
+  _upgradeLegacy(path);
+  _initializedPaths.remove(path);
   final mirror = '$path.bak';
-  if (File(path).existsSync() && File(mirror).existsSync()) {
-    try {
-      final fast = _readConsistent(path);
-      if (fast.data != null) return fast;
-    } catch (error) {
-      if (error is UnsupportedError) rethrow;
-    }
-  }
-  if (!File(path).existsSync() && File(mirror).existsSync()) {
-    _readFile(mirror);
-    _copyVerified(mirror, path);
-  }
   _Loaded? loaded;
+  var repaired = false;
   if (File(path).existsSync()) {
     try {
       loaded = _readFile(path);
     } catch (error) {
       if (error is UnsupportedError) rethrow;
       if (!File(mirror).existsSync()) rethrow;
-      loaded = _readFile(mirror);
+      _readFile(mirror); // Verify before moving the damaged main and its WAL.
+      _quarantine(path);
       _copyVerified(mirror, path);
+      loaded = _readFile(path);
+      repaired = true;
+      _recoveryNotices[path] = '已从恢复副本恢复，副本之后的修改可能丢失，可以从恢复点或备份恢复。';
     }
+  } else if (File(mirror).existsSync()) {
+    _readFile(mirror);
+    _copyVerified(mirror, path);
+    loaded = _readFile(path);
+    repaired = true;
+    _recoveryNotices[path] = '已从恢复副本恢复，副本之后的修改可能丢失，可以从恢复点或备份恢复。';
   }
   if (loaded == null || loaded.data == null) {
-    final old = await _legacy(
-      path,
-    ); // Validate before publishing any migrated rows.
+    final old = await _legacy(path);
     loaded = _initializeEmpty(path);
     if (old != null && loaded.data == null) {
       _commit((
         path: path,
-        revision: 0,
+        revision: loaded.revision,
         generation: loaded.generation,
         previous: WalletData(),
         next: old,
         replace: true,
         metadataOnly: false,
       ));
-      loaded = (data: old, revision: 1, generation: loaded.generation);
+      loaded = _readFile(path);
     }
+    _flushMirror(
+      path,
+    ); // Initialization/migration succeeds only with a usable mirror.
+    return loaded;
+  }
+  if (repaired || !File(mirror).existsSync()) {
+    _flushMirror(path);
   } else {
-    if (!File(mirror).existsSync()) {
-      File(path).copySync(mirror);
-    } else {
-      try {
-        _readFile(mirror);
-      } catch (error) {
-        if (error is UnsupportedError) rethrow;
-        _copyVerified(path, mirror);
+    Database? recovery;
+    try {
+      recovery = sqlite3.open(mirror);
+      final version =
+          recovery.select('PRAGMA user_version').first.values.first as int;
+      if (version > 2) throw UnsupportedError('数据库版本较新，请更新应用');
+      final revision = int.parse(_meta(recovery, 'revision') ?? '0');
+      if (_meta(recovery, 'generation') != loaded.generation ||
+          revision > loaded.revision) {
+        throw const FormatException('账本与恢复副本版本不一致，请使用备份恢复');
       }
-      // Recheck revisions in one read transaction below; a writer may have
-      // committed between these independently verified file reads.
+      if (revision < loaded.revision || version < 2) _scheduleMirror(path);
+    } on UnsupportedError {
+      rethrow;
+    } on FormatException {
+      rethrow;
+    } catch (_) {
+      recovery?.close();
+      recovery = null;
+      _flushMirror(path);
+    } finally {
+      recovery?.close();
     }
   }
-  return _readConsistent(path);
+  return loaded;
 }
 
 const _listFields = [
@@ -585,12 +726,9 @@ _CommitStats _commit(_Commit request) {
   _validateChange(request);
   final db = _open(request.path);
   try {
-    db.execute('ATTACH DATABASE ? AS recovery', ['${request.path}.bak']);
-    db.execute('PRAGMA recovery.journal_mode = DELETE');
-    db.execute('PRAGMA recovery.synchronous = FULL');
     db.execute('BEGIN IMMEDIATE');
     try {
-      for (final schema in ['main', 'recovery']) {
+      for (final schema in ['main']) {
         if ((_meta(db, 'revision', schema) ?? '0') != '${request.revision}' ||
             _meta(db, 'generation', schema) != request.generation) {
           throw const FormatException('账本已被其他实例更新，请重新打开后重试');
@@ -651,27 +789,17 @@ _CommitStats _commit(_Commit request) {
       final remove = db.prepare(
         'DELETE FROM main.wallet_rows WHERE bucket=? AND id=?',
       );
-      final removeBackup = db.prepare(
-        'DELETE FROM recovery.wallet_rows WHERE bucket=? AND id=?',
-      );
       final write = db.prepare(
         'INSERT OR REPLACE INTO main.wallet_rows VALUES (?,?,?,?,?,?)',
       );
-      final writeBackup = db.prepare(
-        'INSERT OR REPLACE INTO recovery.wallet_rows VALUES (?,?,?,?,?,?)',
-      );
       final order = db.prepare(
         'UPDATE main.wallet_rows SET position=? WHERE bucket=? AND id=?',
-      );
-      final orderBackup = db.prepare(
-        'UPDATE recovery.wallet_rows SET position=? WHERE bucket=? AND id=?',
       );
       try {
         for (final key in previous.keys.where(
           (key) => !next.containsKey(key),
         )) {
           remove.execute([key.$1, key.$2]);
-          removeBackup.execute([key.$1, key.$2]);
           changed++;
         }
         for (final entry in next.entries) {
@@ -690,28 +818,24 @@ _CommitStats _commit(_Commit request) {
               _checksum(key.$1, key.$2, value.kind, body),
             ];
             write.execute(args);
-            writeBackup.execute(args);
             changed++;
           } else if (positions[key] != ranks[key]) {
             final args = [ranks[key]!, key.$1, key.$2];
             order.execute(args);
-            orderBackup.execute(args);
             changed++;
           }
         }
       } finally {
         remove.close();
-        removeBackup.close();
         write.close();
-        writeBackup.close();
         order.close();
-        orderBackup.close();
       }
-      for (final schema in ['main', 'recovery']) {
+      for (final schema in ['main']) {
         _setMeta(db, 'revision', '${request.revision + 1}', schema);
         _setMeta(db, 'initialized', '1', schema);
       }
       db.execute('COMMIT');
+      _scheduleMirror(request.path);
       return (
         changedRows: changed,
         scannedRows: previous.length + next.length + positions.length,
@@ -809,12 +933,9 @@ _CommitStats _commitRecords(
   final db = _open(path);
   var scanned = previous.length + next.length + metadata.scanned, changed = 0;
   try {
-    db.execute('ATTACH DATABASE ? AS recovery', ['$path.bak']);
-    db.execute('PRAGMA recovery.journal_mode = DELETE');
-    db.execute('PRAGMA recovery.synchronous = FULL');
     db.execute('BEGIN IMMEDIATE');
     try {
-      for (final schema in ['main', 'recovery']) {
+      for (final schema in ['main']) {
         if (_meta(db, 'revision', schema) != '$revision' ||
             _meta(db, 'generation', schema) != generation) {
           throw const FormatException('账本已被其他实例更新，请重新打开后重试');
@@ -954,7 +1075,7 @@ _CommitStats _commitRecords(
         }
       }
       for (final key in previous.keys.where((k) => !next.containsKey(k))) {
-        for (final schema in ['main', 'recovery']) {
+        for (final schema in ['main']) {
           db.execute(
             'DELETE FROM $schema.wallet_rows WHERE bucket=? AND id=?',
             [key.$1, key.$2],
@@ -971,7 +1092,7 @@ _CommitStats _commitRecords(
           continue;
         }
         final body = jsonEncode(_json(value.value));
-        for (final schema in ['main', 'recovery']) {
+        for (final schema in ['main']) {
           db.execute(
             'INSERT OR REPLACE INTO $schema.wallet_rows VALUES (?,?,?,?,?,?)',
             [
@@ -992,7 +1113,7 @@ _CommitStats _commitRecords(
             next.containsKey(entry.key) ||
             positions[entry.key] == entry.value)
           continue;
-        for (final schema in ['main', 'recovery']) {
+        for (final schema in ['main']) {
           db.execute(
             'UPDATE $schema.wallet_rows SET position=? WHERE bucket=? AND id=?',
             [entry.value, entry.key.$1, entry.key.$2],
@@ -1000,10 +1121,11 @@ _CommitStats _commitRecords(
         }
         changed++;
       }
-      for (final schema in ['main', 'recovery']) {
+      for (final schema in ['main']) {
         _setMeta(db, 'revision', '${revision + 1}', schema);
       }
       db.execute('COMMIT');
+      _scheduleMirror(path);
       return (changedRows: changed, scannedRows: scanned);
     } catch (_) {
       db.execute('ROLLBACK');
@@ -1017,51 +1139,56 @@ _CommitStats _commitRecords(
 Future<_Loaded> _restoreDamaged((String, WalletData) request) async {
   final (path, data) = request;
   validateWallet(data);
-  final stage = '$path.restore-${DateTime.now().microsecondsSinceEpoch}';
-  final staged = _open(stage);
-  final generation = newId();
+  final stage = '$path.restore-${newId()}';
+  final lock = File('$path.mirror-lock').openSync(mode: FileMode.append);
+  var locked = false;
   try {
-    _setMeta(staged, 'generation', generation, 'main');
-    _setMeta(staged, 'revision', '0', 'main');
-  } finally {
-    staged.close();
-  }
-  File(stage).copySync('$stage.bak');
-  final blank = (revision: 0, generation: generation);
-  _commit((
-    path: stage,
-    revision: blank.revision,
-    generation: blank.generation,
-    previous: WalletData(),
-    next: data,
-    replace: true,
-    metadataOnly: false,
-  ));
-  final verified = _readFile(stage);
-  final moved = <(String, String)>[];
-  final installed = <String>[];
-  try {
-    for (final suffix in ['', '.bak']) {
-      final target = '$path$suffix';
-      if (File(target).existsSync()) {
-        final retained =
-            '$target.before-restore-${DateTime.now().microsecondsSinceEpoch}';
-        File(target).renameSync(retained);
-        moved.add((target, retained));
+    final blank = _initializeEmpty(stage);
+    _commit((
+      path: stage,
+      revision: 0,
+      generation: blank.generation,
+      previous: WalletData(),
+      next: data,
+      replace: true,
+      metadataOnly: false,
+    ));
+    _flushMirror(stage);
+    final verified = _readFile(stage);
+    // Preserve both original files before installing a verified replacement.
+    lock.lockSync(FileLock.exclusive);
+    locked = true;
+    final moved = _quarantine(path);
+    final installed = <String>[];
+    try {
+      if (File('$path.bak').existsSync()) {
+        final retained = '$path.bak.before-restore-${newId()}';
+        File('$path.bak').renameSync(retained);
+        moved.add(('$path.bak', retained));
       }
-      File('$stage$suffix').renameSync(target);
-      installed.add(target);
+      for (final suffix in ['', '.bak']) {
+        File('$stage$suffix').renameSync('$path$suffix');
+        installed.add('$path$suffix');
+      }
+    } catch (_) {
+      for (final target in installed.reversed) {
+        File(target).deleteSync();
+      }
+      for (final (target, retained) in moved.reversed) {
+        File(retained).renameSync(target);
+      }
+      rethrow;
     }
-  } catch (_) {
-    for (final target in installed.reversed) {
-      File(target).renameSync(
-        '$target.uninstalled-${DateTime.now().microsecondsSinceEpoch}',
-      );
+    _initializedPaths.remove(path);
+    return verified;
+  } finally {
+    if (locked) lock.unlockSync();
+    lock.closeSync();
+    _mirrorTimers.remove(stage)?.cancel();
+    for (final suffix in ['', '-wal', '-shm', '.bak', '.mirror-lock']) {
+      final file = File('$stage$suffix');
+      if (file.existsSync()) file.deleteSync();
     }
-    for (final (target, retained) in moved.reversed) {
-      File(retained).renameSync(target);
-    }
-    rethrow;
+    _initializedPaths.remove(stage);
   }
-  return verified;
 }

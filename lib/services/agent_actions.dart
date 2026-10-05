@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'package:crypto/crypto.dart';
 import '../data/wallet_store.dart';
 import '../domain/models.dart';
+import '../domain/history_retention.dart';
 import '../domain/agent_action_summary.dart';
 import '../data/backup.dart';
 import '../domain/ledger_operations.dart';
@@ -135,6 +136,7 @@ class AgentActions {
       );
       actions.add(action);
       d.extras['agentActions'] = actions;
+      pruneActions(d);
       result = action;
     });
     return {
@@ -166,20 +168,8 @@ class AgentActions {
           message['isActionFeedback'] == true) {
         continue;
       }
-      for (final block in message['blocks'] as List? ?? []) {
-        if (block['type'] != 'tool' ||
-            !'${block['name']}'.startsWith('propose_')) {
-          continue;
-        }
-        try {
-          final raw = block['result'];
-          final output = raw is String ? jsonDecode(raw) : raw;
-          if (output is Map && output['proposalId'] is String) {
-            owners.putIfAbsent(output['proposalId'], () => message);
-          }
-        } catch (_) {
-          /* Incomplete streamed results have no proposal yet. */
-        }
+      for (final id in messageProposalIds(message)) {
+        owners.putIfAbsent(id, () => message);
       }
     }
     final legacy = <String, Json>{};
@@ -322,9 +312,11 @@ class AgentActions {
         if ((b['legacyIds'] as List).contains(a['id'])) a['batchId'] = id;
       }
       d.extras['agentActions'] = actions;
+      pruneActions(d);
       b.remove('legacyIds');
       final list = _batches(d)..add(b);
       d.extras['agentActionBatches'] = list;
+      pruneActions(d);
     }
     return b;
   }
@@ -338,6 +330,7 @@ class AgentActions {
       list[index] = b;
     }
     d.extras['agentActionBatches'] = list;
+    pruneActions(d);
     final tasks = (d.extras['tasks'] as List? ?? [])
         .map((t) => Json.from(t))
         .toList();
@@ -553,6 +546,7 @@ class AgentActions {
         b['sourceUserMessageId'] = sourceUserMessageId;
       }
       d.extras['agentActions'] = actions;
+      pruneActions(d);
       _saveBatch(d, b);
       output = {
         'batchId': batchId,
@@ -739,6 +733,7 @@ class AgentActions {
       (id) => draft.accounts.where((x) => x.id == id).firstOrNull?.name ?? id,
     );
     d.extras['agentActions'] = actions;
+    pruneActions(d);
     b['revision'] = (b['revision'] as int) + 1;
     _saveBatch(d, b);
   });
@@ -843,6 +838,7 @@ class AgentActions {
       });
       b['revision'] = (b['revision'] as int) + 1;
       d.extras['agentActions'] = actions;
+      pruneActions(d);
       _saveBatch(d, b);
       count = chosen.length;
       final remaining = actions
@@ -876,6 +872,7 @@ class AgentActions {
         }
         if (count == 0) throw const FormatException('没有可排除的项目');
         d.extras['agentActions'] = actions;
+        pruneActions(d);
         b['revision'] = (b['revision'] as int) + 1;
         if (selected == null) b['closed'] = true;
         _saveBatch(d, b);
@@ -935,6 +932,7 @@ class AgentActions {
     b['receipts'] = receipts;
     b['revision'] = (b['revision'] as int) + 1;
     d.extras['agentActions'] = actions;
+    pruneActions(d);
     _saveBatch(d, b);
     _batchFeedback(
       d,
@@ -992,6 +990,7 @@ class AgentActions {
     a['appliedAt'] = DateTime.now().toIso8601String();
     a['after'] = _state(d, kind, target);
     d.extras['agentActions'] = actions;
+    pruneActions(d);
     _feedback(d, a, '确认执行', '已执行并保存到账本');
   });
 
@@ -1002,6 +1001,7 @@ class AgentActions {
     if (a['status'] != 'pending') throw const FormatException('只能拒绝待确认操作');
     a['status'] = 'rejected';
     d.extras['agentActions'] = actions;
+    pruneActions(d);
     _feedback(d, a, '拒绝', '已拒绝，本次变更未写入账本');
   });
 
@@ -1036,6 +1036,7 @@ class AgentActions {
     a['status'] = 'undone';
     a['undoneAt'] = DateTime.now().toIso8601String();
     d.extras['agentActions'] = actions;
+    pruneActions(d);
     _feedback(d, a, '撤销', '已撤销，相关数据已恢复');
   });
 

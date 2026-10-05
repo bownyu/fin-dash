@@ -5,6 +5,7 @@ import 'dart:math';
 import 'package:flutter/foundation.dart';
 import '../domain/models.dart';
 import '../domain/cow_json.dart';
+import '../domain/history_retention.dart';
 import '../domain/ledger_operations.dart';
 import '../domain/command_context.dart';
 import 'backup.dart';
@@ -53,6 +54,7 @@ class WalletStore extends ChangeNotifier {
   bool loading = true;
   bool hasRestorePoint = false;
   String? startupError;
+  String? recoveryNotice;
   String? aiStatus;
   final List<Json> debugLogs = [];
   Future<void> _tail = Future.value();
@@ -64,6 +66,8 @@ class WalletStore extends ChangeNotifier {
       final loaded = backend is IncrementalWalletStorage
           ? await backend.loadSnapshot()
           : await _loadJson();
+      if (backend is MirrorWalletStorage)
+        recoveryNotice = (backend as MirrorWalletStorage).recoveryNotice;
       if (loaded != null) {
         _data = loaded;
         _hasCommitted = true;
@@ -71,6 +75,9 @@ class WalletStore extends ChangeNotifier {
           final migrated = migrateWallet(loaded);
           if (backend is IncrementalWalletStorage) {
             await backend.commitSnapshot(loaded, migrated);
+            if (backend is MirrorWalletStorage) {
+              await (backend as MirrorWalletStorage).flushMirror();
+            }
           } else {
             await storage.save(await encodeWalletSnapshot(migrated));
           }
@@ -97,6 +104,27 @@ class WalletStore extends ChangeNotifier {
     _ledgerRevision = _data.extras['ledgerRevision'] as int? ?? 0;
     _data.freeze();
     notifyListeners();
+  }
+
+  Future<void> flushMirror() async {
+    await _tail;
+    final backend = storage;
+    if (backend is! MirrorWalletStorage) return;
+    try {
+      await (backend as MirrorWalletStorage).flushMirror();
+    } catch (error) {
+      log('error', '恢复副本同步失败，已提交的数据不受影响，将在下次提交或回到前台时重试：$error');
+    }
+  }
+
+  Future<void> compactHistoryOnce() async {
+    if (startupError != null || data.extras['historyCompactionVersion'] == 1)
+      return;
+    await changeMetadata((d) {
+      compactChatHistory(d);
+      pruneHistory(d);
+      d.extras['historyCompactionVersion'] = 1;
+    });
   }
 
   Future<WalletData?> _loadJson() async {
@@ -155,6 +183,14 @@ class WalletStore extends ChangeNotifier {
     final ledgerChanged = _financialChange(_data, next);
     final previous = _data;
     if (ledgerChanged) _ledgerRevision++;
+    List<T> share<T>(List<T> values) =>
+        values is LedgerList<T> && !values.changed && !values.reordered
+        ? values.original
+        : values;
+    next.accounts = share(next.accounts);
+    next.transactions = share(next.transactions);
+    next.categories = share(next.categories);
+    next.quickEntries = share(next.quickEntries);
     next.freeze(previous: previous);
     _data = next;
     for (final domain in WalletDomain.values) {
@@ -213,6 +249,7 @@ class WalletStore extends ChangeNotifier {
       if (context.ledgerEpoch != ledgerEpoch) {
         throw const FormatException('账本已恢复，请重新审阅');
       }
+      pruneReceipts(d);
       final receipts = (d.extras['operationReceipts'] as List? ?? []);
       final existing = receipts
           .where((r) => r['operationId'] == context.operationId)
@@ -244,6 +281,7 @@ class WalletStore extends ChangeNotifier {
       };
       receipts.add(receipt!);
       d.extras['operationReceipts'] = receipts;
+      pruneReceipts(d);
     });
     return Map.unmodifiable(receipt!);
   }
@@ -273,7 +311,9 @@ class WalletStore extends ChangeNotifier {
         await backend.save(await encodeWalletSnapshot(next));
       }
       _publish(next);
+      _hasCommitted = true;
       startupError = null;
+      recoveryNotice = null;
       notifyListeners();
     });
     _tail = work.catchError((_) {});

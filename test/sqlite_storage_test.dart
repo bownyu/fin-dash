@@ -12,6 +12,12 @@ import 'package:fin_dash/data/wallet_migration.dart';
 void main() {
   late Directory dir;
   String path() => '${dir.path}/findash_ledger.sqlite';
+  Future<void> damagePrimary() async {
+    await File(path()).writeAsString('broken sqlite');
+    final wal = File('${path()}-wal');
+    if (await wal.exists()) await wal.writeAsString('broken WAL');
+  }
+
   Future<WalletStore> open() async {
     final store = WalletStore(LocalWalletStorage(directory: dir));
     await store.initialize();
@@ -125,24 +131,27 @@ void main() {
   );
 
   test(
-    'failure writing recovery replica rolls back primary and in-memory state',
+    'mirror failure keeps committed data and retries successfully',
     () async {
       final store = await open();
       await store.saveAccount(bank);
+      await store.flushMirror();
       final before = store.data;
-      final replica = sqlite3.open('${path()}.bak');
-      replica.execute(
-        "CREATE TRIGGER fail_write BEFORE INSERT ON wallet_rows WHEN NEW.bucket='transactions' BEGIN SELECT RAISE(ABORT,'simulated full disk'); END",
-      );
-      replica.close();
-      await expectLater(store.saveTx(tx()), throwsA(isA<SqliteException>()));
-      expect(store.data, same(before));
-      expect((await open()).data.transactions, isEmpty);
-      final fixed = sqlite3.open('${path()}.bak');
-      fixed.execute('DROP TRIGGER fail_write');
-      fixed.close();
+      final saved = File('${path()}.bak.saved');
+      await File('${path()}.bak').rename(saved.path);
+      final blocked = Directory('${path()}.bak');
+      await blocked.create();
       await store.saveTx(tx());
-      expect((await open()).data.transactions.length, 1);
+      expect(store.data, isNot(same(before)));
+      expect(store.data.transactions.single.id, 'tx');
+      await expectLater(
+        (store.storage as LocalWalletStorage).flushMirror(),
+        throwsA(isA<FileSystemException>()),
+      );
+      await blocked.delete();
+      await saved.rename('${path()}.bak');
+      await store.flushMirror();
+      expect((await open()).data.transactions.single.id, 'tx');
     },
   );
 
@@ -162,7 +171,8 @@ void main() {
       await store.saveAccount(bank);
       await store.saveTx(tx());
       final expected = store.data.toJson();
-      await File(path()).writeAsString('broken sqlite');
+      await store.flushMirror();
+      await damagePrimary();
       final restored = await open();
       expect(restored.startupError, null);
       expect(restored.data.toJson(), expected);
@@ -170,12 +180,49 @@ void main() {
     },
   );
 
+  test('lagging mirror recovery gives a nonfatal loss notice', () async {
+    final store = await open();
+    await store.saveAccount(bank);
+    await store.flushMirror();
+    await store.saveTx(tx());
+    await damagePrimary();
+    final restored = await open();
+    expect(restored.startupError, null);
+    expect(restored.data.accounts.single.id, 'bank');
+    expect(restored.data.transactions, isEmpty);
+    expect(restored.recoveryNotice, contains('副本之后的修改可能丢失'));
+  });
+  test('consistent v1 upgrades in place to WAL schema 2', () async {
+    final store = await open();
+    await store.saveAccount(bank);
+    await store.saveTx(tx());
+    await store.flushMirror();
+    final expected = store.data.toJson();
+    for (final suffix in ['', '.bak']) {
+      final db = sqlite3.open('${path()}$suffix');
+      db.execute('PRAGMA journal_mode = DELETE');
+      db.execute('PRAGMA user_version = 1');
+      db.close();
+    }
+    final upgraded = await open();
+    expect(upgraded.startupError, null);
+    expect(upgraded.data.toJson(), expected);
+    final db = sqlite3.open(path());
+    expect(db.select('PRAGMA user_version').first.values.first, 2);
+    expect(db.select('PRAGMA journal_mode').first.values.first, 'wal');
+    db.close();
+    // ignore: avoid_print
+    print(
+      'Bundled SQLite ${sqlite3.version.libVersion}; VACUUM INTO supported',
+    );
+  });
+
   test(
     'explicit restore can replace two damaged databases and survives reopening',
     () async {
       final initial = await open();
       await initial.saveAccount(bank);
-      await File(path()).writeAsString('bad');
+      await damagePrimary();
       await File('${path()}.bak').writeAsString('bad');
       final store = await open();
       expect(store.startupError, isNotNull);
@@ -219,23 +266,18 @@ void main() {
     },
   );
 
-  test(
-    'closing an uncommitted attached transaction restores both databases',
-    () async {
-      final store = await open();
-      await store.saveAccount(bank);
-      await store.saveTx(tx());
-      final db = sqlite3.open(path());
-      db.execute('ATTACH DATABASE ? AS recovery', ['${path()}.bak']);
-      db.execute('BEGIN IMMEDIATE');
-      db.execute("DELETE FROM main.wallet_rows WHERE bucket='transactions'");
-      db.execute(
-        "DELETE FROM recovery.wallet_rows WHERE bucket='transactions'",
-      );
-      db.close();
-      expect((await open()).data.transactions.single.id, 'tx');
-    },
-  );
+  test('closing an uncommitted WAL transaction discards changes', () async {
+    final store = await open();
+    await store.saveAccount(bank);
+    await store.saveTx(tx());
+    final db = sqlite3.open(path());
+    expect(db.select('PRAGMA journal_mode').first.values.first, 'wal');
+    expect(db.select('PRAGMA synchronous').first.values.first, 2);
+    db.execute('BEGIN IMMEDIATE');
+    db.execute("DELETE FROM main.wallet_rows WHERE bucket='transactions'");
+    db.close();
+    expect((await open()).data.transactions.single.id, 'tx');
+  });
 
   test('interrupted migration retries from retained legacy files', () async {
     await open(); // Empty schema, no initialized ledger yet.
@@ -244,14 +286,14 @@ void main() {
       jsonEncode(WalletData(accounts: [bank], transactions: [tx()]).toJson()),
     );
     await legacy.writeAsString(original);
-    final db = sqlite3.open('${path()}.bak');
+    final db = sqlite3.open(path());
     db.execute(
       "CREATE TRIGGER interrupt_migration BEFORE INSERT ON wallet_rows BEGIN SELECT RAISE(ABORT,'interrupted migration'); END",
     );
     db.close();
     expect((await open()).startupError, isNotNull);
     expect(await legacy.readAsString(), original);
-    final fixed = sqlite3.open('${path()}.bak');
+    final fixed = sqlite3.open(path());
     fixed.execute('DROP TRIGGER interrupt_migration');
     fixed.close();
     expect((await open()).data.transactions.single.id, 'tx');
@@ -263,11 +305,11 @@ void main() {
       final store = await open();
       await store.saveAccount(bank);
       final db = sqlite3.open(path());
-      db.execute('PRAGMA user_version = 2');
+      db.execute('PRAGMA user_version = 3');
       db.close();
       expect((await open()).startupError, contains('请更新应用'));
       final check = sqlite3.open(path());
-      expect(check.select('PRAGMA user_version').first.values.first, 2);
+      expect(check.select('PRAGMA user_version').first.values.first, 3);
       check.close();
     },
   );

@@ -61,7 +61,8 @@
 - 账单、账户、分类、快捷交易、目标和聊天按条存储。profile/settings 等按键存储，通知等列表按记录存储，变化行才 JSON 编码、计算校验和并写 SQL。
 - 不压缩删除后的顺序编号，因此删除中间一笔不会重写后续全部账单。显式重排和中间插入按需更新顺序。
 - 普通交易重用上一次已校验的不可变记录，只对新建/修改交易检查字段，同时检查全局 ID 唯一性。账户结构变化、迁移、恢复仍执行完整验证。
-- 主库与恢复副本使用 SQLite ATTACH、DELETE rollback journal 和 FULL synchronous，在同一事务内更新两个文件。保留回滚机制，不采用无法保证跨文件原子提交的 WAL 模式。副本是最新已提交数据的冗余拷贝，不是历史版本管理。
+- 2026-10-05 整改后，主库使用 WAL、FULL synchronous 和存储版本 2；每次提交只更新主库，恢复副本在空闲 3 秒后或退到后台时通过 `VACUUM INTO` 生成并原子替换。恢复副本可能落后，物理损坏恢复时明确提示近期修改可能丢失；历史恢复点和导出备份不变。不支持降级至旧版应用。
+- 每个请求仍关闭连接，主库设置 `SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE`，避免关闭连接时强制把 WAL 全部刷回主库；自动 checkpoint 保留。依据 [SQLite 连接配置文档](https://sqlite.org/c3ref/c_dbconfig_defensive.html)。FULL 模式下 `VACUUM INTO` 输出完成时同步到磁盘，依据 [SQLite VACUUM 文档](https://sqlite.org/lang_vacuum.html)。
 - 存储版本与 generation 防止旧实例覆盖新数据。旧 JSON 主文件及备份在完整校验后迁移，迁移失败可以重试，原文件保留；损坏数据库保留后才从已验证副本恢复。JSON 导入导出继续有效。
 - 后台仍会扫描差异并复制消息图，启动仍会加载整个工作集，尚未做数据库分页查询。这些剩余成本与“每次重写整本 JSON”已分离。
 

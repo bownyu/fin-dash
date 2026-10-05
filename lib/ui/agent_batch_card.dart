@@ -87,7 +87,13 @@ class _AgentBatchCardState extends State<AgentBatchCard> {
     final preparing = b['generation'] == 'preparing';
     final interrupted = b['generation'] == 'interrupted';
     final receipts = (b['receipts'] as List? ?? [])
-        .where((r) => r['status'] == 'applied')
+        .where(
+          (r) =>
+              r['status'] == 'applied' &&
+              (r['actionIds'] as List? ?? []).every(
+                (id) => review.items.any((a) => a['id'] == id),
+              ),
+        )
         .toList();
     final uncertain = pending.where((a) => a['needsReview'] == true).length;
     final chosen = pending.where((a) => selected.contains(a['id'])).toList();
