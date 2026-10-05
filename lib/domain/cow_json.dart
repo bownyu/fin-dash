@@ -7,6 +7,8 @@ class FrozenMap extends MapBase<String, dynamic> {
   @override
   dynamic operator [](Object? key) => _values[key];
   @override
+  bool containsKey(Object? key) => _values.containsKey(key);
+  @override
   Iterable<String> get keys => _values.keys;
   @override
   void operator []=(String key, dynamic value) =>
@@ -57,6 +59,8 @@ class CowMap extends MapBase<String, dynamic> {
   @override
   Iterable<String> get keys => _read.keys;
   @override
+  bool containsKey(Object? key) => _read.containsKey(key);
+  @override
   void operator []=(String key, dynamic value) => _write[key] = value;
   @override
   dynamic remove(Object? key) => _write.remove(key);
@@ -71,8 +75,9 @@ class CowMap extends MapBase<String, dynamic> {
       final old = original[entry.key];
       final value = freezeValue(entry.value, previous: old);
       values[entry.key] = value;
-      if (!original.containsKey(entry.key) || !_sameValue(value, old))
+      if (!original.containsKey(entry.key) || !_sameValue(value, old)) {
         same = false;
+      }
     }
     return same ? original : FrozenMap._(values);
   }
@@ -100,14 +105,14 @@ class CowList<T> extends ListBase<T> {
   @override
   void operator []=(int index, T value) => _write[index] = value;
   @override
-  void add(T value) => _write.add(value);
+  void add(T element) => _write.add(element);
   @override
-  void addAll(Iterable<T> values) => _write.addAll(values);
+  void addAll(Iterable<T> iterable) => _write.addAll(iterable);
   @override
-  void insert(int index, T value) => _write.insert(index, value);
+  void insert(int index, T element) => _write.insert(index, element);
   @override
-  void insertAll(int index, Iterable<T> values) =>
-      _write.insertAll(index, values);
+  void insertAll(int index, Iterable<T> iterable) =>
+      _write.insertAll(index, iterable);
   @override
   T removeAt(int index) {
     final value = this[index];
@@ -173,8 +178,9 @@ dynamic freezeValue(dynamic value, {dynamic previous}) {
       values[entry.key as String] = child;
       if (previous is! FrozenMap ||
           !previous.containsKey(entry.key) ||
-          !_sameValue(child, old))
+          !_sameValue(child, old)) {
         same = false;
+      }
     }
     return same ? previous : FrozenMap._(values);
   }

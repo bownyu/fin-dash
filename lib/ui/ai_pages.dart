@@ -482,62 +482,68 @@ class _ChatPageState extends State<ChatPage> {
           body: Column(
             children: [
               Expanded(
-                child: _LazyChatList(
-                  controller: scroll,
-                  reverse: messages.isNotEmpty,
-                  padding: const EdgeInsets.fromLTRB(20, 10, 20, 24),
-                  children: [
-                    ..._messageWidgets,
-                    if (ai.busy)
-                      Padding(
-                        padding: const EdgeInsets.only(top: 14),
-                        child: Row(
-                          children: [
-                            const SizedBox.square(
-                              dimension: 15,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            ),
-                            const SizedBox(width: 12),
-                            Expanded(
-                              child: Text(
-                                store.aiStatus!,
-                                style: const TextStyle(color: muted),
+                child: SelectionArea(
+                  child: _LazyChatList(
+                    controller: scroll,
+                    reverse: messages.isNotEmpty,
+                    padding: const EdgeInsets.fromLTRB(20, 10, 20, 24),
+                    children: [
+                      ..._messageWidgets,
+                      if (ai.busy)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 14),
+                          child: Row(
+                            children: [
+                              const SizedBox.square(
+                                dimension: 15,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
                               ),
-                            ),
-                            TextButton(
-                              onPressed: ai.cancel,
-                              child: const Text('停止'),
-                            ),
-                          ],
-                        ),
-                      ),
-                    if (ai.error != null)
-                      Panel(
-                        padding: const EdgeInsets.all(14),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            SelectableText(
-                              ai.error!,
-                              style: const TextStyle(color: coral),
-                            ),
-                            Row(
-                              children: [
-                                TextButton(
-                                  onPressed: ai.busy ? null : retry,
-                                  child: const Text('重试'),
+                              const SizedBox(width: 12),
+                              Expanded(
+                                child: Text(
+                                  store.aiStatus!,
+                                  style: const TextStyle(color: muted),
                                 ),
-                                TextButton(
-                                  onPressed: () =>
-                                      openPage(context, const AiSettingsPage()),
-                                  child: const Text('检查设置'),
-                                ),
-                              ],
-                            ),
-                          ],
+                              ),
+                              TextButton(
+                                onPressed: ai.cancel,
+                                child: const Text('停止'),
+                              ),
+                            ],
+                          ),
                         ),
-                      ),
-                  ],
+                      if (ai.error != null)
+                        Panel(
+                          padding: const EdgeInsets.all(14),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                ai.error!,
+                                style: const TextStyle(color: coral),
+                              ),
+                              Row(
+                                children: [
+                                  TextButton(
+                                    onPressed: ai.busy ? null : retry,
+                                    child: const Text('重试'),
+                                  ),
+                                  TextButton(
+                                    onPressed: () => openPage(
+                                      context,
+                                      const AiSettingsPage(),
+                                    ),
+                                    child: const Text('检查设置'),
+                                  ),
+                                ],
+                              ),
+                            ],
+                          ),
+                        ),
+                    ],
+                  ),
                 ),
               ),
               if (!ai.busy)
@@ -690,6 +696,7 @@ class _LazyChatList extends StatelessWidget {
     Map<Key, int>? indexes;
     return ListView.builder(
       controller: controller,
+      cacheExtent: MediaQuery.sizeOf(context).height * 1.5,
       padding: padding,
       reverse: reverse,
       itemCount: children.length,
@@ -759,7 +766,7 @@ class _Message extends StatelessWidget {
                           '旧消息的图片未保存',
                           style: TextStyle(color: muted, fontSize: 12),
                         ),
-                      SelectableText('${message['content']}'),
+                      Text('${message['content']}'),
                     ],
                   )
                 : _AssistantContent(
@@ -867,7 +874,7 @@ class _ReplyText extends StatelessWidget {
       ? Text(data, style: const TextStyle(height: 1.5))
       : MarkdownBody(
           data: data,
-          selectable: true,
+          selectable: false,
           inlineSyntaxes: _inlineSyntaxes,
         );
 }
@@ -994,103 +1001,109 @@ class _ProcessingTrace extends StatelessWidget {
         builder: (context, _, child) {
           AppScope.storeOf(context);
           final blocks = message['blocks'] as List? ?? [];
-          return FractionallySizedBox(
-            heightFactor: .8,
-            child: ListView(
-              padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
-              children: [
-                Text('处理记录', style: Theme.of(context).textTheme.titleMedium),
-                const SizedBox(height: 8),
-                for (var i = 0; i < blocks.length; i++)
-                  if (blocks[i]['type'] == 'reasoning')
+          return SelectionArea(
+            child: FractionallySizedBox(
+              heightFactor: .8,
+              child: ListView(
+                padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
+                children: [
+                  Text('处理记录', style: Theme.of(context).textTheme.titleMedium),
+                  const SizedBox(height: 8),
+                  for (var i = 0; i < blocks.length; i++)
+                    if (blocks[i]['type'] == 'reasoning')
+                      ExpansionTile(
+                        key: ValueKey('${message['id']}:reasoning:$i'),
+                        tilePadding: EdgeInsets.zero,
+                        title: const Text(
+                          '思考 / 摘要',
+                          style: TextStyle(fontSize: 13),
+                        ),
+                        children: [
+                          Align(
+                            alignment: Alignment.centerLeft,
+                            child: MarkdownBody(
+                              data: '${blocks[i]['text']}',
+                              selectable: false,
+                              inlineSyntaxes: _inlineSyntaxes,
+                            ),
+                          ),
+                        ],
+                      )
+                    else if (blocks[i]['type'] == 'tool')
+                      ExpansionTile(
+                        key: ValueKey('${message['id']}:tool:$i'),
+                        tilePadding: EdgeInsets.zero,
+                        title: Text(
+                          '${toolLabels[blocks[i]['name']] ?? blocks[i]['name'] ?? '工具调用'}'
+                              .replaceAll('…', ''),
+                          style: const TextStyle(fontSize: 13),
+                        ),
+                        subtitle: Text(
+                          status(Json.from(blocks[i])),
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: blocks[i]['status'] == 'error'
+                                ? coral
+                                : muted,
+                          ),
+                        ),
+                        children: [
+                          Align(
+                            alignment: Alignment.centerLeft,
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Text(
+                                  '调用参数',
+                                  style: TextStyle(fontWeight: FontWeight.w600),
+                                ),
+                                Text(
+                                  pretty(blocks[i]['arguments']),
+                                  style: const TextStyle(fontSize: 12),
+                                ),
+                                if (blocks[i]['result'] != null) ...[
+                                  const SizedBox(height: 8),
+                                  const Text(
+                                    '工具结果',
+                                    style: TextStyle(
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                  Text(
+                                    pretty(blocks[i]['result']),
+                                    style: const TextStyle(fontSize: 12),
+                                  ),
+                                ],
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                  if (message['error'] != null)
+                    Text(
+                      '${message['error']}',
+                      style: const TextStyle(color: coral, fontSize: 12),
+                    ),
+                  if (message['usage'] is List)
                     ExpansionTile(
-                      key: ValueKey('${message['id']}:reasoning:$i'),
                       tilePadding: EdgeInsets.zero,
                       title: const Text(
-                        '思考 / 摘要',
+                        '用量与响应信息',
                         style: TextStyle(fontSize: 13),
                       ),
                       children: [
-                        Align(
-                          alignment: Alignment.centerLeft,
-                          child: MarkdownBody(
-                            data: '${blocks[i]['text']}',
-                            selectable: true,
-                            inlineSyntaxes: _inlineSyntaxes,
-                          ),
-                        ),
-                      ],
-                    )
-                  else if (blocks[i]['type'] == 'tool')
-                    ExpansionTile(
-                      key: ValueKey('${message['id']}:tool:$i'),
-                      tilePadding: EdgeInsets.zero,
-                      title: Text(
-                        '${toolLabels[blocks[i]['name']] ?? blocks[i]['name'] ?? '工具调用'}'
-                            .replaceAll('…', ''),
-                        style: const TextStyle(fontSize: 13),
-                      ),
-                      subtitle: Text(
-                        status(Json.from(blocks[i])),
-                        style: TextStyle(
-                          fontSize: 12,
-                          color: blocks[i]['status'] == 'error' ? coral : muted,
-                        ),
-                      ),
-                      children: [
-                        Align(
-                          alignment: Alignment.centerLeft,
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              const Text(
-                                '调用参数',
-                                style: TextStyle(fontWeight: FontWeight.w600),
-                              ),
-                              SelectableText(
-                                pretty(blocks[i]['arguments']),
-                                style: const TextStyle(fontSize: 12),
-                              ),
-                              if (blocks[i]['result'] != null) ...[
-                                const SizedBox(height: 8),
-                                const Text(
-                                  '工具结果',
-                                  style: TextStyle(fontWeight: FontWeight.w600),
-                                ),
-                                SelectableText(
-                                  pretty(blocks[i]['result']),
-                                  style: const TextStyle(fontSize: 12),
-                                ),
-                              ],
-                            ],
-                          ),
+                        Text(
+                          pretty({
+                            'model': message['model'],
+                            'responseId': message['responseId'],
+                            'usage': message['usage'],
+                          }),
+                          style: const TextStyle(fontSize: 12),
                         ),
                       ],
                     ),
-                if (message['error'] != null)
-                  SelectableText(
-                    '${message['error']}',
-                    style: const TextStyle(color: coral, fontSize: 12),
-                  ),
-                if (message['usage'] is List)
-                  ExpansionTile(
-                    tilePadding: EdgeInsets.zero,
-                    title: const Text(
-                      '用量与响应信息',
-                      style: TextStyle(fontSize: 13),
-                    ),
-                    children: [
-                      SelectableText(
-                        pretty({
-                          'model': message['model'],
-                          'responseId': message['responseId'],
-                          'usage': message['usage'],
-                        }),
-                        style: const TextStyle(fontSize: 12),
-                      ),
-                    ],
-                  ),
-              ],
+                ],
+              ),
             ),
           );
         },

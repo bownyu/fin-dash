@@ -566,8 +566,9 @@ class AgentActions {
   Future<void> setGeneration(String id, String state) =>
       setGenerations({id}, state);
   Future<void> setGenerations(Set<String> ids, String state) async {
-    if (!batches.any((b) => ids.contains(b['id']) && b['generation'] != state))
+    if (!batches.any((b) => ids.contains(b['id']) && b['generation'] != state)) {
       return;
+    }
     await store.changeMetadata((d) {
       for (final b in _batches(d).where((b) => ids.contains(b['id']))) {
         if (b['generation'] == state) continue;

@@ -55,13 +55,13 @@ Future<void> main(List<String> args) async {
   } catch (e) {
     store.log('error', '恢复未完成方案失败，已保留原数据：$e');
   }
-  SchedulerBinding.instance.scheduleTask(
+  Timer(
+    const Duration(seconds: 1),
     () => unawaited(
       store.compactHistoryOnce().catchError((Object error) {
         store.log('error', '历史压缩暂未完成，下次启动重试：$error');
       }),
     ),
-    Priority.idle,
   );
   try {
     await VoiceWidgetRuntime.channel.invokeMethod<void>('ready');
@@ -173,8 +173,9 @@ class _FinDashAppState extends State<FinDashApp> {
               ? Brightness.light
               : Brightness.dark,
         ),
-        child: WalletBackdrop(
-          child: Center(
+        child: _appBackdrop(
+          context,
+          Center(
             child: ConstrainedBox(
               constraints: const BoxConstraints(maxWidth: 960),
               child: child!,
@@ -198,6 +199,11 @@ class _FinDashAppState extends State<FinDashApp> {
     ),
   );
 }
+
+Widget _appBackdrop(BuildContext context, Widget child) =>
+    MediaQuery.sizeOf(context).width > 960
+    ? WalletBackdrop(child: child)
+    : ColoredBox(color: WalletColors.of(context).background, child: child);
 
 class _RecoveryPage extends StatelessWidget {
   final String error;
@@ -237,9 +243,6 @@ class _ShellState extends State<_Shell> with SingleTickerProviderStateMixin {
     duration: const Duration(milliseconds: 260),
     value: 1,
   );
-  late final _tabOpacity = _transition.drive(
-    CurveTween(curve: Curves.easeOutCubic),
-  );
   late final _tabOffset = _transition.drive(
     Tween(
       begin: const Offset(0, .018),
@@ -257,6 +260,30 @@ class _ShellState extends State<_Shell> with SingleTickerProviderStateMixin {
   final _tabViewKey = GlobalKey(debugLabel: 'main-tabs');
   int index = 0;
   bool _noticeShown = false;
+  Timer? _warmTimer;
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        _warmTimer = Timer(const Duration(seconds: 1), () => _warmNext(1));
+      }
+    });
+  }
+
+  void _warmNext(int index) {
+    if (!mounted || index >= _pages.length) return;
+    if (SchedulerBinding.instance.transientCallbackCount > 0) {
+      _warmTimer = Timer(
+        const Duration(milliseconds: 100),
+        () => _warmNext(index),
+      );
+      return;
+    }
+    if (!_visited.contains(index)) setState(() => _visited.add(index));
+    WidgetsBinding.instance.addPostFrameCallback((_) => _warmNext(index + 1));
+    SchedulerBinding.instance.scheduleFrame();
+  }
 
   void select(int value) {
     if (value == index) return;
@@ -281,13 +308,14 @@ class _ShellState extends State<_Shell> with SingleTickerProviderStateMixin {
     if (!_noticeShown && notice != null) {
       _noticeShown = true;
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted)
+        if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
               content: Text(notice),
               duration: const Duration(seconds: 12),
             ),
           );
+        }
       });
     }
     if (MediaQuery.disableAnimationsOf(context)) _transition.value = 1;
@@ -295,6 +323,7 @@ class _ShellState extends State<_Shell> with SingleTickerProviderStateMixin {
 
   @override
   void dispose() {
+    _warmTimer?.cancel();
     _transition.dispose();
     super.dispose();
   }
@@ -303,23 +332,20 @@ class _ShellState extends State<_Shell> with SingleTickerProviderStateMixin {
   Widget build(BuildContext context) {
     final wide = MediaQuery.sizeOf(context).width >= 900;
     final colors = WalletColors.of(context);
-    final views = FadeTransition(
+    final views = SlideTransition(
       key: const Key('main-tab-transition'),
-      opacity: _tabOpacity,
-      child: SlideTransition(
-        position: _tabOffset,
-        child: IndexedStack(
-          key: _tabViewKey,
-          index: index,
-          children: List.generate(
-            _pages.length,
-            (i) => _visited.contains(i)
-                ? TickerMode(
-                    enabled: i == index,
-                    child: RepaintBoundary(child: _pages[i]),
-                  )
-                : const SizedBox.shrink(),
-          ),
+      position: _tabOffset,
+      child: IndexedStack(
+        key: _tabViewKey,
+        index: index,
+        children: List.generate(
+          _pages.length,
+          (i) => _visited.contains(i)
+              ? TickerMode(
+                  enabled: i == index,
+                  child: RepaintBoundary(child: _pages[i]),
+                )
+              : const SizedBox.shrink(),
         ),
       ),
     );

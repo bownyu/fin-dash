@@ -428,6 +428,10 @@ class _VoiceEntrySheetState extends State<VoiceEntrySheet>
 
   @override
   Widget build(BuildContext context) {
+    return RuntimeBuilder(builder: buildContent);
+  }
+
+  Widget buildContent(BuildContext context) {
     final store = AppScope.storeOf(context);
     final colors = WalletColors.of(context);
     final busy = processing || saving;

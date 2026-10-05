@@ -66,8 +66,9 @@ class WalletStore extends ChangeNotifier {
       final loaded = backend is IncrementalWalletStorage
           ? await backend.loadSnapshot()
           : await _loadJson();
-      if (backend is MirrorWalletStorage)
+      if (backend is MirrorWalletStorage) {
         recoveryNotice = (backend as MirrorWalletStorage).recoveryNotice;
+      }
       if (loaded != null) {
         _data = loaded;
         _hasCommitted = true;
@@ -118,8 +119,9 @@ class WalletStore extends ChangeNotifier {
   }
 
   Future<void> compactHistoryOnce() async {
-    if (startupError != null || data.extras['historyCompactionVersion'] == 1)
+    if (startupError != null || data.extras['historyCompactionVersion'] == 1) {
       return;
+    }
     await changeMetadata((d) {
       compactChatHistory(d);
       pruneHistory(d);
@@ -208,14 +210,18 @@ class WalletStore extends ChangeNotifier {
         WalletDomain.preferences =>
           !identical(previous.settings, next.settings) ||
               !identical(previous.profile, next.profile) ||
-              !identical(previous.providerConfigs, next.providerConfigs),
+              !identical(previous.providerConfigs, next.providerConfigs) ||
+              !identical(
+                previous.agent['dismissedSuggestions'],
+                next.agent['dismissedSuggestions'],
+              ),
         WalletDomain.memory => !identical(previous.agent, next.agent),
         WalletDomain.tasks => extrasChanged([
           'tasks',
           'agentActions',
           'agentActionBatches',
           'voiceDrafts',
-          'savedAnalyses',
+          'savedRecipes',
         ]),
         WalletDomain.sources => extrasChanged([
           'paymentNotifications',

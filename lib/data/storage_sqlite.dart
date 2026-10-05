@@ -195,14 +195,6 @@ class LocalWalletStorage
       replaceSnapshot(await _worker.run(_import, data));
 }
 
-// No financial references enter the isolate message graph on a metadata write.
-WalletData _metadataSnapshot(WalletMetadata metadata) => WalletData(
-  accounts: [],
-  transactions: [],
-  categories: [],
-  quickEntries: [],
-).withMetadata(metadata);
-
 String _export(WalletData data) => jsonEncode(data.toJson());
 WalletData _import(String raw) => parseBackup(raw).data;
 
@@ -219,13 +211,15 @@ Database _open(String path) {
       // main-file fsync per write. FULL still syncs each committed WAL record.
       db.config.setIntConfig(1006, 1);
     }
-    if (sqlite3.version.versionNumber < 3027000)
+    if (sqlite3.version.versionNumber < 3027000) {
       throw UnsupportedError('SQLite 版本过旧，恢复副本需要 3.27 或更新版本');
+    }
     if (_initializedPaths.contains(path) &&
         db
             .select("SELECT name FROM sqlite_master WHERE name='wallet_rows'")
-            .isNotEmpty)
+            .isNotEmpty) {
       return db;
+    }
     db.execute('PRAGMA journal_mode = WAL');
     db.execute('PRAGMA synchronous = FULL');
     db.execute(
@@ -411,12 +405,15 @@ void _syncMirror(String path) {
       if (mirror.existsSync()) {
         try {
           final existing = _readFile(mirror.path);
+          if (candidate.data == null && existing.data != null) {
+            throw StateError('主库未初始化，已保留现有恢复副本');
+          }
           if (existing.generation == candidate.generation &&
               existing.revision >= candidate.revision) {
             return;
           }
         } catch (error) {
-          if (error is UnsupportedError) rethrow;
+          if (error is UnsupportedError || error is StateError) rethrow;
         }
       }
       File(temporary).renameSync(mirror.path);
@@ -461,8 +458,9 @@ void _upgradeLegacy(String path) {
       return;
     } // The normal recovery path diagnoses corruption.
     if (version != 1) return;
-    if (!File('$path.bak').existsSync())
+    if (!File('$path.bak').existsSync()) {
       throw const FormatException('升级前缺少恢复副本，请使用备份恢复');
+    }
     db.execute('PRAGMA busy_timeout = 5000');
     db.execute('ATTACH DATABASE ? AS recovery', ['$path.bak']);
     db.execute('BEGIN IMMEDIATE');
@@ -555,6 +553,24 @@ Future<_Loaded> _load(String path) async {
     loaded = _readFile(path);
     repaired = true;
     _recoveryNotices[path] = '已从恢复副本恢复，副本之后的修改可能丢失，可以从恢复点或备份恢复。';
+  }
+  // An empty/recreated primary must never replace an initialized recovery copy.
+  if (loaded?.data == null && File(mirror).existsSync()) {
+    _Loaded? recovery;
+    try {
+      recovery = _readFile(mirror);
+    } catch (error) {
+      if (error is UnsupportedError || await _legacy(path) == null) {
+        rethrow;
+      }
+    }
+    if (recovery?.data != null) {
+      _quarantine(path);
+      _copyVerified(mirror, path);
+      loaded = _readFile(path);
+      repaired = true;
+      _recoveryNotices[path] = '已从恢复副本恢复，副本之后的修改可能丢失，可以从恢复点或备份恢复。';
+    }
   }
   if (loaded == null || loaded.data == null) {
     final old = await _legacy(path);
@@ -1111,8 +1127,9 @@ _CommitStats _commitRecords(
       for (final entry in ranks.entries) {
         if (financial.contains(entry.key.$1) ||
             next.containsKey(entry.key) ||
-            positions[entry.key] == entry.value)
+            positions[entry.key] == entry.value) {
           continue;
+        }
         for (final schema in ['main']) {
           db.execute(
             'UPDATE $schema.wallet_rows SET position=? WHERE bucket=? AND id=?',

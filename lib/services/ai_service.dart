@@ -400,8 +400,9 @@ class AiService {
       } else {
         d.chats[index] = snapshot;
       }
-      if (snapshot['taskId'] is String)
+      if (snapshot['taskId'] is String) {
         tasks.flushCounts(d, snapshot['taskId']);
+      }
       AgentActions.syncRun(d, snapshot);
       for (final task in d.extras['tasks'] as List? ?? []) {
         if (task['id'] != snapshot['taskId'] ||

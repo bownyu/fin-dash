@@ -192,6 +192,27 @@ void main() {
     expect(restored.data.transactions, isEmpty);
     expect(restored.recoveryNotice, contains('副本之后的修改可能丢失'));
   });
+  test(
+    'recreated empty primary never replaces an initialized mirror',
+    () async {
+      final store = await open();
+      await store.saveAccount(bank);
+      await store.saveTx(tx());
+      await store.flushMirror();
+      final expected = store.data.toJson();
+      for (final suffix in ['', '-wal', '-shm']) {
+        final file = File('${path()}$suffix');
+        if (await file.exists()) await file.delete();
+      }
+      final empty = sqlite3.open(path());
+      empty.execute('PRAGMA user_version = 2');
+      empty.close();
+      final restored = await open();
+      expect(restored.startupError, null);
+      expect(restored.data.toJson(), expected);
+      expect(restored.recoveryNotice, isNotNull);
+    },
+  );
   test('consistent v1 upgrades in place to WAL schema 2', () async {
     final store = await open();
     await store.saveAccount(bank);

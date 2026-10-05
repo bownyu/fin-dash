@@ -43,7 +43,7 @@ void main() {
                               },
                           ],
                         }
-                            : {'content': 'done'},
+                      : {'content': 'done'},
                 },
               ],
             }),
@@ -154,6 +154,18 @@ void main() {
       expect(notified, isEmpty);
       await store.changeMetadata((d) => d.agent['tags'] = ['通勤']);
       expect(notified, [WalletDomain.memory]);
+      notified.clear();
+      await store.changeMetadata(
+        (d) => d.agent['dismissedSuggestions'] = ['budget'],
+      );
+      expect(notified, [WalletDomain.preferences, WalletDomain.memory]);
+      notified.clear();
+      await store.changeMetadata(
+        (d) => d.extras['savedRecipes'] = [
+          {'id': 'recipe'},
+        ],
+      );
+      expect(notified, [WalletDomain.tasks]);
       store.log('request', '第 1 轮');
       expect((runtime, logs), (0, 1));
     },
@@ -229,7 +241,14 @@ void main() {
       await tester.pump();
       await tester.enterText(find.byType(TextField), '下一条草稿');
       await tester.pump();
-      expect(find.byType(MarkdownBody).evaluate().length, lessThan(10));
+      expect(find.byType(MarkdownBody).evaluate().length, lessThan(30));
+      expect(find.byType(SelectionArea), findsOneWidget);
+      expect(
+        tester
+            .widgetList<MarkdownBody>(find.byType(MarkdownBody))
+            .every((w) => !w.selectable),
+        true,
+      );
       var pageBuilds = 0, composerBuilds = 0, historyParses = 0;
       final previous = debugOnRebuildDirtyWidget;
       debugOnRebuildDirtyWidget = (element, builtOnce) {
@@ -260,7 +279,7 @@ void main() {
       await tester.pump(const Duration(milliseconds: 80));
       expect(list.controller!.offset, offset);
 
-      // Completion replaces the light streaming renderer with selectable Markdown.
+      // Completion uses Markdown selected through the list's SelectionArea.
       list.controller!.jumpTo(0);
       ai.liveMessage!['status'] = 'complete';
       final completed = ai.liveMessage!;

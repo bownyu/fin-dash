@@ -84,19 +84,8 @@ void main() {
     tester,
   ) async {
     await renderApp(tester);
-    double opacity() => tester
-        .widget<FadeTransition>(find.byKey(const Key('main-tab-transition')))
-        .opacity
-        .value;
     Offset offset() => tester
-        .widget<SlideTransition>(
-          find
-              .descendant(
-                of: find.byKey(const Key('main-tab-transition')),
-                matching: find.byType(SlideTransition),
-              )
-              .first,
-        )
+        .widget<SlideTransition>(find.byKey(const Key('main-tab-transition')))
         .position
         .value;
     for (final index in [1, 2, 3, 0, 1]) {
@@ -104,19 +93,18 @@ void main() {
       await tester.pump();
       expectSelectedNavigation(tester, index);
       expect(
-        opacity(),
-        0,
+        offset().dy,
+        .018,
         reason: 'tab $index must animate on its first frame',
       );
       expect(offset().dy, greaterThan(0));
       // A slow first build must not consume the transition.
       await tester.pump(const Duration(milliseconds: 200));
-      expect(opacity(), 0, reason: 'tab $index waits for its first frame');
+      expect(offset().dy, .018, reason: 'tab $index waits for its first frame');
       await tester.pump(const Duration(milliseconds: 100));
       expectSelectedNavigation(tester, index);
-      expect(opacity(), allOf(greaterThan(0), lessThan(1)));
+      expect(offset().dy, allOf(greaterThan(0), lessThan(.018)));
       await tester.pumpAndSettle();
-      expect(opacity(), 1);
       expect(offset(), Offset.zero);
     }
     expect(tester.takeException(), isNull);
@@ -137,10 +125,10 @@ void main() {
     expect(find.byType(BillsPage), findsNothing);
     expect(
       tester
-          .widget<FadeTransition>(find.byKey(const Key('main-tab-transition')))
-          .opacity
+          .widget<SlideTransition>(find.byKey(const Key('main-tab-transition')))
+          .position
           .value,
-      1,
+      Offset.zero,
     );
     expect(tester.takeException(), isNull);
   });
@@ -157,10 +145,10 @@ void main() {
     expectSelectedNavigation(tester, 1);
     expect(
       tester
-          .widget<FadeTransition>(find.byKey(const Key('main-tab-transition')))
-          .opacity
+          .widget<SlideTransition>(find.byKey(const Key('main-tab-transition')))
+          .position
           .value,
-      1,
+      Offset.zero,
     );
     await tester.tap(find.byKey(const Key('nav-0')));
     await tester.pump();
@@ -201,17 +189,19 @@ void main() {
   });
 
   testWidgets(
-    'tab selection is immediate and skips unvisited intermediate tabs',
+    'idle prebuild retains inactive tabs while selection is immediate',
     (tester) async {
       await renderApp(tester);
-      expect(find.byType(StatsPage, skipOffstage: false), findsNothing);
-      expect(find.byType(BillsPage, skipOffstage: false), findsNothing);
+      await tester.pump(const Duration(seconds: 1));
+      await tester.pumpAndSettle();
+      expect(find.byType(StatsPage, skipOffstage: false), findsOneWidget);
+      expect(find.byType(BillsPage, skipOffstage: false), findsOneWidget);
       await tester.tap(find.byKey(const Key('nav-3')));
       await tester.pump();
       expect(find.byType(ProfilePage), findsOneWidget);
       expect(find.byType(HomePage), findsNothing);
-      expect(find.byType(StatsPage, skipOffstage: false), findsNothing);
-      expect(find.byType(BillsPage, skipOffstage: false), findsNothing);
+      expect(find.byType(StatsPage, skipOffstage: false), findsOneWidget);
+      expect(find.byType(BillsPage, skipOffstage: false), findsOneWidget);
       await tester.pumpAndSettle();
       expect(tester.takeException(), isNull);
     },

@@ -21,11 +21,13 @@ Set<String> messageProposalIds(Json message) {
   final cached = _proposalCache[message];
   if (cached != null) return cached;
   final ids = <String>{};
-  if (message['role'] == 'assistant' && message['actionId'] is String)
+  if (message['role'] == 'assistant' && message['actionId'] is String) {
     ids.add(message['actionId']);
+  }
   for (final block in message['blocks'] as List? ?? []) {
-    if (block['type'] != 'tool' || !'${block['name']}'.startsWith('propose_'))
+    if (block['type'] != 'tool' || !'${block['name']}'.startsWith('propose_')) {
       continue;
+    }
     final id = blockProposalId(block);
     if (id != null) ids.add(id);
   }
@@ -48,8 +50,9 @@ void compactChatHistory(WalletMetadata d, {String? sessionId}) {
     }
     if (count < ContextAssembler.replayTurns ||
         message['status'] != 'complete' ||
-        message['historyCompacted'] == true)
+        message['historyCompacted'] == true) {
       continue;
+    }
     message.remove('modelMessages');
     message.remove('responseItems');
     for (final block in message['blocks'] as List? ?? []) {

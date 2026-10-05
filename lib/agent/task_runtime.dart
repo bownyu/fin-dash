@@ -164,8 +164,9 @@ class TaskRuntime {
   Future<void> consume(String id, {bool modelRound = false}) async {
     final task = get(id);
     _epoch(task, store.ledgerEpoch);
-    if (task['state'] != 'preparing')
+    if (task['state'] != 'preparing') {
       throw const ErrorEnvelope(ErrorCode.interrupted, '任务正在等待用户或已经停止');
+    }
     final counts = _counts.putIfAbsent(
       id,
       () => {
@@ -175,12 +176,13 @@ class TaskRuntime {
     );
     final key = modelRound ? 'attempts' : 'toolCalls';
     final next = counts[key]! + 1;
-    if (next > (modelRound ? 12 : 40))
+    if (next > (modelRound ? 12 : 40)) {
       throw const ErrorEnvelope(
         ErrorCode.limitExceeded,
         '本次处理已达到上限，请在任务页选择继续',
         phase: 'task',
       );
+    }
     counts[key] = next;
   }
 

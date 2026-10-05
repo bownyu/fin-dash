@@ -96,8 +96,9 @@ class MetadataDelta {
       deletes.addAll(before.keys.where((key) => !after.containsKey(key)));
       for (final entry in after.entries) {
         if (!before.containsKey(entry.key) ||
-            !identical(before[entry.key]!.value, entry.value.value))
+            !identical(before[entry.key]!.value, entry.value.value)) {
           upserts[entry.key] = entry.value;
+        }
       }
       orderedIds[bucket] = after.keys.map((key) => key.$2).toList();
     }
@@ -113,14 +114,16 @@ class MetadataDelta {
       orderedIds[name] = fresh.keys.toList();
       for (final key in {...old.keys, ...fresh.keys}) {
         final a = old[key], b = fresh[key];
-        if (old.containsKey(key) && fresh.containsKey(key) && identical(a, b))
+        if (old.containsKey(key) && fresh.containsKey(key) && identical(a, b)) {
           continue;
-        if (a is List || b is List)
+        }
+        if (a is List || b is List) {
           list(
             childBucket(name, key),
             a is List ? a : const [],
             b is List ? b : const [],
           );
+        }
         if (!fresh.containsKey(key)) {
           deletes.add((name, key));
           continue;
