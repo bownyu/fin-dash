@@ -322,6 +322,7 @@ class WalletBackdrop extends StatelessWidget {
 
 /// Each route owns an opaque backdrop, including while it enters or leaves.
 /// Sliding an isolated layer avoids blending two pages of text together.
+/// A covered page holds its keyboard metrics; see [HeldKeyboardMetrics].
 class WalletPageTransitionsBuilder extends PageTransitionsBuilder {
   final bool cupertino;
   const WalletPageTransitionsBuilder({this.cupertino = false});
@@ -349,7 +350,9 @@ class WalletPageTransitionsBuilder extends PageTransitionsBuilder {
     Animation<double> secondaryAnimation,
     Widget child,
   ) {
-    final page = RepaintBoundary(child: WalletBackdrop(child: child));
+    final page = RepaintBoundary(
+      child: WalletBackdrop(child: HeldKeyboardMetrics(child: child)),
+    );
     if (MediaQuery.disableAnimationsOf(context)) return page;
     if (cupertino) {
       return const CupertinoPageTransitionsBuilder().buildTransitions(
@@ -585,11 +588,13 @@ class AppScope extends StatefulWidget {
   final WalletStore store;
   final AiService ai;
   final Widget child;
+  final bool active;
   const AppScope({
     super.key,
     required this.store,
     required this.ai,
     required this.child,
+    this.active = true,
   });
   static AppScopeData of(BuildContext context) =>
       InheritedModel.inheritFrom<AppScopeData>(context)!;
@@ -628,7 +633,8 @@ class _AppScopeState extends State<AppScope> {
   final callbacks = <WalletDomain, VoidCallback>{};
   int runtime = 0;
   void refreshRuntime() {
-    if (mounted) setState(() => runtime++);
+    runtime++;
+    if (mounted && widget.active) setState(() {});
   }
 
   @override
@@ -636,7 +642,8 @@ class _AppScopeState extends State<AppScope> {
     super.initState();
     for (final domain in WalletDomain.values) {
       callbacks[domain] = () {
-        if (mounted) setState(() => versions[domain] = versions[domain]! + 1);
+        versions[domain] = versions[domain]! + 1;
+        if (mounted && widget.active) setState(() {});
       };
       widget.store.domainUpdates[domain]!.addListener(callbacks[domain]!);
     }
@@ -870,6 +877,40 @@ class KeyboardInsetPadding extends StatelessWidget {
     padding: EdgeInsets.only(bottom: MediaQuery.viewInsetsOf(context).bottom),
     child: child,
   );
+}
+
+/// An out-of-view page keeps the keyboard metrics it last had in view. Covered
+/// routes and retained tabs are still laid out once marked dirty, so without
+/// this every IME frame of another page rebuilds and re-lays them out.
+/// Size and the other metrics pass through.
+class HeldKeyboardMetrics extends StatefulWidget {
+  /// Holds while true; when null, while the enclosing route is not current.
+  final bool? hold;
+  final Widget child;
+  const HeldKeyboardMetrics({super.key, this.hold, required this.child});
+  @override
+  State<HeldKeyboardMetrics> createState() => _HeldKeyboardMetricsState();
+}
+
+class _HeldKeyboardMetricsState extends State<HeldKeyboardMetrics> {
+  (EdgeInsets, double)? _held;
+  @override
+  Widget build(BuildContext context) {
+    final live = MediaQuery.of(context);
+    final hold = widget.hold ?? !(ModalRoute.isCurrentOf(context) ?? true);
+    final held = hold
+        ? (_held ??= (live.viewInsets, live.padding.bottom))
+        : (_held = null);
+    return MediaQuery(
+      data: held == null
+          ? live
+          : live.copyWith(
+              viewInsets: held.$1,
+              padding: live.padding.copyWith(bottom: held.$2),
+            ),
+      child: widget.child,
+    );
+  }
 }
 
 class PageList extends StatelessWidget {

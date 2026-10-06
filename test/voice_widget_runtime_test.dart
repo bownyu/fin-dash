@@ -50,30 +50,36 @@ void main() {
         'text': '上周五午餐二十八元',
         'entryId': 'widget-1',
       };
-      final result = await widgetRequest(request);
-      expect(result['success'], true);
-      expect(result['summary'], contains('¥ 28.00'));
-      expect(result['canConfirm'], true);
-      expect(store.data.transactions, isEmpty);
-      expect(store.balance(bank), 100000);
-      final confirm = {
-        'operation': 'confirm',
-        'draft': jsonEncode(result['draft']),
-      };
-      final saved = await widgetRequest(confirm);
+      // A complete bill is saved without a separate confirmation tap.
+      final saved = await widgetRequest(request);
       expect(saved['success'], true);
+      expect(saved['summary'], contains('¥ 28.00'));
+      expect(saved['transaction'], isNotNull);
       expect(store.balance(bank), 97200);
       expect(store.data.chats, isEmpty);
       expect(shown, 0);
-      await widgetRequest(confirm);
+      await widgetRequest({
+        'operation': 'confirm',
+        'draft': jsonEncode(saved['draft']),
+      });
       expect(calls, 1);
       expect(store.data.transactions.length, 1);
-      final undo = await widgetRequest({
-        'operation': 'undo',
+      await store.saveAccount(cash);
+      final moved = await widgetRequest({
+        'operation': 'account',
+        'draft': jsonEncode(saved['draft']),
         'transaction': jsonEncode(saved['transaction']),
       });
-      expect(undo['undone'], true);
+      expect(moved['success'], true);
+      expect(store.data.transactions.single.accountId, 'cash');
       expect(store.balance(bank), 100000);
+      expect(store.balance(cash), 7200);
+      final undo = await widgetRequest({
+        'operation': 'undo',
+        'transaction': jsonEncode(moved['transaction']),
+      });
+      expect(undo['undone'], true);
+      expect(store.data.transactions, isEmpty);
       expect(shown, 0);
     },
   );

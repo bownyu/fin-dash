@@ -95,6 +95,8 @@ class WidgetVoiceService : Service() {
                 else callRuntime(id, buildMap {
                     put("operation", if (operation == "confirm") "confirm" else "account")
                     put("draft", draft)
+                    // An account change on a saved bill rewrites that bill.
+                    if (operation != "confirm") prefs.getString("transaction:$id", null)?.let { put("transaction", it) }
                     if (operation == "fromAccount") put("accountField", "transferFromId")
                     if (operation == "toAccount") put("accountField", "transferToId")
                 })
@@ -131,10 +133,12 @@ class WidgetVoiceService : Service() {
                     VoiceWidgetState.show(this, id, live = text)
                 }, { state ->
                     VoiceWidgetState.show(this, id, when (state) {
-                        "listening" -> "正在录音 · 点一下结束"
+                        "listening" -> "正在录音 · 说完点一下结束"
                         "recognizing" -> "正在本地转文字…"
                         else -> "正在启动麦克风…"
                     }, phase = state)
+                    // Ledger startup overlaps speech, so a cold process is ready when recording stops.
+                    if (state == "listening") try { FinDashEngine.warm(this) } catch (_: Exception) { }
                 })
                 speech!!.start()
             }
@@ -175,6 +179,7 @@ class WidgetVoiceService : Service() {
             summary = result["summary"]?.toString(),
             canConfirm = result["canConfirm"] as? Boolean,
             hasAccounts = result["hasAccounts"] as? Boolean,
+            openApp = if (draft != null) result["openApp"] == true else null,
             clear = undone)
         activeId = AppWidgetManager.INVALID_APPWIDGET_ID
         generation++

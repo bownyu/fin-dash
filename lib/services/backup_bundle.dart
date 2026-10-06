@@ -1,6 +1,6 @@
 import 'dart:convert';
-import 'dart:typed_data';
 import 'package:crypto/crypto.dart';
+import 'package:flutter/foundation.dart';
 import '../data/backup.dart';
 import '../data/wallet_store.dart';
 import '../domain/models.dart';
@@ -19,14 +19,10 @@ Future<String> exportBackupBundle(
   ChatImageStorage images, {
   bool includeImages = true,
 }) async {
-  final snapshot = Json.from(jsonDecode(store.exportBackup()) as Map);
-  if (!includeImages) return jsonEncode(snapshot);
-  final ids = (snapshot['chats'] as List)
-      .whereType<Map>()
-      .map((m) => m['imageId'])
-      .whereType<String>()
-      .toSet();
-  final attachments = <String, String>{};
+  final data = store.data;
+  if (!includeImages) return compute(_encodeBundle, (data, null));
+  final ids = data.chats.map((m) => m['imageId']).whereType<String>().toSet();
+  final attachments = <String, Uint8List>{};
   var total = 0;
   for (final id in ids) {
     if (!validChatImageId(id)) throw const FormatException('聊天图片引用无效');
@@ -38,25 +34,50 @@ Future<String> exportBackupBundle(
     if (total > _maxAttachmentBytes) {
       throw const FormatException('图片附件超过 64 MB，请取消包含图片，或先清理较旧的图片。');
     }
-    if (sha256.convert(bytes).toString() != id) {
-      throw const FormatException('聊天图片校验失败，未生成完整备份');
-    }
-    attachments[id] = base64Encode(bytes);
+    attachments[id] = bytes;
   }
-  snapshot['chatImages'] = attachments;
+  return compute(_encodeBundle, (data, attachments));
+}
+
+String _encodeBundle((WalletData, Map<String, Uint8List>?) input) {
+  final (data, images) = input;
+  final snapshot = removeSecrets(data.toJson()) as Json;
+  snapshot['exportDate'] = DateTime.now().toIso8601String();
+  if (images != null) {
+    snapshot['chatImages'] = {
+      for (final entry in images.entries)
+        entry.key: _encodeImage(entry.key, entry.value),
+    };
+  }
   return jsonEncode(snapshot);
 }
 
+String _encodeImage(String id, Uint8List bytes) {
+  if (sha256.convert(bytes).toString() != id) {
+    throw const FormatException('聊天图片校验失败，未生成完整备份');
+  }
+  return base64Encode(bytes);
+}
+
+Future<BackupBundle> parseBackupBundleAsync(Uint8List bytes) =>
+    compute(_parseBundleBytes, bytes);
+BackupBundle _parseBundleBytes(Uint8List bytes) =>
+    parseBackupBundle(utf8.decode(bytes));
+
 BackupBundle parseBackupBundle(String raw) {
-  final preview = parseBackup(raw);
+  if (raw.length > 128 * 1024 * 1024) {
+    throw const FormatException('备份文件超过 128 MB');
+  }
   Object? decoded;
   try {
-    decoded = jsonDecode(raw);
+    decoded = jsonDecode(raw.trim().replaceFirst('\uFEFF', ''));
   } on FormatException {
     // Legacy Base64 backups have no inline image attachments.
-    return BackupBundle(preview, const {});
+    return BackupBundle(parseBackup(raw), const {});
   }
-  if (decoded is! Map || decoded['chatImages'] == null) {
+  if (decoded is! Map) throw const FormatException('备份结构不正确');
+  final preview = parseBackupObject(decoded);
+  if (decoded['chatImages'] == null) {
     return BackupBundle(preview, const {});
   }
   final attachments = decoded['chatImages'];

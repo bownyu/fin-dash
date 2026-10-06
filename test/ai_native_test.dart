@@ -477,15 +477,36 @@ void main() {
       expect(sql.data, memory.data);
       expect(sql.matchedRows, 6);
       expect(sql.nextCursor, memory.nextCursor);
+      final program = QueryRecipe.parse(recipe());
+      final parameters = {
+        'range': {
+          'startInclusive': args['startInclusive'],
+          'endExclusive': args['endExclusive'],
+        },
+      };
+      final indexedRecipe = await program.run(q, parameters);
+      final memoryRecipe = await program.run(
+        LedgerQueries.fromSnapshot(store.data, q.snapshot),
+        parameters,
+      );
+      expect(indexedRecipe.data, memoryRecipe.data);
+      await store.changeMetadata(
+        (d) => d.extras['voiceDrafts'] = {
+          'v': {'text': '午餐'},
+        },
+      );
+      expect((await q.queryAsync(args)).data, memory.data);
     },
   );
   test(
-    'waiting voice keeps the ledger queue free and cancels only its own request',
+    'voice runs during chat and queued cancellation keeps ledger writes free',
     () async {
       final store = await emptyStore();
       await store.saveAccount(bank);
       store.setAiStatus('聊天处理中');
       final queue = ModelQueue(store);
+      final gate = Completer<int>();
+      final first = queue.run('voice-0', () => gate.future);
       var ran = false;
       final pending = queue.run('voice-1', () async {
         ran = true;
@@ -497,8 +518,31 @@ void main() {
       expect(ran, false);
       queue.cancel('voice-1');
       await rejected;
+      gate.complete(1);
+      expect(await first, 1);
       expect(store.aiStatus, '聊天处理中');
       store.setAiStatus(null);
+    },
+  );
+  test(
+    'narrow recipe succeeds when unrelated ledger exceeds scan budget',
+    () async {
+      final store = await emptyStore();
+      await store.saveAccount(bank);
+      await store.change(
+        (d) => d.transactions.addAll([
+          for (var i = 0; i < 50001; i++)
+            tx(id: 'old-$i', date: DateTime(2025, 1, 1)),
+          tx(id: 'current', amount: 123),
+        ]),
+      );
+      final result = await QueryRecipe.parse(recipe()).run(
+        LedgerQueries(store),
+        range(),
+        timeBudget: const Duration(seconds: 20),
+      );
+      expect(result.data.single['totalCents'], 123);
+      expect(result.data.single['count'], 1);
     },
   );
   testWidgets(

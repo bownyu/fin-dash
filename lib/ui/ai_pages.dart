@@ -1,6 +1,8 @@
 import 'dart:convert';
-import 'dart:typed_data';
+import 'dart:ui' as ui;
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:markdown/markdown.dart' as md;
 import 'package:intl/intl.dart';
@@ -9,6 +11,7 @@ import '../application/preference_changes.dart';
 import '../domain/models.dart';
 import '../domain/history_retention.dart';
 import '../services/ai_service.dart';
+import '../services/chat_image_storage.dart';
 import 'design.dart';
 import 'tasks_page.dart';
 import 'interaction.dart';
@@ -306,6 +309,8 @@ class _ChatPageState extends State<ChatPage> {
       unlinked = actions
           .where((a) => !proposalOwners.containsKey(a['id']))
           .toList();
+      // Rows read the name from here instead of each subscribing to memory.
+      final agentName = '${store.data.agent['name']}';
       _messageWidgets = [
         if (messages.isEmpty && unlinked.isEmpty) ...[
           Builder(
@@ -353,6 +358,7 @@ class _ChatPageState extends State<ChatPage> {
               valueListenable: ai.liveUpdates,
               builder: (context, _, child) => _Message(
                 ai.liveMessage ?? m,
+                agentName: agentName,
                 actions: linkedActions,
                 batches: linkedBatches,
               ),
@@ -361,6 +367,7 @@ class _ChatPageState extends State<ChatPage> {
           return _Message(
             m,
             key: key,
+            agentName: agentName,
             actions: linkedActions,
             batches: linkedBatches,
           );
@@ -423,7 +430,7 @@ class _ChatPageState extends State<ChatPage> {
               ),
               IconButton(
                 tooltip: '新建对话',
-                onPressed: ai.busy ? null : newConversation,
+                onPressed: newConversation,
                 icon: const Icon(Icons.add_comment_outlined),
               ),
               IconButton(
@@ -482,68 +489,65 @@ class _ChatPageState extends State<ChatPage> {
           body: Column(
             children: [
               Expanded(
-                child: SelectionArea(
-                  child: _LazyChatList(
-                    controller: scroll,
-                    reverse: messages.isNotEmpty,
-                    padding: const EdgeInsets.fromLTRB(20, 10, 20, 24),
-                    children: [
-                      ..._messageWidgets,
-                      if (ai.busy)
-                        Padding(
-                          padding: const EdgeInsets.only(top: 14),
-                          child: Row(
-                            children: [
-                              const SizedBox.square(
-                                dimension: 15,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                ),
+                // Text is selected per message (long press). A SelectionArea
+                // over the list re-sorts every paragraph by screen position as
+                // rows scroll in, and takes focus from the composer on touch.
+                child: _LazyChatList(
+                  controller: scroll,
+                  reverse: messages.isNotEmpty,
+                  padding: const EdgeInsets.fromLTRB(20, 10, 20, 24),
+                  children: [
+                    ..._messageWidgets,
+                    if (ai.busy)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 14),
+                        child: Row(
+                          children: [
+                            const SizedBox.square(
+                              dimension: 15,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            ),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: Text(
+                                store.aiStatus!,
+                                style: const TextStyle(color: muted),
                               ),
-                              const SizedBox(width: 12),
-                              Expanded(
-                                child: Text(
-                                  store.aiStatus!,
-                                  style: const TextStyle(color: muted),
-                                ),
-                              ),
-                              TextButton(
-                                onPressed: ai.cancel,
-                                child: const Text('停止'),
-                              ),
-                            ],
-                          ),
+                            ),
+                            TextButton(
+                              onPressed: ai.cancel,
+                              child: const Text('停止'),
+                            ),
+                          ],
                         ),
-                      if (ai.error != null)
-                        Panel(
-                          padding: const EdgeInsets.all(14),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                ai.error!,
-                                style: const TextStyle(color: coral),
-                              ),
-                              Row(
-                                children: [
-                                  TextButton(
-                                    onPressed: ai.busy ? null : retry,
-                                    child: const Text('重试'),
-                                  ),
-                                  TextButton(
-                                    onPressed: () => openPage(
-                                      context,
-                                      const AiSettingsPage(),
-                                    ),
-                                    child: const Text('检查设置'),
-                                  ),
-                                ],
-                              ),
-                            ],
-                          ),
+                      ),
+                    if (ai.error != null)
+                      Panel(
+                        padding: const EdgeInsets.all(14),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              ai.error!,
+                              style: const TextStyle(color: coral),
+                            ),
+                            Row(
+                              children: [
+                                TextButton(
+                                  onPressed: ai.busy ? null : retry,
+                                  child: const Text('重试'),
+                                ),
+                                TextButton(
+                                  onPressed: () =>
+                                      openPage(context, const AiSettingsPage()),
+                                  child: const Text('检查设置'),
+                                ),
+                              ],
+                            ),
+                          ],
                         ),
-                    ],
-                  ),
+                      ),
+                  ],
                 ),
               ),
               if (!ai.busy)
@@ -580,6 +584,10 @@ class _ChatPageState extends State<ChatPage> {
                           width: 56,
                           height: 56,
                           fit: BoxFit.cover,
+                          // Width only keeps the aspect ratio for the crop.
+                          cacheWidth:
+                              (56 * MediaQuery.devicePixelRatioOf(context))
+                                  .ceil(),
                         ),
                       ),
                       const SizedBox(width: 10),
@@ -640,7 +648,6 @@ class _ChatPageState extends State<ChatPage> {
   }
 }
 
-// Build only the messages near the viewport. Keys keep image/selection state when rows move.
 const _starters = {
   '聊聊目标': '想和你聊聊我的财务目标，看看现在进展怎么样。',
   '这周花得怎样': '这周我花得怎么样？有什么值得注意的吗？',
@@ -678,7 +685,11 @@ const _starters = {
   return (title, '我会记住你的目标和我们聊过的事。可以从最近的开销、一个想实现的目标，或者只是对钱的感受聊起。');
 }
 
+/// Builds only the rows near the viewport; keys keep row state when rows move.
+/// The newest [_retainedRows] stay mounted once built, so scrolling back and
+/// forth near the bottom does not parse and lay out their Markdown again.
 class _LazyChatList extends StatelessWidget {
+  static const _retainedRows = 30;
   final ScrollController controller;
   final EdgeInsets padding;
   final List<Widget> children;
@@ -696,9 +707,9 @@ class _LazyChatList extends StatelessWidget {
     Map<Key, int>? indexes;
     return ListView.builder(
       controller: controller,
-      cacheExtent: MediaQuery.sizeOf(context).height * 1.5,
       padding: padding,
       reverse: reverse,
+      keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
       itemCount: children.length,
       findChildIndexCallback: (key) {
         if (indexes == null) {
@@ -712,17 +723,59 @@ class _LazyChatList extends StatelessWidget {
         if (index == null) return null;
         return reverse ? children.length - 1 - index : index;
       },
-      itemBuilder: (_, index) =>
-          children[reverse ? children.length - 1 - index : index],
+      itemBuilder: (_, index) {
+        final child = children[reverse ? children.length - 1 - index : index];
+        // The row key stays outermost for findChildIndexCallback.
+        return _Retained(
+          key: child.key,
+          keep: reverse && index < _retainedRows,
+          child: child,
+        );
+      },
     );
   }
 }
 
+class _Retained extends StatefulWidget {
+  final bool keep;
+  final Widget child;
+  const _Retained({super.key, required this.keep, required this.child});
+  @override
+  State<_Retained> createState() => _RetainedState();
+}
+
+class _RetainedState extends State<_Retained>
+    with AutomaticKeepAliveClientMixin {
+  @override
+  bool get wantKeepAlive => widget.keep;
+
+  @override
+  void didUpdateWidget(covariant _Retained oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.keep != widget.keep) updateKeepAlive();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    super.build(context);
+    return widget.child;
+  }
+}
+
+final _messageTime = DateFormat('HH:mm');
+
 class _Message extends StatelessWidget {
   final Json message;
+  final String agentName;
   final List<Json>? actions;
   final List<Json>? batches;
-  const _Message(this.message, {super.key, this.actions, this.batches});
+  const _Message(
+    this.message, {
+    super.key,
+    required this.agentName,
+    this.actions,
+    this.batches,
+  });
   @override
   Widget build(BuildContext context) {
     final user = message['role'] == 'user';
@@ -740,40 +793,43 @@ class _Message extends StatelessWidget {
                   ? '你'
                   : message['isReport'] == true
                   ? '分析报告'
-                  : AppScope.storeOf(context, domains: const {WalletDomain.memory}).data.agent['name']} · ${DateFormat('HH:mm').format(localDate(message['timestamp']))}',
+                  : agentName} · ${_messageTime.format(localDate(message['timestamp']))}',
               style: Theme.of(context).textTheme.bodySmall,
             ),
           ),
-          Container(
-            constraints: const BoxConstraints(maxWidth: 620),
-            padding: const EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              color: user
-                  ? primary.withValues(alpha: .15)
-                  : Theme.of(context).colorScheme.surface,
-              borderRadius: BorderRadius.circular(18),
+          GestureDetector(
+            onLongPress: () => _showMessageText(context, message),
+            child: Container(
+              constraints: const BoxConstraints(maxWidth: 620),
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: user
+                    ? primary.withValues(alpha: .15)
+                    : Theme.of(context).colorScheme.surface,
+                borderRadius: BorderRadius.circular(18),
+              ),
+              child: user
+                  ? Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (message['imageId'] is String) ...[
+                          _ChatImage(message['imageId']),
+                          const SizedBox(height: 8),
+                        ] else if (message['hasImage'] == true)
+                          const Text(
+                            '旧消息的图片未保存',
+                            style: TextStyle(color: muted, fontSize: 12),
+                          ),
+                        Text('${message['content']}'),
+                      ],
+                    )
+                  : _AssistantContent(
+                      message,
+                      actions: actions,
+                      batches: batches,
+                    ),
             ),
-            child: user
-                ? Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      if (message['imageId'] is String) ...[
-                        _ChatImage(message['imageId']),
-                        const SizedBox(height: 8),
-                      ] else if (message['hasImage'] == true)
-                        const Text(
-                          '旧消息的图片未保存',
-                          style: TextStyle(color: muted, fontSize: 12),
-                        ),
-                      Text('${message['content']}'),
-                    ],
-                  )
-                : _AssistantContent(
-                    message,
-                    actions: actions,
-                    batches: batches,
-                  ),
           ),
         ],
       ),
@@ -781,90 +837,170 @@ class _Message extends StatelessWidget {
   }
 }
 
-class _ChatImage extends StatefulWidget {
-  final String id;
-  const _ChatImage(this.id);
-  @override
-  State<_ChatImage> createState() => _ChatImageState();
+String _messageText(Json message) {
+  final texts = [
+    for (final block in message['blocks'] as List? ?? [])
+      if (block['type'] == 'text' && '${block['text'] ?? ''}'.trim().isNotEmpty)
+        '${block['text']}',
+  ];
+  return texts.isEmpty ? '${message['content'] ?? ''}' : texts.join('\n\n');
 }
 
-class _ChatImageState extends State<_ChatImage> {
-  Future<Uint8List?>? image;
-  String? loaded;
+/// Selection is scoped to one message in a sheet, so the chat list carries no
+/// selection registrar while it scrolls.
+void _showMessageText(BuildContext context, Json message) {
+  final text = _messageText(message);
+  if (text.trim().isEmpty || !routeReady(context)) return;
+  HapticFeedback.selectionClick();
+  FocusManager.instance.primaryFocus?.unfocus();
+  showModalBottomSheet<void>(
+    context: context,
+    isScrollControlled: true,
+    useSafeArea: true,
+    showDragHandle: true,
+    builder: (sheet) => FractionallySizedBox(
+      heightFactor: .7,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text('选择文字', style: Theme.of(sheet).textTheme.titleMedium),
+            const SizedBox(height: 12),
+            Expanded(
+              child: SelectionArea(
+                child: SingleChildScrollView(
+                  child: message['role'] == 'user'
+                      ? Text(text)
+                      : _ReplyText(data: text, streaming: false),
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+            FilledButton(
+              onPressed: () async {
+                await Clipboard.setData(ClipboardData(text: text));
+                if (!sheet.mounted) return;
+                toast(sheet, '已复制');
+                Navigator.pop(sheet);
+              },
+              child: const Text('复制全文'),
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
+}
+
+/// Decoded once per image ID at the displayed size and kept in the image
+/// cache, so a row scrolling back neither reads the file nor decodes again.
+class _StoredChatImage extends ImageProvider<_StoredChatImage> {
+  final ChatImageStorage storage;
+  final String id;
+  const _StoredChatImage(this.storage, this.id);
+
   @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    if (loaded != widget.id) {
-      loaded = widget.id;
-      image = AppScope.aiOf(context).images.read(widget.id);
-    }
+  Future<_StoredChatImage> obtainKey(ImageConfiguration configuration) =>
+      SynchronousFuture(this);
+
+  @override
+  ImageStreamCompleter loadImage(
+    _StoredChatImage key,
+    ImageDecoderCallback decode,
+  ) => MultiFrameImageStreamCompleter(
+    codec: _load(decode),
+    scale: 1,
+    debugLabel: 'chat-image:$id',
+  );
+
+  Future<ui.Codec> _load(ImageDecoderCallback decode) async {
+    final bytes = await storage.read(id);
+    if (bytes == null) throw const _MissingChatImage();
+    return decode(await ui.ImmutableBuffer.fromUint8List(bytes));
   }
 
   @override
-  Widget build(BuildContext context) => FutureBuilder<Uint8List?>(
-    future: image,
-    builder: (context, snapshot) {
-      if (snapshot.connectionState != ConnectionState.done) {
-        return const SizedBox(
-          height: 100,
-          child: Center(child: CircularProgressIndicator()),
-        );
-      }
-      final bytes = snapshot.data;
-      if (bytes == null) {
-        return const Text(
-          '图片不在本机，无法预览',
-          style: TextStyle(color: muted, fontSize: 12),
-        );
-      }
-      return Semantics(
-        label: '已发送的图片，点击放大',
-        button: true,
-        child: InkWell(
-          key: ValueKey('chat-image:${widget.id}'),
-          onTap: () => showDialog<void>(
-            context: context,
-            builder: (context) => Dialog(
-              child: Stack(
-                children: [
-                  InteractiveViewer(
-                    child: Image.memory(bytes, fit: BoxFit.contain),
+  bool operator ==(Object other) =>
+      other is _StoredChatImage &&
+      identical(other.storage, storage) &&
+      other.id == id;
+
+  @override
+  int get hashCode => Object.hash(storage, id);
+}
+
+class _MissingChatImage implements Exception {
+  const _MissingChatImage();
+}
+
+Widget _chatImageError(BuildContext context, Object error, StackTrace? _) =>
+    error is _MissingChatImage
+    ? const Text('图片不在本机，无法预览', style: TextStyle(color: muted, fontSize: 12))
+    : const SizedBox(height: 80, child: Center(child: Text('无法解码这张图片')));
+
+class _ChatImage extends StatelessWidget {
+  final String id;
+  const _ChatImage(this.id);
+
+  @override
+  Widget build(BuildContext context) {
+    final image = _StoredChatImage(AppScope.aiOf(context).images, id);
+    final ratio = MediaQuery.devicePixelRatioOf(context);
+    return Semantics(
+      label: '已发送的图片，点击放大',
+      button: true,
+      child: InkWell(
+        key: ValueKey('chat-image:$id'),
+        onTap: () => showDialog<void>(
+          context: context,
+          builder: (context) => Dialog(
+            child: Stack(
+              children: [
+                InteractiveViewer(
+                  child: Image(
+                    image: image,
+                    fit: BoxFit.contain,
+                    errorBuilder: _chatImageError,
                   ),
-                  Positioned(
-                    top: 0,
-                    right: 0,
-                    child: IconButton(
-                      tooltip: '关闭图片',
-                      onPressed: () => Navigator.pop(context),
-                      icon: const Icon(Icons.close),
-                    ),
+                ),
+                Positioned(
+                  top: 0,
+                  right: 0,
+                  child: IconButton(
+                    tooltip: '关闭图片',
+                    onPressed: () => Navigator.pop(context),
+                    icon: const Icon(Icons.close),
                   ),
-                ],
-              ),
-            ),
-          ),
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(12),
-            child: Image.memory(
-              bytes,
-              width: 240,
-              height: 180,
-              fit: BoxFit.contain,
-              errorBuilder: (_, error, stack) => const SizedBox(
-                height: 80,
-                child: Center(child: Text('无法解码这张图片')),
-              ),
+                ),
+              ],
             ),
           ),
         ),
-      );
-    },
-  );
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(12),
+          // A fixed box keeps the row height stable while the image loads.
+          child: Image(
+            image: ResizeImage(
+              image,
+              width: (240 * ratio).ceil(),
+              height: (180 * ratio).ceil(),
+              policy: ResizeImagePolicy.fit,
+            ),
+            width: 240,
+            height: 180,
+            fit: BoxFit.contain,
+            errorBuilder: _chatImageError,
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 Set<String> _proposalIds(Json message) => messageProposalIds(message);
 
-// Avoid reparsing a growing Markdown document for every token. Completed text remains selectable.
+// Avoid reparsing a growing Markdown document for every token.
 class _ReplyText extends StatelessWidget {
   final String data;
   final bool streaming;
@@ -999,7 +1135,10 @@ class _ProcessingTrace extends StatelessWidget {
       builder: (context) => ValueListenableBuilder<int>(
         valueListenable: AppScope.aiOf(context).liveUpdates,
         builder: (context, _, child) {
-          AppScope.storeOf(context);
+          AppScope.storeOf(
+            context,
+            domains: const {WalletDomain.conversations},
+          );
           final blocks = message['blocks'] as List? ?? [];
           return SelectionArea(
             child: FractionallySizedBox(
@@ -1211,25 +1350,21 @@ class ChatHistoryPage extends StatelessWidget {
                     ),
                   ),
                   trailing: const Icon(Icons.chevron_right),
-                  onTap: ai.busy
-                      ? null
-                      : () async {
-                          if (await perform(
-                                context,
-                                () => ai.switchConversation(session['id']),
-                              ) &&
-                              context.mounted) {
-                            if (returnToChat) {
-                              Navigator.pop(context);
-                            } else {
-                              Navigator.of(context).pushReplacement(
-                                WalletPageRoute(
-                                  builder: (_) => const ChatPage(),
-                                ),
-                              );
-                            }
-                          }
-                        },
+                  onTap: () async {
+                    if (await perform(
+                          context,
+                          () => ai.switchConversation(session['id']),
+                        ) &&
+                        context.mounted) {
+                      if (returnToChat) {
+                        Navigator.pop(context);
+                      } else {
+                        Navigator.of(context).pushReplacement(
+                          WalletPageRoute(builder: (_) => const ChatPage()),
+                        );
+                      }
+                    }
+                  },
                 ),
               ),
             ),

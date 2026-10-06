@@ -1955,7 +1955,7 @@ class _BackupPageState extends State<BackupPage> {
   }
 
   Future<void> import() async {
-    if (AppScope.aiOf(context).busy) {
+    if (AppScope.aiOf(context).hasActiveRequests) {
       toast(context, '请先停止当前 AI 请求');
       return;
     }
@@ -1968,19 +1968,23 @@ class _BackupPageState extends State<BackupPage> {
       if (result == null) return;
       final bytes = result.files.single.bytes;
       if (bytes == null) throw const FormatException('文件无法读取');
-      final bundle = parseBackupBundle(utf8.decode(bytes));
+      final bundle = await parseBackupBundleAsync(bytes);
       final preview = bundle.preview;
+      final effects = <String, int>{};
+      for (final tx in preview.data.transactions) {
+        for (final id in {
+          tx.accountId,
+          tx.fromId,
+          tx.toId,
+        }.whereType<String>()) {
+          effects[id] = (effects[id] ?? 0) + tx.effectOn(id);
+        }
+      }
       final net = preview.data.accounts
           .where((a) => a.includeInTotal)
           .fold<int>(
             0,
-            (sum, a) =>
-                sum +
-                a.openingBalance +
-                preview.data.transactions.fold<int>(
-                  0,
-                  (s, t) => s + t.effectOn(a.id),
-                ),
+            (sum, a) => sum + a.openingBalance + (effects[a.id] ?? 0),
           );
       if (!mounted) return;
       final approved = await showDialog<bool>(

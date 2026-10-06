@@ -92,7 +92,10 @@ class WalletStore extends ChangeNotifier {
     }
     try {
       final backend = storage;
-      if (backend is RestorePointStorage) {
+      if (backend is RestorePointStatusStorage) {
+        hasRestorePoint = await (backend as RestorePointStatusStorage)
+            .restorePointExists();
+      } else if (backend is RestorePointStorage) {
         hasRestorePoint =
             await (backend as RestorePointStorage).loadRestorePoint() != null;
       }
@@ -184,6 +187,7 @@ class WalletStore extends ChangeNotifier {
     next.materializeMetadata(previous: _data);
     final ledgerChanged = _financialChange(_data, next);
     final previous = _data;
+    final transactionChanges = next.transactions;
     if (ledgerChanged) _ledgerRevision++;
     List<T> share<T>(List<T> values) =>
         values is LedgerList<T> && !values.changed && !values.reordered
@@ -194,6 +198,58 @@ class WalletStore extends ChangeNotifier {
     next.categories = share(next.categories);
     next.quickEntries = share(next.quickEntries);
     next.freeze(previous: previous);
+    if (transactionChanges is LedgerList<LedgerTx> &&
+        identical(_derivedTransactions, previous.transactions) &&
+        !identical(previous.transactions, next.transactions)) {
+      final before = transactionChanges.before.values;
+      final after = transactionChanges.after.values;
+      if (_balanceEffects != null) {
+        for (final tx in before) {
+          _addEffect(_balanceEffects!, tx, -1);
+        }
+        for (final tx in after) {
+          _addEffect(_balanceEffects!, tx, 1);
+        }
+      }
+      for (final key in _totals.keys.toList()) {
+        final (type, start, end) = key;
+        bool includes(LedgerTx tx) =>
+            tx.type == type &&
+            (start == null || !tx.date.isBefore(start)) &&
+            (end == null || tx.date.isBefore(end));
+        _totals[key] =
+            _totals[key]! -
+            before.where(includes).fold<int>(0, (s, t) => s + t.amount) +
+            after.where(includes).fold<int>(0, (s, t) => s + t.amount);
+      }
+      _breakdowns.clear();
+      _searchText = null;
+      if (_orderedTransactions != null && !transactionChanges.reordered) {
+        final changedIds = {
+          ...transactionChanges.before.keys,
+          ...transactionChanges.after.keys,
+        };
+        final retained = _orderedTransactions!
+            .where((t) => !changedIds.contains(t.id))
+            .toList();
+        final added = after.toList()..sort(_compareTransactions);
+        final merged = <LedgerTx>[];
+        var i = 0, j = 0;
+        while (i < retained.length && j < added.length) {
+          merged.add(
+            _compareTransactions(retained[i], added[j]) <= 0
+                ? retained[i++]
+                : added[j++],
+          );
+        }
+        merged.addAll(retained.skip(i));
+        merged.addAll(added.skip(j));
+        _orderedTransactions = merged;
+      } else {
+        _orderedTransactions = null;
+      }
+      _derivedTransactions = next.transactions;
+    }
     _data = next;
     for (final domain in WalletDomain.values) {
       bool extrasChanged(List<String> keys) =>
@@ -356,7 +412,11 @@ class WalletStore extends ChangeNotifier {
     );
     _derivedAccounts = _data.accounts;
     _derivedTransactions = _data.transactions;
-    if (sameAccounts && sameTransactions) return;
+    if (!sameAccounts) {
+      _accountsById = null;
+      _searchText = null;
+    }
+    if (sameTransactions) return;
     _totals.clear();
     _breakdowns.clear();
     _balanceEffects = null;
@@ -387,10 +447,31 @@ class WalletStore extends ChangeNotifier {
     return _balanceEffects = result;
   }
 
+  static void _addEffect(Map<String, int> effects, LedgerTx tx, int sign) {
+    void add(String? id, int amount) {
+      if (id != null) effects[id] = (effects[id] ?? 0) + sign * amount;
+    }
+
+    switch (tx.type) {
+      case TxType.expense:
+        add(tx.accountId, -tx.amount);
+      case TxType.income:
+        add(tx.accountId, tx.amount);
+      case TxType.transfer:
+        add(tx.fromId, -tx.amount);
+        add(tx.toId, tx.amount);
+    }
+  }
+
+  static int _compareTransactions(LedgerTx a, LedgerTx b) {
+    final date = b.date.compareTo(a.date);
+    return date == 0 ? a.id.compareTo(b.id) : date;
+  }
+
   List<LedgerTx> get _ordered {
     _checkDerivedData();
     return _orderedTransactions ??= (_data.transactions.toList()
-      ..sort((a, b) => b.date.compareTo(a.date)));
+      ..sort(_compareTransactions));
   }
 
   int balance(WalletAccount a) => a.openingBalance + (_effects[a.id] ?? 0);

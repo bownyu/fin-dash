@@ -1,6 +1,8 @@
 package com.findash.fin_dash
 
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
 import io.flutter.FlutterInjector
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.embedding.engine.dart.DartExecutor
@@ -39,6 +41,17 @@ object FinDashEngine {
         }
         created.dartExecutor.executeDartEntrypoint(DartExecutor.DartEntrypoint(loader.findAppBundlePath(), "main"), listOf(if (showApp) "app" else "widget"))
         return created
+    }
+
+    /** Boots the ledger while the user is still speaking; the main thread does not wait on the loader. */
+    fun warm(context: Context) {
+        if (engine != null) return
+        val app = context.applicationContext
+        val loader = FlutterInjector.instance().flutterLoader()
+        loader.startInitialization(app)
+        loader.ensureInitializationCompleteAsync(app, null, Handler(Looper.getMainLooper())) {
+            try { get(app) } catch (_: Exception) { } // The next runtime call reports the failure.
+        }
     }
 
     fun whenReady(context: Context, callback: (FlutterEngine) -> Unit) {

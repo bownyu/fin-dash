@@ -23,6 +23,14 @@
             <intent-filter><action android:name="android.appwidget.action.APPWIDGET_UPDATE" /></intent-filter>
             <meta-data android:name="android.appwidget.provider" android:resource="@xml/voice_widget_info" />
         </receiver>
+        <receiver android:name=".VoiceWidgetMedium" android:exported="false" android:label="@string/voice_widget_medium_title">
+            <intent-filter><action android:name="android.appwidget.action.APPWIDGET_UPDATE" /></intent-filter>
+            <meta-data android:name="android.appwidget.provider" android:resource="@xml/voice_widget_medium_info" />
+        </receiver>
+        <receiver android:name=".VoiceWidgetSmall" android:exported="false" android:label="@string/voice_widget_small_title">
+            <intent-filter><action android:name="android.appwidget.action.APPWIDGET_UPDATE" /></intent-filter>
+            <meta-data android:name="android.appwidget.provider" android:resource="@xml/voice_widget_small_info" />
+        </receiver>
         <service
             android:name=".PaymentNotificationListener"
             android:process=":payment_capture"

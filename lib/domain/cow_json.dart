@@ -87,6 +87,9 @@ class CowList<T> extends ListBase<T> {
   final FrozenList<T> original;
   List<T>? _copy;
   CowList(this.original);
+
+  /// Inspect a child without turning an unchanged subtree into a draft.
+  T peek(int index) => _read[index];
   List<T> get _read => _copy ?? original;
   List<T> get _write => _copy ??= List<T>.of(original);
   @override

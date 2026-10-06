@@ -4,4 +4,34 @@
         <item name="android:windowBackground">@android:color/transparent</item>
         <item name="android:backgroundDimEnabled">false</item>
     </style>
+    <style name="VoiceWidgetChip">
+        <item name="android:layout_width">wrap_content</item>
+        <item name="android:layout_height">match_parent</item>
+        <item name="android:layout_marginEnd">6dp</item>
+        <item name="android:paddingStart">12dp</item>
+        <item name="android:paddingEnd">12dp</item>
+        <item name="android:gravity">center</item>
+        <item name="android:background">@drawable/voice_widget_chip</item>
+        <item name="android:textColor">@color/voice_widget_accent</item>
+        <item name="android:textSize">12sp</item>
+        <item name="android:maxLines">1</item>
+        <item name="android:visibility">gone</item>
+    </style>
+    <!-- Widgets inflate with the launcher's theme, whose spinner (seen on HyperOS) can be clipped
+         square by a small ProgressBar. Every attribute here is explicit so it always fits. -->
+    <style name="VoiceWidgetSpinner" parent="@android:style/Widget.Material.ProgressBar">
+        <item name="android:layout_gravity">center</item>
+        <item name="android:indeterminate">true</item>
+        <item name="android:indeterminateOnly">true</item>
+        <item name="android:indeterminateDrawable">@drawable/voice_widget_spinner</item>
+        <item name="android:indeterminateTint">@color/voice_widget_action</item>
+        <item name="android:indeterminateTintMode">src_in</item>
+        <item name="android:indeterminateDuration">900</item>
+        <item name="android:indeterminateBehavior">repeat</item>
+        <item name="android:interpolator">@android:anim/linear_interpolator</item>
+        <item name="android:background">@android:color/transparent</item>
+        <item name="android:minWidth">0dp</item>
+        <item name="android:minHeight">0dp</item>
+        <item name="android:visibility">gone</item>
+    </style>
 </resources>

@@ -5,6 +5,7 @@ import 'package:fin_dash/ui/design.dart';
 import 'package:fin_dash/ui/finance_pages.dart';
 import 'package:fin_dash/ui/voice_entry_sheet.dart';
 import 'helpers.dart';
+import 'navigation_test.dart' show renderApp;
 
 void main() {
   testWidgets('voice keyboard and continued typing do not rebuild the page', (
@@ -116,6 +117,36 @@ void main() {
     await tester.drag(find.byType(Scrollable).first, const Offset(0, -1200));
     await tester.pumpAndSettle();
     expect(find.byType(TransactionRow).evaluate().length, lessThan(30));
+    expect(tester.takeException(), null);
+  });
+
+  testWidgets('keyboard frames of a page above leave the retained tabs alone', (
+    tester,
+  ) async {
+    await renderApp(tester);
+    addTearDown(tester.view.resetViewInsets);
+    for (final index in [1, 2, 3, 0]) {
+      await tester.tap(find.byKey(Key('nav-$index')));
+      await tester.pumpAndSettle();
+    }
+    await tester.tap(find.text('AI 顾问').first);
+    await tester.pumpAndSettle();
+    await tester.showKeyboard(find.byType(TextField));
+    await tester.pump();
+    var covered = 0;
+    final previous = debugOnRebuildDirtyWidget;
+    debugOnRebuildDirtyWidget = (element, builtOnce) {
+      previous?.call(element, builtOnce);
+      if (element.widget is MoneyText || element.widget is TransactionRow) {
+        covered++;
+      }
+    };
+    addTearDown(() => debugOnRebuildDirtyWidget = previous);
+    for (final height in [60.0, 160.0, 260.0, 320.0, 160.0, 0.0]) {
+      tester.view.viewInsets = FakeViewPadding(bottom: height);
+      await tester.pump(const Duration(milliseconds: 16));
+    }
+    expect(covered, 0);
     expect(tester.takeException(), null);
   });
 }

@@ -401,16 +401,53 @@ class VoiceBookkeeping {
 
   Future<void> undoBatch(List<LedgerTx> transactions) => store.change((d) {
     if (d.settings['locked'] == true) throw const FormatException('账本已锁定，请先解锁');
-    for (final transaction in transactions) {
-      final current = d.transactions
-          .where((t) => t.id == transaction.id)
-          .firstOrNull;
-      if (current != null &&
-          !LedgerOperations.sameTransaction(current, transaction)) {
-        throw const FormatException('这笔账单后来有修改，请到账单页面处理');
-      }
-    }
+    _unchanged(d, transactions, allowRemoved: true);
     final ids = transactions.map((t) => t.id).toSet();
     d.transactions.removeWhere((t) => ids.contains(t.id));
   });
+
+  /// Rewrites just-saved [saved] bills with [batch]'s accounts in one
+  /// transaction, only while nobody has changed them since saving.
+  Future<List<LedgerTx>> amendBatch(
+    List<LedgerTx> saved,
+    VoiceBatch batch,
+  ) async {
+    _unlocked();
+    if (saved.length != batch.entries.length ||
+        !saved.every((t) => batch.entries.any((e) => e.entryId == t.id))) {
+      throw const FormatException('账单已变化，请开始新的语音记账');
+    }
+    final result = <LedgerTx>[];
+    await store.change((d) {
+      _unchanged(d, saved, allowRemoved: false);
+      for (final entry in batch.entries) {
+        final transaction = LedgerOperations.putTransaction(
+          d,
+          entry.validate(d),
+        );
+        result.add(transaction);
+        if (transaction.accountId != null) {
+          d.settings['quickEntryAccountId'] = transaction.accountId;
+        }
+      }
+    });
+    return result;
+  }
+
+  static void _unchanged(
+    WalletData data,
+    List<LedgerTx> saved, {
+    required bool allowRemoved,
+  }) {
+    for (final transaction in saved) {
+      final current = data.transactions
+          .where((t) => t.id == transaction.id)
+          .firstOrNull;
+      if (current == null
+          ? !allowRemoved
+          : !LedgerOperations.sameTransaction(current, transaction)) {
+        throw const FormatException('这笔账单后来有修改，请到账单页面处理');
+      }
+    }
+  }
 }

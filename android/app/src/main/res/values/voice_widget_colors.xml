@@ -1,0 +1,12 @@
+<resources>
+    <color name="voice_widget_surface">#F7F9FD</color>
+    <color name="voice_widget_outline">#E2E8F3</color>
+    <color name="voice_widget_title">#17243D</color>
+    <color name="voice_widget_detail">#56627A</color>
+    <color name="voice_widget_accent">#2F6FE4</color>
+    <color name="voice_widget_chip">#E8EFFD</color>
+    <color name="voice_widget_action">#3478F6</color>
+    <color name="voice_widget_recording">#E5484D</color>
+    <color name="voice_widget_confirm">#2F9E6E</color>
+    <color name="voice_widget_on_action">#FFFFFF</color>
+</resources>

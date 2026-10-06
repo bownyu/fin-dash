@@ -132,6 +132,45 @@ Widget featureHarness(
 
 void main() {
   test(
+    'voice and session browsing leave a running chat in its original session',
+    () async {
+      final store = await configuredAiStore();
+      final chatStarted = Completer<void>(),
+          chatGate = Completer<http.Response>();
+      final ai = AiService(
+        store,
+        TestVault('key'),
+        clientFactory: () => MockClient((request) async {
+          final body = jsonDecode(request.body) as Map;
+          final messages = body['messages'] as List;
+          if (messages.last['content'] == '长回复') {
+            chatStarted.complete();
+            return chatGate.future;
+          }
+          return answer(jsonEncode(expense()));
+        }),
+      );
+      final chat = ai.send('长回复');
+      await chatStarted.future;
+      await ai.newConversation();
+      final viewed = ai.activeSessionId;
+      final voice = await ai.queueVoice(
+        'voice',
+        '午餐28元',
+        defaultAccountId: 'bank',
+      );
+      expect(voice['amountCents'], 2800);
+      expect(ai.busy, true);
+      expect(ai.activeSessionId, viewed);
+      chatGate.complete(answer('原会话回复'));
+      await chat;
+      expect(ai.error, null);
+      expect(AiService.sessionOf(store.data.chats.last), 'legacy');
+      expect(ai.activeSessionId, viewed);
+      expect(ai.busy, false);
+    },
+  );
+  test(
     'voice books exact cents once, uses no chat context, and supports safe undo',
     () async {
       final store = await configuredAiStore();

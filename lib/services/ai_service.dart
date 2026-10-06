@@ -8,6 +8,7 @@ import '../data/wallet_store.dart';
 import '../data/storage_base.dart';
 import '../domain/models.dart';
 import '../domain/history_retention.dart';
+import '../domain/cow_json.dart';
 import '../domain/query_contracts.dart';
 import '../agent/task_runtime.dart';
 import '../agent/capability_host.dart';
@@ -22,6 +23,8 @@ import 'agent_memory.dart';
 import 'openai_transport.dart';
 import 'chat_image_storage.dart';
 export 'openai_transport.dart' show endpoint, chatProtocol, responsesProtocol;
+
+Json _freezeRun(Json run) => freezeValue(run) as Json;
 
 class AiImage {
   final Uint8List bytes;
@@ -81,6 +84,13 @@ class AiService {
   final Duration requestTimeout;
   final ChatImageStorage images;
   http.Client? _client;
+  http.Client? _voiceClient;
+  int _voiceGeneration = 0;
+  bool _voiceBusy = false;
+  bool get voiceBusy => _voiceBusy;
+  String? get activeVoiceRequestId => _voiceRequestId;
+  bool get hasActiveRequests =>
+      busy || voiceBusy || voiceQueue.waiting.isNotEmpty;
   int _generation = 0;
   String? error, lastPrompt;
   DateRange? lastRange;
@@ -92,6 +102,7 @@ class AiService {
   // Token updates belong to the current reply, not the shared ledger/UI tree.
   final liveUpdates = ValueNotifier<int>(0);
   Timer? _notifyTimer;
+  String? _historyCleanupKey;
   Completer<void>? _toolFinished;
   late final AgentActions actions = AgentActions(store);
   late final TaskRuntime tasks = TaskRuntime(store);
@@ -104,6 +115,7 @@ class AiService {
     toolDefinitions,
   );
   String? _taskId, _nextTaskId, _voiceRequestId;
+  String get _toolSessionId => liveMessage?['sessionId'] ?? activeSessionId;
   late final voiceQueue = ModelQueue(store);
   late final AgentMemory memory = AgentMemory(store);
   AiService(
@@ -192,44 +204,28 @@ class AiService {
   }
 
   Future<void> newConversation() async {
-    if (busy) throw const FormatException('请先停止当前回复');
     final id = newId();
-    _savingConfiguration = true;
-    store.setAiStatus('新建对话…');
-    try {
-      await store.changeMetadata((d) {
-        final sessions = List<Json>.from(
-          (d.extras['chatSessions'] as List? ?? []).map((e) => Json.from(e)),
-        );
-        sessions.add({
-          'id': id,
-          'title': '新对话',
-          'createdAt': DateTime.now().millisecondsSinceEpoch,
-        });
-        d.extras['chatSessions'] = sessions;
-        d.extras['activeChatSessionId'] = id;
+    await store.changeMetadata((d) {
+      final sessions = List<Json>.from(
+        (d.extras['chatSessions'] as List? ?? []).map((e) => Json.from(e)),
+      );
+      sessions.add({
+        'id': id,
+        'title': '新对话',
+        'createdAt': DateTime.now().millisecondsSinceEpoch,
       });
-      _resetConversation();
-    } finally {
-      _savingConfiguration = false;
-      store.setAiStatus(null);
-    }
+      d.extras['chatSessions'] = sessions;
+      d.extras['activeChatSessionId'] = id;
+    });
+    if (!busy) _resetConversation();
   }
 
   Future<void> switchConversation(String id) async {
-    if (busy) throw const FormatException('请先停止当前回复');
     if (!sessions.any((s) => s['id'] == id)) {
       throw const FormatException('对话不存在');
     }
-    _savingConfiguration = true;
-    store.setAiStatus('打开对话…');
-    try {
-      await store.changeMetadata((d) => d.extras['activeChatSessionId'] = id);
-      _resetConversation();
-    } finally {
-      _savingConfiguration = false;
-      store.setAiStatus(null);
-    }
+    await store.changeMetadata((d) => d.extras['activeChatSessionId'] = id);
+    if (!busy) _resetConversation();
   }
 
   Future<void> saveConfiguration(
@@ -237,7 +233,7 @@ class AiService {
     String key, {
     String? providerId,
   }) async {
-    if (busy) throw const FormatException('请先停止当前 AI 请求');
+    if (hasActiveRequests) throw const FormatException('请先停止当前 AI 请求');
     final id = providerId ?? provider;
     final snapshot = Json.from(jsonDecode(jsonEncode(next)));
     snapshot['name'] = '${snapshot['name'] ?? configurationName(id)}'.trim();
@@ -270,7 +266,7 @@ class AiService {
   }
 
   Future<void> switchConfiguration(String id) async {
-    if (busy) throw const FormatException('请先停止当前 AI 请求');
+    if (hasActiveRequests) throw const FormatException('请先停止当前 AI 请求');
     if (!configurationIds.contains(id)) throw const FormatException('配置不存在');
     if (id == provider) return;
     _savingConfiguration = true;
@@ -288,7 +284,7 @@ class AiService {
   }
 
   Future<void> removeConfiguration(String id) async {
-    if (busy) throw const FormatException('请先停止当前 AI 请求');
+    if (hasActiveRequests) throw const FormatException('请先停止当前 AI 请求');
     if (!configurationIds.contains(id)) throw const FormatException('配置不存在');
     _savingConfiguration = true;
     store.setAiStatus('删除配置…');
@@ -390,11 +386,26 @@ class AiService {
             ? 'modelMessages'
             : 'responseItems',
       );
-    final snapshot = Json.from(jsonDecode(jsonEncode(persistent)));
+    final snapshot = await compute(_freezeRun, persistent);
+    final cleanupKey = '${store.ledgerEpoch}|${dayKey(DateTime.now())}';
+    final cleanup = _historyCleanupKey != cleanupKey;
     await store.changeMetadata((d) {
-      final cutoff = DateTime.now().subtract(const Duration(days: 365));
-      d.chats.removeWhere((m) => localDate(m['timestamp']).isBefore(cutoff));
-      final index = d.chats.indexWhere((m) => m['id'] == snapshot['id']);
+      if (cleanup) {
+        final cutoff = DateTime.now().subtract(const Duration(days: 365));
+        d.chats.removeWhere((m) => localDate(m['timestamp']).isBefore(cutoff));
+      }
+      // Replies normally occupy the last slot. Inspect immutable children until
+      // finding it, so a checkpoint does not draft every historical message.
+      var index = -1;
+      for (var i = d.chats.length - 1; i >= 0; i--) {
+        final message = d.chats is CowList<Json>
+            ? (d.chats as CowList<Json>).peek(i)
+            : d.chats[i];
+        if (message['id'] == snapshot['id']) {
+          index = i;
+          break;
+        }
+      }
       if (index < 0) {
         d.chats.add(snapshot);
       } else {
@@ -423,9 +434,12 @@ class AiService {
             : 'interrupted';
         task['checkpointMessageId'] = snapshot['id'];
       }
-      compactChatHistory(d, sessionId: sessionOf(snapshot));
-      pruneHistory(d);
+      if (snapshot['status'] != 'streaming') {
+        compactChatHistory(d, sessionId: sessionOf(snapshot));
+        pruneHistory(d);
+      }
     });
+    if (cleanup) _historyCleanupKey = cleanupKey;
     tasks.committed();
   }
 
@@ -895,6 +909,9 @@ class AiService {
         liveMessage = null;
         if (error != null) store.log('error', error!);
         store.setAiStatus(null);
+        if (run != null && sessionOf(run) != activeSessionId) {
+          _resetConversation();
+        }
       }
     }
   }
@@ -902,7 +919,9 @@ class AiService {
   List<Json> _contextMessages({String? excluding, String? throughUser}) {
     final messages = <Json>[];
     for (final m in store.data.chats.where(
-      (m) => m['id'] != excluding && sessionOf(m) == activeSessionId,
+      (m) =>
+          m['id'] != excluding &&
+          sessionOf(m) == (liveMessage?['sessionId'] ?? activeSessionId),
     )) {
       messages.add(m);
       if (m['id'] == throughUser) break;
@@ -1015,7 +1034,11 @@ class AiService {
 
   Future<void> cancelVoice(String entryId) async {
     voiceQueue.cancel(entryId);
-    if (_voiceRequestId == entryId) await cancel();
+    if (_voiceRequestId == entryId) {
+      _voiceGeneration++;
+      _voiceClient?.close();
+      _voiceClient = null;
+    }
   }
 
   /// [current] is a draft under review that [text] corrects; [history] holds
@@ -1026,17 +1049,20 @@ class AiService {
     Json? current,
     List<Json> history = const [],
   }) async {
-    if (busy) throw const FormatException('请先等待当前 AI 请求完成');
+    if (_voiceBusy) throw const FormatException('请先等待当前语音解析完成');
     if (text.trim().isEmpty) throw const FormatException('请先说出或输入记账内容');
     if (text.length > 1000) throw const FormatException('请将一次语音记账控制在 1000 字以内');
-    final generation = ++_generation;
-    store.setAiStatus('解析语音账单…');
+    final generation = ++_voiceGeneration;
+    _voiceBusy = true;
+    store.refreshRuntime();
     http.Client? client;
     String key = '';
     try {
       final settings = {...config, 'stream': false, 'toolsEnabled': false};
       key = await vault.read(provider) ?? '';
-      if (generation != _generation) throw const FormatException('语音记账已取消');
+      if (generation != _voiceGeneration) {
+        throw const FormatException('语音记账已取消');
+      }
       if (key.isEmpty) throw const FormatException('请先在 AI 设置中配置模型和密钥');
       final uri = endpoint(settings['baseURL'], protocol: settings['protocol']);
       if ('${settings['model']}'.trim().isEmpty) {
@@ -1061,7 +1087,7 @@ class AiService {
         history: history,
       );
       client = createClient();
-      _client = client;
+      _voiceClient = client;
       final turn = await OpenAiTransport(client, timeout: requestTimeout)
           .generate(
             uri: uri,
@@ -1078,7 +1104,9 @@ class AiService {
             tools: [],
             onEvent: (_, data) {},
           );
-      if (generation != _generation) throw const FormatException('语音记账已取消');
+      if (generation != _voiceGeneration) {
+        throw const FormatException('语音记账已取消');
+      }
       if (turn.toolCalls.isNotEmpty) {
         throw const FormatException('模型没有返回账单，请重试或手动记账');
       }
@@ -1096,10 +1124,9 @@ class AiService {
       throw FormatException('语音账单未保存：${redactAiError(e, key)}');
     } finally {
       client?.close();
-      if (generation == _generation) {
-        _client = null;
-        store.setAiStatus(null);
-      }
+      _voiceClient = null;
+      _voiceBusy = false;
+      store.refreshRuntime();
     }
   }
 
@@ -1433,7 +1460,7 @@ class AiService {
       case 'get_chat_history':
         final groups = <String, List<Json>>{};
         for (final m in store.data.chats.where(
-          (m) => sessionOf(m) == activeSessionId,
+          (m) => sessionOf(m) == _toolSessionId,
         )) {
           groups.putIfAbsent(dayKey(localDate(m['timestamp'])), () => []).add({
             for (final key in [
@@ -1500,7 +1527,7 @@ class AiService {
         final pending = actions.items
             .where(
               (a) =>
-                  (a['sessionId'] ?? 'legacy') == activeSessionId &&
+                  (a['sessionId'] ?? 'legacy') == _toolSessionId &&
                   (status == 'all' || a['status'] == status),
             )
             .toList();
@@ -1519,7 +1546,7 @@ class AiService {
           'total': pending.length,
           'nextOffset': offset + limit < pending.length ? offset + limit : null,
           'batches': actions.batches
-              .where((b) => b['sessionId'] == activeSessionId)
+              .where((b) => b['sessionId'] == _toolSessionId)
               .map(
                 (b) => {
                   'batchId': b['id'],
@@ -1548,8 +1575,7 @@ class AiService {
         if (batchId is! String ||
             name == 'revise_changes' &&
                 !actions.batches.any(
-                  (b) =>
-                      b['id'] == batchId && b['sessionId'] == activeSessionId,
+                  (b) => b['id'] == batchId && b['sessionId'] == _toolSessionId,
                 )) {
           throw const FormatException('只能修改当前对话中已有的待确认方案');
         }

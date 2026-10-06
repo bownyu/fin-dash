@@ -32,6 +32,7 @@ class LocalWalletStorage
         RecordWalletStorage,
         QueryWalletStorage,
         RestorePointStorage,
+        RestorePointStatusStorage,
         MirrorWalletStorage {
   static final _worker = SqliteWorker.shared;
   final Directory? directory;
@@ -49,9 +50,15 @@ class LocalWalletStorage
       '${(directory ?? await getApplicationSupportDirectory()).path}/findash_ledger.sqlite';
 
   @override
+  Future<bool> restorePointExists() async =>
+      File('${await _path}.restore-point').exists();
+
+  @override
   Future<String?> loadRestorePoint() async {
     final file = File('${await _path}.restore-point');
-    return await file.exists() ? unseal(await file.readAsString()) : null;
+    return await file.exists()
+        ? _worker.run(unseal, await file.readAsString())
+        : null;
   }
 
   @override
@@ -351,6 +358,36 @@ Future<WalletData?> _legacy(String path) async {
 }
 
 final _mirrorTimers = <String, Timer>{};
+typedef _MirrorState = ({
+  String generation,
+  int revision,
+  bool initialized,
+  DateTime modified,
+  int size,
+});
+final _verifiedMirrors = <String, _MirrorState>{};
+_MirrorState? _mirrorState(String path) {
+  final file = File('$path.bak');
+  if (!file.existsSync()) {
+    _verifiedMirrors.remove(path);
+    return null;
+  }
+  final stat = file.statSync(), cached = _verifiedMirrors[path];
+  if (cached != null &&
+      cached.modified == stat.modified &&
+      cached.size == stat.size) {
+    return cached;
+  }
+  final loaded = _readFile(file.path);
+  return _verifiedMirrors[path] = (
+    generation: loaded.generation,
+    revision: loaded.revision,
+    initialized: loaded.data != null,
+    modified: stat.modified,
+    size: stat.size,
+  );
+}
+
 final _recoveryNotices = <String, String>{};
 void _scheduleMirror(String path) {
   _mirrorTimers.remove(path)?.cancel();
@@ -378,6 +415,26 @@ void _syncMirror(String path) {
   try {
     lock.lockSync(FileLock.exclusive);
     locked = true;
+    // Check the durable generation/revision before copying the entire database.
+    // A changed backup is fully revalidated; unchanged verified backups are cheap.
+    final primary = _open(path);
+    try {
+      final existing = _mirrorState(path);
+      if (existing != null) {
+        if (_meta(primary, 'initialized') != '1' && existing.initialized) {
+          throw StateError('主库未初始化，已保留现有恢复副本');
+        }
+        if (existing.generation == _meta(primary, 'generation') &&
+            existing.revision >= int.parse(_meta(primary, 'revision') ?? '0')) {
+          return;
+        }
+      }
+    } catch (error) {
+      if (error is UnsupportedError || error is StateError) rethrow;
+      _verifiedMirrors.remove(path); // A broken mirror must be regenerated.
+    } finally {
+      primary.close();
+    }
     // The lock makes abandoned snapshots from a crashed worker safe to remove.
     for (final file in File(path).parent.listSync().whereType<File>()) {
       if (file.uri.pathSegments.last.startsWith(
@@ -417,6 +474,14 @@ void _syncMirror(String path) {
         }
       }
       File(temporary).renameSync(mirror.path);
+      final stat = mirror.statSync();
+      _verifiedMirrors[path] = (
+        generation: candidate.generation,
+        revision: candidate.revision,
+        initialized: candidate.data != null,
+        modified: stat.modified,
+        size: stat.size,
+      );
     } finally {
       current.close(); // The read-only generation check rolls back its lock.
     }
@@ -870,8 +935,27 @@ Json _queryRecords((String, int, String, Json) request) {
   final db = _open(path);
   try {
     db.execute('BEGIN');
-    if (_meta(db, 'revision') != '$revision' ||
-        _meta(db, 'generation') != generation) {
+    if (_meta(db, 'generation') != generation) {
+      throw const FormatException('账本已变化，请重新查询');
+    }
+    if (args.containsKey('expectedLedgerEpoch')) {
+      // Chat and voice metadata may commit while a financial query is queued.
+      // Only an actual ledger change expires its snapshot.
+      final ledger = <String, dynamic>{};
+      for (final row in db.select(
+        "SELECT * FROM wallet_rows WHERE bucket='extras' AND id IN ('ledgerEpoch','ledgerRevision')",
+      )) {
+        if (row['checksum'] !=
+            _checksum(row['bucket'], row['id'], row['kind'], row['body'])) {
+          throw const FormatException('数据库记录校验失败');
+        }
+        ledger[row['id'] as String] = jsonDecode(row['body']);
+      }
+      if (ledger['ledgerEpoch'] != args['expectedLedgerEpoch'] ||
+          (ledger['ledgerRevision'] ?? 0) != args['expectedLedgerRevision']) {
+        throw const FormatException('账本已变化，请重新查询');
+      }
+    } else if (_meta(db, 'revision') != '$revision') {
       throw const FormatException('账本已变化，请重新查询');
     }
     final clauses = <String>["bucket='transactions'"], values = <Object?>[];

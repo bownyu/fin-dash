@@ -40,6 +40,11 @@ abstract interface class MirrorWalletStorage {
   Future<void> flushMirror();
 }
 
+/// Startup needs availability only; contents are checked when restoring.
+abstract interface class RestorePointStatusStorage {
+  Future<bool> restorePointExists();
+}
+
 String seal(String payload) => jsonEncode({
   'payload': payload,
   'checksum': sha256.convert(utf8.encode(payload)).toString(),

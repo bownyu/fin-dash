@@ -446,7 +446,7 @@ class _VoiceEntrySheetState extends State<VoiceEntrySheet>
     final queued =
         processing &&
         AppScope.aiOf(context).voiceQueue.waiting.containsKey(parsingEntryId) &&
-        store.aiStatus != '解析语音账单…';
+        AppScope.aiOf(context).activeVoiceRequestId != parsingEntryId;
     // While a draft stays on screen during capture or parsing, the new words
     // are a correction to it.
     final status = listening

@@ -80,6 +80,33 @@ void expectSelectedNavigation(WidgetTester tester, int selected) {
 }
 
 void main() {
+  testWidgets(
+    'hidden tabs defer ledger rebuild until shown and retain fresh data',
+    (tester) async {
+      final store = await renderApp(tester);
+      await tester.pump(const Duration(seconds: 1));
+      await tester.pumpAndSettle();
+      var builds = 0;
+      debugOnRebuildDirtyWidget = (element, builtOnce) {
+        if (element.widget is BillsPage || element.widget is StatsPage) {
+          builds++;
+        }
+      };
+      addTearDown(() => debugOnRebuildDirtyWidget = null);
+      await store.saveTx(
+        LedgerTx.fromJson({
+          ...tx(id: 'deferred', date: DateTime.now()).toJson(),
+          'title': '隐藏页更新',
+        }),
+      );
+      await tester.pumpAndSettle();
+      expect(builds, 0);
+      await tester.tap(find.byKey(const Key('nav-2')));
+      await tester.pumpAndSettle();
+      expect(find.text('隐藏页更新'), findsOneWidget);
+      expect(builds, greaterThan(0));
+    },
+  );
   testWidgets('first visits and revisits animate the selected tab', (
     tester,
   ) async {
@@ -461,13 +488,14 @@ void main() {
       );
       await tester.pump();
       await tester.pump();
-      expect(find.text('刚记的一笔'), findsOneWidget);
+      expect(find.text('刚记的一笔'), findsNothing);
       // Nothing animates behind the sheet.
       await tester.pump(const Duration(seconds: 2));
       expect(tester.hasRunningAnimations, isFalse);
       Navigator.of(home).pop();
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 500));
+      expect(find.text('刚记的一笔'), findsOneWidget);
       expect(tester.hasRunningAnimations, isTrue);
       await tester.pumpAndSettle();
       expect(tester.hasRunningAnimations, isFalse);

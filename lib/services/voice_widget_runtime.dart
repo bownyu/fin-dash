@@ -6,6 +6,7 @@ import 'ai_service.dart';
 import 'voice_bookkeeping.dart';
 
 /// The widget shares the app's store and write queue, with a separate preview.
+/// A complete bill is saved at once; the widget keeps undo and account changes.
 class VoiceWidgetRuntime {
   static const channel = MethodChannel('findash/voice_widget');
   static void install(
@@ -25,22 +26,17 @@ class VoiceWidgetRuntime {
           throw const FormatException('账本尚未就绪，请稍后重试');
         }
         if (store.data.settings['locked'] == true) {
-          throw const FormatException('账本已锁定，请先解锁后使用语音记账');
+          throw const FormatException('账本已锁定，请先在 App 解锁');
         }
         final service = VoiceBookkeeping(store, ai);
+        final saved = request['transaction'] is String
+            ? _transactions(request['transaction'] as String)
+            : null;
         if (request['operation'] == 'undo') {
-          final raw = Json.from(jsonDecode(request['transaction']));
-          final transactions = raw['transactions'] is List
-              ? (raw['transactions'] as List)
-                    .map((e) => LedgerTx.fromJson(Json.from(e as Map)))
-                    .toList()
-              : [LedgerTx.fromJson(raw)];
-          await service.undoBatch(transactions);
+          await service.undoBatch(saved!);
           return {
             'success': true,
-            'message': transactions.length == 1
-                ? '已撤销这笔账单'
-                : '已撤销这${transactions.length}笔账单',
+            'message': saved.length == 1 ? '已撤销这笔账单' : '已撤销这${saved.length}笔账单',
             'undone': true,
           };
         }
@@ -48,93 +44,24 @@ class VoiceWidgetRuntime {
             ? _draft(request['draft'] as String, '${request['previous'] ?? ''}')
             : null;
         VoiceBatch batch;
-        if (request['operation'] == 'confirm' ||
-            request['operation'] == 'account') {
-          var draft = stored!.entries.first;
-          if (request['operation'] == 'confirm') {
-            if (!_widgetReviewable(stored)) {
-              throw const FormatException('请在 App 任务页逐笔核对这些账单后保存');
-            }
-            final transactions = await service.confirmBatch(stored);
-            return {
-              'success': true,
-              'message': transactions.length == 1
-                  ? '已保存 · 点麦克风再记一笔'
-                  : '已保存${transactions.length}笔 · 点麦克风再记',
-              'summary': transactions.length == 1
-                  ? _summary(store, transactions.single.toJson())
-                  : _batchSummary(store, stored, saved: true),
-              'transaction': transactions.length == 1
-                  ? transactions.single.toJson()
-                  : {
-                      'transactions': transactions
-                          .map((e) => e.toJson())
-                          .toList(),
-                    },
-            };
+        if (request['operation'] == 'confirm') {
+          if (!_widgetReviewable(stored!)) {
+            throw const FormatException('请在 App 任务页逐笔核对这些账单后保存');
           }
-          if (!_widgetReviewable(stored)) {
+          return _saved(store, stored, await service.confirmBatch(stored));
+        } else if (request['operation'] == 'account') {
+          if (!_widgetReviewable(stored!)) {
             throw const FormatException('请在 App 任务页逐笔修改这些账单');
           }
-          final accounts = store.activeAccounts;
-          if (accounts.isEmpty) throw const FormatException('请先在 App 添加账户');
-          final transfer = draft.fields['type'] == 'transfer';
-          if (transfer &&
-              ![
-                'transferFromId',
-                'transferToId',
-              ].contains(request['accountField'])) {
-            final pairs = [
-              for (final from in accounts)
-                for (final to in accounts)
-                  if (from.id != to.id) (from.id, to.id),
-            ];
-            if (pairs.isEmpty) {
-              throw const FormatException('转账需要两个不同账户，请先在 App 添加账户');
-            }
-            final index = pairs.indexWhere(
-              (pair) =>
-                  pair.$1 == draft.fields['transferFromId'] &&
-                  pair.$2 == draft.fields['transferToId'],
+          batch = _switchAccount(store, stored, request['accountField']);
+          if (saved != null) {
+            return _saved(
+              store,
+              batch,
+              await service.amendBatch(saved, batch),
+              amended: true,
             );
-            final next = pairs[(index + 1) % pairs.length];
-            draft = draft.update({
-              'transferFromId': next.$1,
-              'transferToId': next.$2,
-            });
-          } else {
-            final field = draft.fields['type'] == 'transfer'
-                ? ([
-                        'transferFromId',
-                        'transferToId',
-                      ].contains(request['accountField'])
-                      ? request['accountField'] as String
-                      : draft.fields['transferFromId'] == null
-                      ? 'transferFromId'
-                      : 'transferToId')
-                : 'accountId';
-            final opposite = field == 'transferFromId'
-                ? draft.fields['transferToId']
-                : field == 'transferToId'
-                ? draft.fields['transferFromId']
-                : null;
-            final choices = accounts.where((a) => a.id != opposite).toList();
-            if (choices.isEmpty) {
-              throw const FormatException('转账需要两个不同的可用账户，请先在 App 添加账户');
-            }
-            final index = choices.indexWhere(
-              (a) => a.id == draft.fields[field],
-            );
-            draft = draft.update({
-              field: choices[(index + 1) % choices.length].id,
-            });
           }
-          batch = stored.entries.length == 1
-              ? stored.update(draft)
-              : VoiceBatch(stored.entryId, [
-                  for (final e in stored.entries)
-                    e.update({'accountId': draft.fields['accountId']}),
-                ], transcript: stored.transcript);
         } else {
           final preferred = store.data.settings['quickEntryAccountId'];
           final accounts = store.activeAccounts;
@@ -150,6 +77,9 @@ class VoiceWidgetRuntime {
             accountId: accountId,
             base: stored,
           );
+          if (batch.problem(store.data) == null && _widgetReviewable(batch)) {
+            return _saved(store, batch, await service.confirmBatch(batch));
+          }
         }
         final draft = batch.entries.first;
         final problem = batch.problem(store.data);
@@ -162,8 +92,10 @@ class VoiceWidgetRuntime {
           'success': true,
           'canConfirm': problem == null && reviewable,
           'needsClarification': problem != null || !reviewable,
+          // Larger or mixed transfer batches can only be checked in the app.
+          'openApp': !reviewable,
           'message': !reviewable
-              ? '请在 App 任务页逐笔核对这${batch.entries.length}笔账单'
+              ? '这${batch.entries.length}笔请在 App 任务页核对'
               : problem == null
               ? batch.entries.length > 1
                     ? '点摘要统一换账户 · 确认保存${batch.entries.length}笔'
@@ -171,7 +103,9 @@ class VoiceWidgetRuntime {
                     ? '点摘要换组合 · 可分别换转出／转入'
                     : '点账单换账户 · 右侧确认'
               : missing.contains('accountId')
-              ? '点账单选择付款账户'
+              ? store.activeAccounts.isEmpty
+                    ? '请先在 App 添加账户 · 点这里打开'
+                    : '点账单选择付款账户'
               : missing.contains('amountCents')
               ? '缺少金额 · 点麦克风补充'
               : '请补充信息：$problem',
@@ -192,6 +126,95 @@ class VoiceWidgetRuntime {
   static VoiceBatch _draft(String encoded, String transcript) {
     final raw = Json.from(jsonDecode(encoded));
     return VoiceBatch.fromJson(raw, transcript: transcript);
+  }
+
+  static List<LedgerTx> _transactions(String encoded) {
+    final raw = Json.from(jsonDecode(encoded));
+    return raw['transactions'] is List
+        ? (raw['transactions'] as List)
+              .map((e) => LedgerTx.fromJson(Json.from(e as Map)))
+              .toList()
+        : [LedgerTx.fromJson(raw)];
+  }
+
+  /// The draft stays with the saved bills so their accounts can still change.
+  static Json _saved(
+    WalletStore store,
+    VoiceBatch batch,
+    List<LedgerTx> transactions, {
+    bool amended = false,
+  }) {
+    final transfer = batch.entries.any((e) => e.fields['type'] == 'transfer');
+    final done = amended
+        ? '已换账户'
+        : transactions.length == 1
+        ? '已保存'
+        : '已保存${transactions.length}笔';
+    return {
+      'success': true,
+      'message': '$done · ${transfer ? '可换转出／转入' : '点账单换账户'} · 可撤销',
+      'summary': transactions.length == 1
+          ? _summary(store, transactions.single.toJson())
+          : _batchSummary(store, batch, saved: true),
+      'transaction': transactions.length == 1
+          ? transactions.single.toJson()
+          : {'transactions': transactions.map((e) => e.toJson()).toList()},
+      'draft': batch.toJson(),
+      if (batch.transcript.isNotEmpty) 'text': batch.transcript,
+      'hasAccounts': store.activeAccounts.isNotEmpty,
+    };
+  }
+
+  /// Cycles the account (or transfer pair) of a widget-reviewable [stored].
+  static VoiceBatch _switchAccount(
+    WalletStore store,
+    VoiceBatch stored,
+    Object? accountField,
+  ) {
+    var draft = stored.entries.first;
+    final accounts = store.activeAccounts;
+    if (accounts.isEmpty) throw const FormatException('请先在 App 添加账户');
+    final transfer = draft.fields['type'] == 'transfer';
+    if (transfer &&
+        !['transferFromId', 'transferToId'].contains(accountField)) {
+      final pairs = [
+        for (final from in accounts)
+          for (final to in accounts)
+            if (from.id != to.id) (from.id, to.id),
+      ];
+      if (pairs.isEmpty) {
+        throw const FormatException('转账需要两个不同账户，请先在 App 添加账户');
+      }
+      final index = pairs.indexWhere(
+        (pair) =>
+            pair.$1 == draft.fields['transferFromId'] &&
+            pair.$2 == draft.fields['transferToId'],
+      );
+      final next = pairs[(index + 1) % pairs.length];
+      draft = draft.update({
+        'transferFromId': next.$1,
+        'transferToId': next.$2,
+      });
+    } else {
+      final field = transfer ? accountField as String : 'accountId';
+      final opposite = field == 'transferFromId'
+          ? draft.fields['transferToId']
+          : field == 'transferToId'
+          ? draft.fields['transferFromId']
+          : null;
+      final choices = accounts.where((a) => a.id != opposite).toList();
+      if (choices.isEmpty) {
+        throw const FormatException('转账需要两个不同的可用账户，请先在 App 添加账户');
+      }
+      final index = choices.indexWhere((a) => a.id == draft.fields[field]);
+      draft = draft.update({field: choices[(index + 1) % choices.length].id});
+    }
+    return stored.entries.length == 1
+        ? stored.update(draft)
+        : VoiceBatch(stored.entryId, [
+            for (final e in stored.entries)
+              e.update({'accountId': draft.fields['accountId']}),
+          ], transcript: stored.transcript);
   }
 
   // The widget has two detail lines. Larger/mixed transfer batches need the app.

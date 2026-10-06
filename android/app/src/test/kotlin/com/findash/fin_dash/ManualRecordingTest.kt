@@ -6,6 +6,28 @@ import java.io.File
 import java.io.FileOutputStream
 
 class ManualRecordingTest {
+    @Test fun growingAudioDecodesBeforeStopAndPadsOnlyItsLastWindow() {
+        val file = File.createTempFile("findash-growing-pcm-", ".pcm")
+        try {
+            var done = false
+            var writes = 0
+            val windows = mutableListOf<FloatArray>()
+            PcmSegments.readGrowing(file, { done }, { false }, {
+                FileOutputStream(file, true).use { output ->
+                    val count = if (writes++ == 0) 512 else 7
+                    repeat(count) { output.write(1); output.write(0) }
+                }
+                if (writes == 2) done = true
+            }) { samples ->
+                if (windows.isEmpty()) assertFalse(done)
+                windows.add(samples)
+            }
+            assertEquals(2, windows.size)
+            assertTrue(windows[0].all { it == 1 / 32768f })
+            assertTrue(windows[1].take(7).all { it == 1 / 32768f })
+            assertTrue(windows[1].drop(7).all { it == 0f })
+        } finally { file.delete() }
+    }
     @Test fun onlyManualStopCompletesRecording() {
         val session = ManualRecordingSession()
         assertTrue(session.start())

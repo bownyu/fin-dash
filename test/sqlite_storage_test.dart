@@ -32,6 +32,29 @@ void main() {
   });
 
   test(
+    'mirror fast path revalidates a replaced backup before skipping sync',
+    () async {
+      final store = await open();
+      await store.saveAccount(bank);
+      await store.flushMirror();
+      final mirror = File('${path()}.bak');
+      await mirror.writeAsString('broken mirror');
+      await store.flushMirror();
+      final db = sqlite3.open(mirror.path);
+      try {
+        expect(
+          db
+              .select("SELECT body FROM wallet_rows WHERE bucket='accounts'")
+              .length,
+          1,
+        );
+      } finally {
+        db.close();
+      }
+    },
+  );
+
+  test(
     'large ledger changes only changed rows and preserves order and metadata',
     () async {
       final store = await open();

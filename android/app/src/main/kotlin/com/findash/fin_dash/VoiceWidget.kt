@@ -9,7 +9,8 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 
-class VoiceWidget : AppWidgetProvider() {
+/** 4×2. Every size shares this flow and per-widget state; button intents always come here. */
+open class VoiceWidget : AppWidgetProvider() {
     companion object {
         const val ACTION_PRIMARY = "com.findash.fin_dash.widget.PRIMARY"
         const val ACTION_SPEAK = "com.findash.fin_dash.widget.SPEAK"
@@ -32,7 +33,8 @@ class VoiceWidget : AppWidgetProvider() {
         val prefs = VoiceWidgetState.preferences(context)
         val operation = when (intent.action) {
             ACTION_PRIMARY -> VoiceWidgetFlow.primary(prefs.getString("phase:$id", "idle") ?: "idle",
-                prefs.getBoolean("canConfirm:$id", false), prefs.contains("draft:$id")) ?: return
+                prefs.getBoolean("canConfirm:$id", false), VoiceWidgetState.reviewing(prefs, id),
+                prefs.getBoolean("openApp:$id", false)) ?: return
             ACTION_SPEAK -> "speak"
             ACTION_RETRY -> "retry"
             ACTION_UNDO -> "undo"
@@ -42,6 +44,11 @@ class VoiceWidget : AppWidgetProvider() {
             else -> return
         }
         if (operation == "stop") { WidgetVoiceService.stopRecording(id); return }
+        // The rendered button opens the app directly; this only covers a stale layout.
+        if (operation == "open") {
+            try { context.startActivity(VoiceWidgetState.appIntent(context)) } catch (_: Exception) { }
+            return
+        }
         val microphone = operation == "speak" || operation == "supplement"
         if (microphone && Build.VERSION.SDK_INT >= 23 &&
             context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
@@ -52,9 +59,16 @@ class VoiceWidget : AppWidgetProvider() {
     }
     override fun onDeleted(context: Context, ids: IntArray) {
         ids.forEach { WidgetVoiceService.cancelRecording(it) }
-        val edit = VoiceWidgetState.preferences(context).edit()
-        for (id in ids) for (key in listOf("status", "text", "transaction", "clarification",
-            "entry", "recordable", "phase", "draft", "summary", "canConfirm", "hasAccounts")) edit.remove("$key:$id")
+        val prefs = VoiceWidgetState.preferences(context)
+        val edit = prefs.edit()
+        val suffixes = ids.map { ":$it" }
+        for (key in prefs.all.keys) if (suffixes.any { key.endsWith(it) }) edit.remove(key)
         edit.apply()
     }
 }
+
+/** 2×2: summary, one action and the button; layout chosen in [VoiceWidgetState.render]. */
+class VoiceWidgetMedium : VoiceWidget()
+
+/** 1×1: the button alone. */
+class VoiceWidgetSmall : VoiceWidget()

@@ -40,19 +40,22 @@ Set<String> messageProposalIds(Json message) {
 void compactChatHistory(WalletMetadata d, {String? sessionId}) {
   final turns = <String, int>{};
   for (var i = d.chats.length - 1; i >= 0; i--) {
-    final message = d.chats[i];
-    final session = '${message['sessionId'] ?? 'legacy'}';
+    final candidate = d.chats is CowList<Json>
+        ? (d.chats as CowList<Json>).peek(i)
+        : d.chats[i];
+    final session = '${candidate['sessionId'] ?? 'legacy'}';
     if (sessionId != null && session != sessionId) continue;
     final count = turns[session] ?? 0;
-    if (message['role'] == 'user') {
+    if (candidate['role'] == 'user') {
       turns[session] = count + 1;
       continue;
     }
     if (count < ContextAssembler.replayTurns ||
-        message['status'] != 'complete' ||
-        message['historyCompacted'] == true) {
+        candidate['status'] != 'complete' ||
+        candidate['historyCompacted'] == true) {
       continue;
     }
+    final message = d.chats[i];
     message.remove('modelMessages');
     message.remove('responseItems');
     for (final block in message['blocks'] as List? ?? []) {

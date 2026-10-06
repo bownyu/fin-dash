@@ -18,11 +18,15 @@ import com.k2fsa.sherpa.onnx.VadModelConfig
 import java.io.File
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.FutureTask
+import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledFuture
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
 /**
- * Records until the user stops; only then runs the bundled ASR. No network/provider fallback.
- * Model weights load while the user speaks, so stopping only waits for decoding.
+ * Records until manual stop; completed audio segments are transcribed during capture.
+ * One warm recognizer is shared by the app and widget and released after 30 idle seconds.
  */
 class SpeechCapture(
     context: Context,
@@ -37,14 +41,33 @@ class SpeechCapture(
         private const val MODEL_DIR = "sensevoice-small"
         // App and desktop widget share one microphone, including while decoding.
         private val active = AtomicReference<SpeechCapture?>(null)
+        private val modelLock = Any()
+        private var warmRecognizer: FutureTask<OfflineRecognizer>? = null
+        private var expiry: ScheduledFuture<*>? = null
+        private val cleanup = Executors.newSingleThreadScheduledExecutor { action ->
+            Thread(action, "findash-voice-cleanup").apply { isDaemon = true }
+        }
+        private fun releaseWhenIdle(): Unit = synchronized(modelLock) {
+            expiry?.cancel(false)
+            expiry = cleanup.schedule({
+                synchronized(modelLock) {
+                    val task = warmRecognizer
+                    if (active.get() != null || task?.isDone == false) {
+                        releaseWhenIdle()
+                    } else {
+                        warmRecognizer = null
+                        try { task?.get()?.let { synchronized(it) { it.release() } } }
+                        catch (_: Exception) { }
+                    }
+                }
+            }, 30, TimeUnit.SECONDS)
+        }
     }
     private val context = context.applicationContext
     private val handler = Handler(Looper.getMainLooper())
     private val session = ManualRecordingSession()
-
-    private class Models(val recognizer: OfflineRecognizer, val vad: Vad) {
-        fun release() { recognizer.release(); vad.release() }
-    }
+    private val audioFinished = AtomicBoolean(false)
+    private val audioAvailable = Object()
 
     fun start() {
         if (!session.start()) return
@@ -59,16 +82,34 @@ class SpeechCapture(
     @SuppressLint("MissingPermission") // VoiceBridge / WidgetPermissionActivity request it first.
     private fun captureAndTranscribe() {
         var pcm: File? = null
-        var models: FutureTask<Models>? = null
+        var decoding: FutureTask<String>? = null
         try {
             // Fail explicitly if a broken build omitted the model, without using system/cloud ASR.
             context.assets.openFd("$MODEL_DIR/model.int8.onnx").use { }
             if (session.cancelled) return
-            models = FutureTask { loadModels() }.also { Thread(it, "findash-voice-model").start() }
+            val recognizer = synchronized(modelLock) {
+                expiry?.cancel(false)
+                warmRecognizer ?: FutureTask { loadRecognizer() }.also {
+                    warmRecognizer = it
+                    Thread(it, "findash-voice-model").start()
+                }
+            }
             // Remove recordings left by a killed process before opening this session's file.
             context.cacheDir.listFiles { file -> file.name.startsWith("findash-voice-") &&
                 file.name.endsWith(".pcm") }?.forEach { it.delete() }
             pcm = File.createTempFile("findash-voice-", ".pcm", context.cacheDir)
+            val recordingFile = pcm
+            decoding = FutureTask {
+                val ready = try { recognizer.get() } catch (e: ExecutionException) {
+                    synchronized(modelLock) {
+                        if (warmRecognizer === recognizer) warmRecognizer = null
+                    }
+                    throw e.cause ?: e
+                }
+                transcribe(recordingFile, ready)
+            }.also {
+                Thread(it, "findash-voice-decode").start()
+            }
             val minimum = AudioRecord.getMinBufferSize(SAMPLE_RATE,
                 AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
             check(minimum > 0) { "当前设备不支持本地录音，请直接输入记账内容" }
@@ -90,6 +131,8 @@ class SpeechCapture(
                         check(count > 0) { "录音中断，请检查麦克风后重试" }
                         if (!session.cancelled) {
                             output.write(buffer, 0, count)
+                            output.flush()
+                            synchronized(audioAvailable) { audioAvailable.notifyAll() }
                             val level = PcmSegments.level(buffer, count)
                             publish { onLevel(level) }
                         }
@@ -100,12 +143,14 @@ class SpeechCapture(
                     try { recorder.stop() } catch (_: IllegalStateException) { }
                 }
                 recorder.release()
+                audioFinished.set(true)
+                synchronized(audioAvailable) { audioAvailable.notifyAll() }
             }
             if (session.cancelled) return
             publish { onState("recognizing") }
-            val text = transcribe(pcm, try { models.get() } catch (e: ExecutionException) {
+            val text = try { decoding.get() } catch (e: ExecutionException) {
                 throw e.cause ?: e
-            })
+            }
             if (text.isBlank()) deliver { onError("没有听清，请再说一次，也可以直接输入") }
             else deliver { onResult(text) }
         } catch (_: SecurityException) {
@@ -118,73 +163,68 @@ class SpeechCapture(
             deliver { onError(if (e is IllegalStateException) e.message ?: "录音未完成，请重试"
                 else "本地识别未完成，请重试或直接输入记账内容") }
         } finally {
+            audioFinished.set(true)
+            synchronized(audioAvailable) { audioAvailable.notifyAll() }
+            decoding?.cancel(true)
             pcm?.delete()
-            // A model still loading after an early failure is released before the microphone frees up,
-            // so two captures never hold the weights at once.
-            try { models?.get()?.release() } catch (_: Exception) { }
             active.compareAndSet(this, null)
+            releaseWhenIdle()
         }
     }
 
-    private fun loadModels(): Models {
+    private fun loadRecognizer(): OfflineRecognizer {
         Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND)
+        return OfflineRecognizer(context.assets, OfflineRecognizerConfig(
+            modelConfig = OfflineModelConfig(
+                senseVoice = OfflineSenseVoiceModelConfig(
+                    model = "$MODEL_DIR/model.int8.onnx", language = "zh",
+                    useInverseTextNormalization = true),
+                tokens = "$MODEL_DIR/tokens.txt", numThreads = 2, provider = "cpu")))
+    }
+
+    private fun transcribe(pcm: File, recognizer: OfflineRecognizer): String {
+        Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND)
+        // Keep long recordings on disk. Segments bound model memory without ending the recording.
+        if (session.cancelled) return ""
         val vad = Vad(context.assets, VadModelConfig(sileroVadModelConfig =
             SileroVadModelConfig(model = "$MODEL_DIR/silero_vad.onnx", threshold = 0.35f,
                 minSpeechDuration = 0.1f, minSilenceDuration = 0.8f, maxSpeechDuration = 20f)))
         try {
-            return Models(OfflineRecognizer(context.assets, OfflineRecognizerConfig(
-                modelConfig = OfflineModelConfig(
-                    senseVoice = OfflineSenseVoiceModelConfig(
-                        model = "$MODEL_DIR/model.int8.onnx", language = "zh",
-                        useInverseTextNormalization = true),
-                    tokens = "$MODEL_DIR/tokens.txt", numThreads = 2, provider = "cpu"))), vad)
-        } catch (e: Throwable) {
-            vad.release()
-            throw e
-        }
-    }
-
-    private fun transcribe(pcm: File, models: Models): String {
-        // Keep long recordings on disk. Segments bound model memory without ending the recording.
-        if (pcm.length() < 3200) return ""
-        val (recognizer, vad) = models.recognizer to models.vad
-        val text = StringBuilder()
-        fun decode(samples: FloatArray) {
-            if (session.cancelled) return
-            val stream = recognizer.createStream()
-            try {
-                stream.acceptWaveform(samples, SAMPLE_RATE)
-                recognizer.decode(stream)
-                val result = recognizer.getResult(stream).text
-                    .replace(Regex("<\\|[^|]*\\|>"), "").trim()
-                if (result.isNotEmpty()) {
-                    text.append(result)
-                    val partial = text.toString()
-                    publish { onPartial(partial) }
-                }
-            } finally { stream.release() }
-        }
-        fun drain() {
-            while (!vad.empty() && !session.cancelled) {
-                decode(vad.front().samples)
-                vad.pop()
+            val text = StringBuilder()
+            fun decode(samples: FloatArray) = synchronized(recognizer) {
+                if (session.cancelled) return
+                val stream = recognizer.createStream()
+                try {
+                    stream.acceptWaveform(samples, SAMPLE_RATE)
+                    recognizer.decode(stream)
+                    val result = recognizer.getResult(stream).text
+                        .replace(Regex("<\\|[^|]*\\|>"), "").trim()
+                    if (result.isNotEmpty()) {
+                        text.append(result)
+                        val partial = text.toString()
+                        publish { onPartial(partial) }
+                    }
+                } finally { stream.release() }
             }
-        }
-        // VAD only filters/splits already-stopped audio. It never controls the microphone.
-        PcmSegments.read(pcm) { samples ->
-            if (session.cancelled) return@read false
-            // Silero consumes one 512-sample window per call, not a full recording.
-            for (offset in samples.indices step 512) {
-                if (session.cancelled) return@read false
-                val window = samples.copyOfRange(offset, minOf(offset + 512, samples.size))
-                vad.acceptWaveform(if (window.size == 512) window else window.copyOf(512))
+            fun drain() {
+                while (!vad.empty() && !session.cancelled) {
+                    decode(vad.front().samples)
+                    vad.pop()
+                }
+            }
+            // VAD never controls the microphone; only the user stops capture.
+            PcmSegments.readGrowing(pcm, { audioFinished.get() }, { session.cancelled }, {
+                synchronized(audioAvailable) {
+                    if (!audioFinished.get() && !session.cancelled) audioAvailable.wait(100)
+                }
+            }) { samples ->
+                vad.acceptWaveform(samples)
                 drain()
             }
-            !session.cancelled
-        }
-        vad.flush()
-        drain()
-        return text.toString()
+            vad.flush()
+            drain()
+            return text.toString()
+        } finally { vad.release() }
     }
 
     fun stop() {

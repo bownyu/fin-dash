@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -242,7 +243,7 @@ void main() {
       await tester.enterText(find.byType(TextField), '下一条草稿');
       await tester.pump();
       expect(find.byType(MarkdownBody).evaluate().length, lessThan(30));
-      expect(find.byType(SelectionArea), findsOneWidget);
+      expect(find.byType(SelectionArea), findsNothing);
       expect(
         tester
             .widgetList<MarkdownBody>(find.byType(MarkdownBody))
@@ -279,7 +280,7 @@ void main() {
       await tester.pump(const Duration(milliseconds: 80));
       expect(list.controller!.offset, offset);
 
-      // Completion uses Markdown selected through the list's SelectionArea.
+      // Completion renders Markdown; long press selects or copies its text.
       list.controller!.jumpTo(0);
       ai.liveMessage!['status'] = 'complete';
       final completed = ai.liveMessage!;
@@ -288,6 +289,29 @@ void main() {
       store.setAiStatus(null);
       await tester.pumpAndSettle();
       expect(find.text('又一段输出'), findsOneWidget);
+      String? copied;
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        (call) async {
+          if (call.method == 'Clipboard.setData') {
+            copied = (call.arguments as Map)['text'];
+          }
+          return null;
+        },
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          null,
+        ),
+      );
+      await tester.longPress(find.text('又一段输出'));
+      await tester.pumpAndSettle();
+      expect(find.byType(SelectionArea), findsOneWidget);
+      await tester.tap(find.text('复制全文'));
+      await tester.pumpAndSettle();
+      expect(copied, '**又一段输出**');
+      expect(find.text('已复制'), findsOneWidget);
       expect(tester.takeException(), null);
     },
   );

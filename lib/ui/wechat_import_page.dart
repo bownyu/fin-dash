@@ -25,8 +25,9 @@ class _WechatImportPageState extends State<WechatImportPage> {
   bool busy = false, preserveBalances = true, initialized = false;
   final mapping = <String, String>{};
   final selected = <String>{}, similar = <String>{};
+  WechatBillImporter? _importer;
   WechatBillImporter get importer =>
-      WechatBillImporter(AppScope.storeOf(context));
+      _importer ??= WechatBillImporter(AppScope.storeOf(context));
 
   @override
   void didChangeDependencies() {
@@ -90,10 +91,6 @@ class _WechatImportPageState extends State<WechatImportPage> {
 
   Future<void> save() async {
     if (busy || bill == null) return;
-    if (AppScope.aiOf(context).busy) {
-      toast(context, '请先等待或停止当前 AI 请求');
-      return;
-    }
     final service = importer;
     final duplicates = service.duplicates(bill!);
     final rows = bill!.records

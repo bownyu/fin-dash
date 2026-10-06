@@ -40,6 +40,10 @@ ImportPreview parseBackup(String text) {
     }
   }
   if (decoded is! Map) throw const FormatException('备份结构不正确');
+  return parseBackupObject(decoded);
+}
+
+ImportPreview parseBackupObject(Map decoded) {
   final j = Json.from(decoded);
   if (j['format'] == 'findash-flutter') {
     if (![1, 2].contains(j['schema'])) throw const FormatException('此备份版本暂不支持');

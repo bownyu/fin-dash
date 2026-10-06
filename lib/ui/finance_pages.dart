@@ -2473,94 +2473,99 @@ class BillsPageState extends State<BillsPage> {
           ),
         ),
         Expanded(
-          child: groups.isEmpty
-              ? SingleChildScrollView(
-                  child: EmptyState(
-                    '没有符合条件的账单',
-                    '调整筛选条件，或者记下新的一笔。',
-                    action: TextButton(
-                      onPressed: filters,
-                      child: const Text('调整筛选'),
+          // The shell does not resize for the keyboard; only this list does.
+          child: KeyboardInsetPadding(
+            child: groups.isEmpty
+                ? SingleChildScrollView(
+                    child: EmptyState(
+                      '没有符合条件的账单',
+                      '调整筛选条件，或者记下新的一笔。',
+                      action: TextButton(
+                        onPressed: filters,
+                        child: const Text('调整筛选'),
+                      ),
                     ),
-                  ),
-                )
-              : ListView.builder(
-                  padding: EdgeInsets.fromLTRB(
-                    20,
-                    10,
-                    20,
-                    MediaQuery.paddingOf(context).bottom + 30,
-                  ),
-                  itemCount: entries.length,
-                  itemBuilder: (context, i) {
-                    final (day, transaction) = entries[i];
-                    if (transaction == null) {
-                      return Padding(
-                        padding: EdgeInsets.only(
-                          top: i == 0 ? 0 : 20,
-                          bottom: 9,
-                        ),
-                        child: Row(
-                          children: [
-                            Expanded(
-                              child: Text(
-                                dateHeading(DateTime.parse(day)),
+                  )
+                : ListView.builder(
+                    padding: EdgeInsets.fromLTRB(
+                      20,
+                      10,
+                      20,
+                      MediaQuery.paddingOf(context).bottom + 30,
+                    ),
+                    itemCount: entries.length,
+                    itemBuilder: (context, i) {
+                      final (day, transaction) = entries[i];
+                      if (transaction == null) {
+                        return Padding(
+                          padding: EdgeInsets.only(
+                            top: i == 0 ? 0 : 20,
+                            bottom: 9,
+                          ),
+                          child: Row(
+                            children: [
+                              Expanded(
+                                child: Text(
+                                  dateHeading(DateTime.parse(day)),
+                                  style: Theme.of(context).textTheme.bodySmall,
+                                ),
+                              ),
+                              Text(
+                                '支出 ${privateMoney(context, dailyExpenses[day]!)}',
                                 style: Theme.of(context).textTheme.bodySmall,
                               ),
-                            ),
-                            Text(
-                              '支出 ${privateMoney(context, dailyExpenses[day]!)}',
-                              style: Theme.of(context).textTheme.bodySmall,
-                            ),
-                          ],
+                            ],
+                          ),
+                        );
+                      }
+                      final first = i == 0 || entries[i - 1].$2 == null;
+                      final last =
+                          i + 1 == entries.length || entries[i + 1].$2 == null;
+                      final colors = WalletColors.of(context);
+                      return Container(
+                        key: ValueKey(transaction.id),
+                        padding: EdgeInsets.fromLTRB(
+                          12,
+                          first ? 2 : 0,
+                          12,
+                          last ? 2 : 0,
+                        ),
+                        decoration: BoxDecoration(
+                          color: colors.surface,
+                          borderRadius: BorderRadius.vertical(
+                            top: first
+                                ? const Radius.circular(24)
+                                : Radius.zero,
+                            bottom: last
+                                ? const Radius.circular(24)
+                                : Radius.zero,
+                          ),
+                        ),
+                        child: TransactionRow(
+                          transaction,
+                          selected: active
+                              ? selected!.contains(transaction.id)
+                              : null,
+                          onLongPress: () {
+                            HapticFeedback.mediumImpact();
+                            setState(() => selected = {transaction.id});
+                          },
+                          onTap: () {
+                            if (active) {
+                              setState(
+                                () => selected!.contains(transaction.id)
+                                    ? selected!.remove(transaction.id)
+                                    : selected!.add(transaction.id),
+                              );
+                            } else {
+                              transactionActions(context, transaction);
+                            }
+                          },
                         ),
                       );
-                    }
-                    final first = i == 0 || entries[i - 1].$2 == null;
-                    final last =
-                        i + 1 == entries.length || entries[i + 1].$2 == null;
-                    final colors = WalletColors.of(context);
-                    return Container(
-                      key: ValueKey(transaction.id),
-                      padding: EdgeInsets.fromLTRB(
-                        12,
-                        first ? 2 : 0,
-                        12,
-                        last ? 2 : 0,
-                      ),
-                      decoration: BoxDecoration(
-                        color: colors.surface,
-                        borderRadius: BorderRadius.vertical(
-                          top: first ? const Radius.circular(24) : Radius.zero,
-                          bottom: last
-                              ? const Radius.circular(24)
-                              : Radius.zero,
-                        ),
-                      ),
-                      child: TransactionRow(
-                        transaction,
-                        selected: active
-                            ? selected!.contains(transaction.id)
-                            : null,
-                        onLongPress: () {
-                          HapticFeedback.mediumImpact();
-                          setState(() => selected = {transaction.id});
-                        },
-                        onTap: () {
-                          if (active) {
-                            setState(
-                              () => selected!.contains(transaction.id)
-                                  ? selected!.remove(transaction.id)
-                                  : selected!.add(transaction.id),
-                            );
-                          } else {
-                            transactionActions(context, transaction);
-                          }
-                        },
-                      ),
-                    );
-                  },
-                ),
+                    },
+                  ),
+          ),
         ),
       ],
     );

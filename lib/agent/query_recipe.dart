@@ -1,8 +1,59 @@
 import 'dart:convert';
+import 'package:flutter/foundation.dart';
 import '../application/ledger_queries.dart';
 import '../domain/models.dart';
 import '../domain/ledger_input.dart';
 import '../domain/query_contracts.dart';
+import 'recipe_execution.dart';
+
+typedef _RecipeInput = ({
+  Json source,
+  Json parameters,
+  WalletData data,
+  QuerySnapshot snapshot,
+  Duration budget,
+  Map<String, List<Json>> scans,
+});
+Future<QueryResult<List<Json>>> _runRecipe(_RecipeInput input) =>
+    QueryRecipe.parse(input.source).run(
+      LedgerQueries.fromSnapshot(input.data, input.snapshot),
+      input.parameters,
+      timeBudget: input.budget,
+      background: false,
+      scanSources: input.scans,
+    );
+
+/// Push only conjunctive conditions; residual predicates are always reapplied.
+Json _scanFilters(dynamic predicate, Json parameters) {
+  final result = <String, dynamic>{};
+  void visit(dynamic p) {
+    if (p is! Map) return;
+    if (p['and'] is List) {
+      for (final child in p['and']) {
+        visit(child);
+      }
+      return;
+    }
+    dynamic value(Map node) =>
+        node.containsKey('param') ? parameters[node['param']] : node['literal'];
+    if (p['field'] == 'occurredAt' && p['inRange'] is Map) {
+      final range = value(p['inRange']);
+      if (range is! Map) QueryRecipe.invalid('日期范围无效');
+      final start = parseLedgerDate(range['startInclusive']);
+      final end = parseLedgerDate(range['endExclusive']);
+      if (!start.isBefore(end)) QueryRecipe.invalid('日期范围无效');
+      result['startInclusive'] = start.toIso8601String();
+      result['endExclusive'] = end.toIso8601String();
+    } else if (['type', 'accountId', 'categoryId'].contains(p['field']) &&
+        p['eq'] is Map) {
+      final v = value(p['eq']);
+      if (v != null) result[p['field']] = v;
+    }
+  }
+
+  visit(predicate);
+  return result;
+}
 
 enum RecipeOperator {
   scan,
@@ -357,6 +408,8 @@ class QueryRecipe {
     Json parameters, {
     bool Function()? cancelled,
     Duration timeBudget = const Duration(seconds: 2),
+    bool background = true,
+    Map<String, List<Json>> scanSources = const {},
   }) async {
     final declarations = source['parameters'] as Map;
     keys(parameters, declarations.keys.cast<String>());
@@ -381,6 +434,47 @@ class QueryRecipe {
       };
       if (!valid) invalid('参数类型错误：${entry.key}');
       if (type == 'Cents') checkedCents(value);
+    }
+    if (background && !kIsWeb) {
+      if (cancelled?.call() == true) {
+        throw const ErrorEnvelope(ErrorCode.cancelled, '查询已停止');
+      }
+      final scans = <String, List<Json>>{};
+      for (final step in steps.where(
+        (s) =>
+            s.op == RecipeOperator.scan &&
+            s.args['dataset'] == 'ledger.transactions',
+      )) {
+        final rows = await repository.recipeTransactions(
+          _scanFilters(step.args['where'], parameters),
+        );
+        if (rows != null) scans[step.id] = rows;
+      }
+      final needsTransactions = steps.any(
+        (s) =>
+            s.op == RecipeOperator.scan &&
+            (s.args['dataset'] == 'ledger.accounts' ||
+                s.args['dataset'] == 'ledger.transactions' &&
+                    !scans.containsKey(s.id)),
+      );
+      final data = WalletData(
+        accounts: repository.data.accounts,
+        transactions: needsTransactions
+            ? repository.data.transactions
+            : const [],
+        categories: repository.data.categories,
+        settings: {'budget': repository.data.settings['budget']},
+      );
+      final result = await executeRecipe(_runRecipe, (
+        source: source,
+        parameters: parameters,
+        data: data,
+        snapshot: repository.snapshot,
+        budget: timeBudget,
+        scans: scans,
+      ), cancelled: cancelled);
+      repository.ensureCurrent();
+      return result;
     }
     final clock = Stopwatch()..start();
     var scanned = 0;
@@ -487,7 +581,14 @@ class QueryRecipe {
               );
             }
           }
-          for (final row in repository.rows(a['dataset'])) {
+          for (final row
+              in scanSources[step.id] ??
+                  repository.rows(
+                    a['dataset'],
+                    filters: a['dataset'] == 'ledger.transactions'
+                        ? _scanFilters(a['where'], parameters)
+                        : const {},
+                  )) {
             if (++scanned > 50000) {
               throw const ErrorEnvelope(
                 ErrorCode.limitExceeded,

@@ -32,22 +32,34 @@ class PaymentNotifications {
   static final _tails = Expando<Future<void>>();
   final WalletStore store;
   final NotificationBridge bridge;
-  WalletData? _pendingIndexData, _ledgerIndexData;
+  List? _pendingIndexRecords;
+  List<LedgerTx>? _ledgerIndexTransactions;
   int _indexedTransactionCount = -1;
   Set<String> _duplicatePendingIds = {};
   Map<String, List<LedgerTx>> _ledgerBuckets = {};
   PaymentNotifications(this.store, {NotificationBridge? bridge})
     : bridge = bridge ?? AndroidNotificationBridge();
   bool get supported => bridge.supported;
-  List<Json> get records => _records(store.data).reversed.toList();
-  List<Json> get pending =>
-      records.where((r) => r['status'] == 'pending').toList();
-  static int pendingCount(WalletData data) =>
-      _records(data).where((r) => r['status'] == 'pending').length;
+  static final _recordsCache = Expando<List<Json>>();
+  static final _pendingCache = Expando<List<Json>>();
+  List<Json> get records {
+    final raw = store.data.extras['paymentNotifications'] as List?;
+    if (raw == null) return const [];
+    return _recordsCache[raw] ??= List.unmodifiable(raw.cast<Json>().reversed);
+  }
+
+  List<Json> get pending => _pendingRecords(store.data);
+  static List<Json> _pendingRecords(WalletData data) {
+    final raw = data.extras['paymentNotifications'] as List?;
+    if (raw == null) return const [];
+    return _pendingCache[raw] ??= List.unmodifiable(
+      raw.cast<Json>().reversed.where((r) => r['status'] == 'pending'),
+    );
+  }
+
+  static int pendingCount(WalletData data) => _pendingRecords(data).length;
   static List<Json> _records(WalletData d) =>
-      (d.extras['paymentNotifications'] as List? ?? [])
-          .map((e) => Json.from(e as Map))
-          .toList();
+      (d.extras['paymentNotifications'] as List? ?? []).cast<Json>();
 
   Future<Json> status() async => supported
       ? Json.from(await bridge.call('status') as Map)
@@ -97,73 +109,109 @@ class PaymentNotifications {
     }
   });
 
-  Future<void> ingest(List<Json> events, {bool ignore = false}) =>
-      store.change((d) {
-        final records = _records(d);
-        final ids = records.map((e) => e['eventId']).toSet();
-        for (final e in events) {
-          if (e['eventId'] is! String ||
-              !RegExp(r'^[a-f0-9]{64}$').hasMatch(e['eventId']) ||
-              ![
-                'com.tencent.mm',
-                'com.eg.android.AlipayGphone',
-              ].contains(e['sourcePackage']) ||
-              e['postedAt'] is! int ||
-              e['postedAt'] <= 0 ||
-              e['postedAt'] > 8640000000000000 ||
-              e['text'] is! String ||
-              (e['text'] as String).length > 4096 ||
-              e['title'] is! String ||
-              (e['title'] as String).length > 200 ||
-              ![
-                'expense',
-                'income',
-                'transfer',
-                'repayment',
-                'refund',
-                'unknown',
-              ].contains(e['kind']) ||
-              (e['amountCents'] != null &&
-                  (e['amountCents'] is! int ||
-                      e['amountCents'] <= 0 ||
-                      e['amountCents'] > 999999999999))) {
-            throw const FormatException('通知数据不完整，已保留原生收件箱供重试');
-          }
-          if (!ids.add(e['eventId'])) continue;
-          if (!ignore &&
-              records.where((r) => r['status'] == 'pending').length >= 2000) {
-            throw const FormatException('待确认通知已达 2000 条，请先处理');
-          }
-          final possibleDuplicate =
-              e['amountCents'] != null &&
-              records.any(
-                (r) =>
-                    r['sourcePackage'] == e['sourcePackage'] &&
-                    r['amountCents'] == e['amountCents'] &&
-                    ((r['postedAt'] as int) - (e['postedAt'] as int)).abs() <=
-                        120000,
-              );
-          records.add({
-            'eventId': e['eventId'],
-            'sourcePackage': e['sourcePackage'],
-            'notificationKey': e['notificationKey'],
-            'postedAt': e['postedAt'],
-            'title': ignore ? '' : e['title'],
-            'text': ignore ? '' : e['text'],
-            'amountCents': e['amountCents'],
-            'kind': e['kind'],
-            'merchant': e['merchant'] is String ? e['merchant'] : '',
-            'reviewReason': e['reviewReason'] is String
-                ? e['reviewReason']
-                : '请核对交易信息',
-            'ruleVersion': e['ruleVersion'],
-            'status': ignore ? 'ignored' : 'pending',
-            'cleared': ignore,
-            'possibleDuplicate': possibleDuplicate,
-          });
-        }
-        d.extras['paymentNotifications'] = records;
+  Future<void> ingest(
+    List<Json> events, {
+    bool ignore = false,
+  }) => store.change((d) {
+    final records = _records(d);
+    final ids = records.map((e) => e['eventId']).toSet();
+    var pending = records.where((r) => r['status'] == 'pending').length;
+    final byAmount = <(String, int), List<int>>{};
+    for (final record in records) {
+      if (record['amountCents'] is int) {
+        (byAmount[(
+                  record['sourcePackage'] as String,
+                  record['amountCents'] as int,
+                )] ??=
+                [])
+            .add(record['postedAt'] as int);
+      }
+    }
+    for (final e in events) {
+      if (e['eventId'] is! String ||
+          !RegExp(r'^[a-f0-9]{64}$').hasMatch(e['eventId']) ||
+          ![
+            'com.tencent.mm',
+            'com.eg.android.AlipayGphone',
+          ].contains(e['sourcePackage']) ||
+          e['postedAt'] is! int ||
+          e['postedAt'] <= 0 ||
+          e['postedAt'] > 8640000000000000 ||
+          e['text'] is! String ||
+          (e['text'] as String).length > 4096 ||
+          e['title'] is! String ||
+          (e['title'] as String).length > 200 ||
+          ![
+            'expense',
+            'income',
+            'transfer',
+            'repayment',
+            'refund',
+            'unknown',
+          ].contains(e['kind']) ||
+          (e['amountCents'] != null &&
+              (e['amountCents'] is! int ||
+                  e['amountCents'] <= 0 ||
+                  e['amountCents'] > 999999999999))) {
+        throw const FormatException('通知数据不完整，已保留原生收件箱供重试');
+      }
+      if (!ids.add(e['eventId'])) continue;
+      if (!ignore && pending >= 2000) {
+        throw const FormatException('待确认通知已达 2000 条，请先处理');
+      }
+      final possibleDuplicate =
+          e['amountCents'] != null &&
+          (byAmount[(e['sourcePackage'] as String, e['amountCents'] as int)] ??
+                  const <int>[])
+              .any((time) => (time - (e['postedAt'] as int)).abs() <= 120000);
+      records.add({
+        'eventId': e['eventId'],
+        'sourcePackage': e['sourcePackage'],
+        'notificationKey': e['notificationKey'],
+        'postedAt': e['postedAt'],
+        'title': ignore ? '' : e['title'],
+        'text': ignore ? '' : e['text'],
+        'amountCents': e['amountCents'],
+        'kind': e['kind'],
+        'merchant': e['merchant'] is String ? e['merchant'] : '',
+        'reviewReason': e['reviewReason'] is String
+            ? e['reviewReason']
+            : '请核对交易信息',
+        'ruleVersion': e['ruleVersion'],
+        'status': ignore ? 'ignored' : 'pending',
+        'cleared': ignore,
+        'possibleDuplicate': possibleDuplicate,
       });
+      if (!ignore) pending++;
+      if (e['amountCents'] is int) {
+        (byAmount[(e['sourcePackage'] as String, e['amountCents'] as int)] ??=
+                [])
+            .add(e['postedAt'] as int);
+      }
+    }
+    _compactProcessed(records);
+    d.extras['paymentNotifications'] = records;
+  });
+
+  // Keep durable IDs, amounts and refund links; bound retained notification text.
+  static void _compactProcessed(List<Json> records) {
+    var recent = 0;
+    final cutoff = DateTime.now()
+        .subtract(const Duration(days: 30))
+        .millisecondsSinceEpoch;
+    for (var i = records.length - 1; i >= 0; i--) {
+      final record = records[i];
+      if (record['status'] == 'pending') continue;
+      if (++recent <= 500 && (record['postedAt'] as int? ?? 0) >= cutoff) {
+        continue;
+      }
+      if (record['text'] != '' || record['title'] != '') {
+        record['text'] = '';
+        record['title'] = '';
+        record['cleared'] = true;
+      }
+    }
+  }
 
   Future<void> accept(
     String eventId,
@@ -192,11 +240,12 @@ class PaymentNotifications {
     var count = 0;
     await store.change((d) {
       final records = _records(d);
+      final byId = {for (final record in records) record['eventId']: record};
+      final transactions = <LedgerTx>[];
+      final txIds = d.transactions.map((t) => t.id).toSet();
       final checked = <PaymentAcceptance>[];
       for (final item in items) {
-        final record = records
-            .where((r) => r['eventId'] == item.eventId)
-            .firstOrNull;
+        final record = byId[item.eventId];
         if (record == null) throw const FormatException('通知记录不存在，请刷新后重试');
         if (record['status'] == 'applied') continue;
         final problem = batchProblem(record, data: d);
@@ -219,9 +268,14 @@ class PaymentNotifications {
           item.eventId,
           item.transaction,
           duplicateReviewed: true,
+          record: byId[item.eventId],
+          transactionIds: txIds,
+          deferredTransactions: transactions,
         );
         count++;
       }
+      LedgerOperations.appendTransactions(d, transactions);
+      _compactProcessed(records);
       d.extras['paymentNotifications'] = records;
     });
     return count;
@@ -237,8 +291,9 @@ class PaymentNotifications {
     final date =
         transaction?.date ??
         DateTime.fromMillisecondsSinceEpoch(record['postedAt']);
-    if (!identical(_pendingIndexData, ledger)) {
-      _pendingIndexData = ledger;
+    final rawRecords = ledger.extras['paymentNotifications'] as List?;
+    if (!identical(_pendingIndexRecords, rawRecords)) {
+      _pendingIndexRecords = rawRecords;
       _duplicatePendingIds = {};
       final groups = <int, List<Json>>{};
       for (final r in _records(ledger).where((r) => r['status'] == 'pending')) {
@@ -261,9 +316,9 @@ class PaymentNotifications {
         }
       }
     }
-    if (!identical(_ledgerIndexData, ledger) ||
+    if (!identical(_ledgerIndexTransactions, ledger.transactions) ||
         _indexedTransactionCount != ledger.transactions.length) {
-      _ledgerIndexData = ledger;
+      _ledgerIndexTransactions = ledger.transactions;
       _indexedTransactionCount = ledger.transactions.length;
       _ledgerBuckets = {};
       for (final tx in ledger.transactions) {
@@ -306,9 +361,12 @@ class PaymentNotifications {
     LedgerTx tx, {
     bool duplicateReviewed = false,
     String? refundOf,
+    Json? record,
+    Set<String>? transactionIds,
+    List<LedgerTx>? deferredTransactions,
   }) {
     if (d.settings['locked'] == true) throw const FormatException('账本已锁定，请先解锁');
-    final record = records.firstWhere(
+    record ??= records.firstWhere(
       (r) => r['eventId'] == eventId,
       orElse: () => throw const FormatException('通知记录不存在'),
     );
@@ -355,7 +413,9 @@ class PaymentNotifications {
         needsDuplicateReview(record, transaction: tx, data: d)) {
       throw const FormatException('存在金额和时间相近的记录，请确认不是重复账单');
     }
-    if (d.transactions.any((t) => t.id == tx.id)) {
+    if (transactionIds != null
+        ? !transactionIds.add(tx.id)
+        : d.transactions.any((t) => t.id == tx.id)) {
       throw const FormatException('账单 ID 已存在');
     }
     if (tx.type == TxType.transfer && tx.fromId == tx.toId) {
@@ -373,7 +433,11 @@ class PaymentNotifications {
       'sourceId': eventId,
       if (record['kind'] == 'refund') 'originalTransactionId': refundOf,
     });
-    LedgerOperations.putTransaction(d, tx, mode: TransactionWrite.insert);
+    if (deferredTransactions != null) {
+      deferredTransactions.add(tx);
+    } else {
+      LedgerOperations.putTransaction(d, tx, mode: TransactionWrite.insert);
+    }
     record['status'] = 'applied';
     record['transactionId'] = tx.id;
     if (record['kind'] == 'refund') record['refundOf'] = refundOf;

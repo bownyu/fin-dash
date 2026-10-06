@@ -13,7 +13,7 @@ class ModelQueue {
     final cancel = Completer<void>();
     waiting[id] = cancel;
     try {
-      while (store.aiStatus != null || waiting.keys.first != id) {
+      while (waiting.keys.first != id) {
         final ready = Completer<void>();
         void wake() {
           if (!ready.isCompleted) ready.complete();

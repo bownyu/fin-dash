@@ -1,6 +1,10 @@
 import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:fin_dash/data/backup.dart';
+import 'package:fin_dash/services/backup_bundle.dart';
+import 'package:fin_dash/services/chat_image_storage.dart';
+import 'package:crypto/crypto.dart';
+import 'dart:typed_data';
 import 'package:fin_dash/domain/models.dart';
 import 'helpers.dart';
 import 'package:fin_dash/data/wallet_migration.dart';
@@ -69,6 +73,28 @@ Json legacyBackup() => {
   },
 };
 void main() {
+  test(
+    'background backup keeps image bytes and strips nested credentials',
+    () async {
+      final store = await emptyStore();
+      await store.saveAccount(bank);
+      final images = MemoryChatImageStorage(),
+          bytes = Uint8List.fromList([1, 2, 3]);
+      final id = sha256.convert(bytes).toString();
+      await images.save(id, bytes);
+      await store.change((d) {
+        d.chats.add({'id': 'image', 'role': 'user', 'imageId': id});
+        d.extras['private'] = {'apiKey': 'secret', 'keep': 'retained'};
+      });
+      final raw = await exportBackupBundle(store, images);
+      expect(raw, isNot(contains('secret')));
+      final bundle = await parseBackupBundleAsync(
+        Uint8List.fromList(utf8.encode(raw)),
+      );
+      expect(bundle.images[id], bytes);
+      expect(bundle.preview.data.extras['private']['keep'], 'retained');
+    },
+  );
   test(
     'legacy JSON migration preserves balances, accounts, shortcuts and agent memory',
     () async {

@@ -10,6 +10,28 @@ import kotlin.math.sqrt
 object PcmSegments {
     private const val RATE = 16000
 
+    /** Tail complete VAD windows while recording; pad only the final partial window. */
+    fun readGrowing(file: File, finished: () -> Boolean, cancelled: () -> Boolean,
+                    awaitData: () -> Unit, consume: (FloatArray) -> Unit) {
+        RandomAccessFile(file, "r").use { input ->
+            val buffer = ByteArray(1024)
+            while (!cancelled()) {
+                val done = finished()
+                val available = input.length() - input.filePointer
+                if (available < buffer.size && !done) { awaitData(); continue }
+                if (available == 0L) return
+                val count = minOf(available, buffer.size.toLong()).toInt()
+                input.readFully(buffer, 0, count)
+                val samples = FloatArray(512)
+                for (i in 0 until count / 2) {
+                    samples[i] = ((buffer[i * 2].toInt() and 255) or
+                        (buffer[i * 2 + 1].toInt() shl 8)).toShort() / 32768f
+                }
+                consume(samples)
+            }
+        }
+    }
+
     /** Loudness of one PCM16 buffer, mapping -60..-20 dBFS onto 0..1 for the recording meter. */
     fun level(buffer: ByteArray, count: Int): Float {
         val samples = minOf(count, buffer.size) / 2

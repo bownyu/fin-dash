@@ -276,21 +276,18 @@ void main() {
       final ai = SuccessfulAi(store)..result = twoBills();
       VoiceWidgetRuntime.install(store, ai, () {});
       addTearDown(() => VoiceWidgetRuntime.channel.setMethodCallHandler(null));
-      final review = await widgetRequest({
+      final saved = await widgetRequest({
         'operation': 'preview',
         'text': twoBillTranscript,
         'entryId': 'widget-pair',
       });
-      expect(review['canConfirm'], true);
-      expect(review['summary'], contains('18.00'));
-      expect(review['summary'], contains('3.00'));
-      final confirmation = {
+      expect(saved['transaction'], isNotNull);
+      expect(saved['summary'], contains('18.00'));
+      expect(saved['summary'], contains('3.00'));
+      await widgetRequest({
         'operation': 'confirm',
-        'draft': jsonEncode(review['draft']),
-      };
-      final saved = await widgetRequest(confirmation);
-      expect(saved['success'], true);
-      await widgetRequest(confirmation);
+        'draft': jsonEncode(saved['draft']),
+      });
       expect(store.data.transactions.length, 2);
       expect(store.balance(boc), 97900);
       final undone = await widgetRequest({
@@ -308,6 +305,7 @@ void main() {
         'entryId': 'larger',
       });
       expect(larger['canConfirm'], false);
+      expect(larger['openApp'], true);
       expect(larger['message'], contains('App 任务页'));
       final blocked = await widgetRequest({
         'operation': 'confirm',
@@ -722,9 +720,10 @@ void main() {
       expect(ai.texts.last, '招商银行');
       expect(ai.current, containsPair('accountId', null));
       expect(corrected['text'], '蜜雪冰城十块钱；补充：招商银行');
-      expect(corrected['canConfirm'], true);
+      // The completed correction is saved under the original entry, leaving no stray draft.
       expect((corrected['draft'] as Map)['entryId'], 'widget');
-      expect((store.data.extras['voiceDrafts'] as Map).keys, ['widget']);
+      expect(store.data.transactions.single.id, 'widget');
+      expect(store.data.extras['voiceDrafts'] as Map, isEmpty);
     },
   );
 

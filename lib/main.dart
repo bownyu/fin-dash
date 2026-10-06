@@ -331,6 +331,7 @@ class _ShellState extends State<_Shell> with SingleTickerProviderStateMixin {
   @override
   Widget build(BuildContext context) {
     final wide = MediaQuery.sizeOf(context).width >= 900;
+    final visible = ModalRoute.isCurrentOf(context) ?? true;
     final colors = WalletColors.of(context);
     final views = SlideTransition(
       key: const Key('main-tab-transition'),
@@ -342,8 +343,16 @@ class _ShellState extends State<_Shell> with SingleTickerProviderStateMixin {
           _pages.length,
           (i) => _visited.contains(i)
               ? TickerMode(
-                  enabled: i == index,
-                  child: RepaintBoundary(child: _pages[i]),
+                  enabled: visible && i == index,
+                  child: AppScope(
+                    store: AppScope.storeOf(context, domains: const {}),
+                    ai: AppScope.aiOf(context),
+                    active: visible && i == index,
+                    child: HeldKeyboardMetrics(
+                      hold: i != index,
+                      child: RepaintBoundary(child: _pages[i]),
+                    ),
+                  ),
                 )
               : const SizedBox.shrink(),
         ),
@@ -361,6 +370,10 @@ class _ShellState extends State<_Shell> with SingleTickerProviderStateMixin {
       },
       child: Scaffold(
         extendBody: true,
+        // IndexedStack lays out every retained tab; resizing for the keyboard
+        // would rebuild the adaptive home on each IME frame. Bills search
+        // pads its own list instead.
+        resizeToAvoidBottomInset: false,
         backgroundColor: Colors.transparent,
         body: SafeArea(
           bottom: false,

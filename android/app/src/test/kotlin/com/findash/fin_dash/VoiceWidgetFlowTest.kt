@@ -10,6 +10,7 @@ class VoiceWidgetFlowTest {
         assertEquals("confirm", VoiceWidgetFlow.primary("review", true, true))
         assertEquals("supplement", VoiceWidgetFlow.primary("review", false, true))
         assertEquals("speak", VoiceWidgetFlow.primary("saved", true, false))
+        assertEquals("open", VoiceWidgetFlow.primary("review", false, true, openApp = true))
     }
     @Test fun repeatedClicksDuringProcessingNeverStartOrSave() {
         for (phase in VoiceWidgetFlow.busy) {

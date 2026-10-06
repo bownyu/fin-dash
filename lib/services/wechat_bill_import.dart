@@ -70,16 +70,22 @@ class WechatBillIssue {
 }
 
 class WechatBill {
+  static final _paymentCounts = Expando<Map<String, int>>();
   final List<WechatBillRecord> records;
   final List<WechatBillIssue> issues;
   final String sheet;
   const WechatBill(this.records, this.issues, this.sheet);
   int total(TxType type) =>
       records.where((r) => r.type == type).fold(0, (sum, r) => sum + r.amount);
-  Map<String, int> get payments => {
-    for (final payment in records.map((r) => r.payment).toSet())
-      payment: records.where((r) => r.payment == payment).length,
-  };
+  Map<String, int> get payments {
+    final cached = _paymentCounts[this];
+    if (cached != null) return cached;
+    final counts = <String, int>{};
+    for (final record in records) {
+      counts[record.payment] = (counts[record.payment] ?? 0) + 1;
+    }
+    return _paymentCounts[this] = Map.unmodifiable(counts);
+  }
 
   /// Pure parsing: safe to run in a worker isolate; never writes the ledger.
   static WechatBill parse(Uint8List bytes) {
@@ -329,21 +335,39 @@ class WechatImportResult {
 
 class WechatBillImporter {
   final WalletStore store;
+  List<LedgerTx>? _indexedTransactions;
+  Set<String> _transactionIds = {};
+  bool Function(WechatBillRecord)? _matches;
+  WechatBill? _duplicateBill, _similarBill;
+  Set<String>? _duplicateIds, _similarIds;
   WechatBillImporter(this.store);
+  void _checkIndex() {
+    if (identical(_indexedTransactions, store.data.transactions)) return;
+    _indexedTransactions = store.data.transactions;
+    _transactionIds = _indexedTransactions!.map((t) => t.id).toSet();
+    _matches = null;
+    _duplicateBill = _similarBill = null;
+  }
+
   Set<String> duplicates(WechatBill bill) {
-    final seen = store.data.transactions.map((t) => t.id).toSet();
-    return {
+    _checkIndex();
+    if (identical(_duplicateBill, bill)) return _duplicateIds!;
+    _duplicateBill = bill;
+    return _duplicateIds = Set.unmodifiable({
       for (final r in bill.records)
-        if (seen.contains(r.id)) r.id,
-    };
+        if (_transactionIds.contains(r.id)) r.id,
+    });
   }
 
   Set<String> similar(WechatBill bill) {
-    final matches = _similarMatcher(store.data.transactions);
-    return {
+    _checkIndex();
+    if (identical(_similarBill, bill)) return _similarIds!;
+    _similarBill = bill;
+    final matches = _matches ??= _similarMatcher(store.data.transactions);
+    return _similarIds = Set.unmodifiable({
       for (final r in bill.records)
         if (matches(r)) r.id,
-    };
+    });
   }
 
   static bool Function(WechatBillRecord) _similarMatcher(
@@ -489,15 +513,14 @@ class WechatBillImporter {
         effects[account] = (effects[account] ?? 0) + tx.effectOn(account);
       }
       if (preserveBalances) {
-        d.accounts = d.accounts
-            .map(
-              (a) => effects.containsKey(a.id)
-                  ? a.copyWith(
-                      openingBalance: a.openingBalance - effects[a.id]!,
-                    )
-                  : a,
-            )
-            .toList();
+        for (var i = 0; i < d.accounts.length; i++) {
+          final account = d.accounts[i], effect = effects[account.id];
+          if (effect != null && effect != 0) {
+            d.accounts[i] = account.copyWith(
+              openingBalance: account.openingBalance - effect,
+            );
+          }
+        }
       }
       LedgerOperations.appendTransactions(d, added);
       if (added.isNotEmpty) d.extras.remove('analysisCache');

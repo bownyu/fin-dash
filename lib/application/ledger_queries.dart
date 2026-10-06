@@ -16,6 +16,38 @@ class LedgerQueries {
       snapshot = QuerySnapshot(store.ledgerEpoch, store.ledgerRevision);
 
   LedgerQueries._(this.data, this.snapshot) : _store = null;
+  LedgerQueries.fromSnapshot(this.data, this.snapshot) : _store = null;
+
+  void ensureCurrent() {
+    if (_store != null &&
+        (_store.ledgerEpoch != snapshot.ledgerEpoch ||
+            _store.ledgerRevision != snapshot.revision)) {
+      throw const ErrorEnvelope(ErrorCode.snapshotExpired, '查询期间账本已变化，请重新查询');
+    }
+  }
+
+  Future<List<Json>?> recipeTransactions(Json filters) async {
+    final backend = _store?.storage;
+    if (backend is! QueryWalletStorage) return null;
+    final result = await (backend as QueryWalletStorage).queryRecords({
+      ...filters,
+      'offset': 0,
+      'limit': 50001,
+      'aggregate': false,
+      'expectedLedgerEpoch': snapshot.ledgerEpoch,
+      'expectedLedgerRevision': snapshot.revision,
+    });
+    ensureCurrent();
+    return (result['transactions'] as List)
+        .map(
+          (raw) => <String, dynamic>{
+            ...Json.from(raw),
+            'occurredAt': raw['date'],
+            'currency': 'CNY',
+          },
+        )
+        .toList();
+  }
 
   Future<QueryResult<Json>> queryAsync(
     Json args, {
@@ -41,6 +73,8 @@ class LedgerQueries {
       'offset': offset,
       'limit': limit,
       'aggregate': aggregate,
+      'expectedLedgerEpoch': snapshot.ledgerEpoch,
+      'expectedLedgerRevision': snapshot.revision,
     });
     if (store!.ledgerEpoch != snapshot.ledgerEpoch ||
         store.ledgerRevision != snapshot.revision) {
@@ -58,7 +92,11 @@ class LedgerQueries {
               'incomeCents': result['incomeCents'],
               'transactionCount': count,
             }
-          : {'transactions': page.map((t) => {...Json.from(t),'currency':'CNY'}).toList()},
+          : {
+              'transactions': page
+                  .map((t) => {...Json.from(t), 'currency': 'CNY'})
+                  .toList(),
+            },
       scope: validated.scope,
       snapshot: snapshot,
       matchedRows: count,
@@ -121,10 +159,27 @@ class LedgerQueries {
       'currency': 'String',
     },
   };
-  Iterable<Json> rows(String dataset) sync* {
+  Iterable<Json> rows(String dataset, {Json filters = const {}}) sync* {
     switch (dataset) {
       case 'ledger.transactions':
+        final start = filters['startInclusive'] == null
+            ? null
+            : parseLedgerDate(filters['startInclusive']);
+        final end = filters['endExclusive'] == null
+            ? null
+            : parseLedgerDate(filters['endExclusive']);
         for (final t in data.transactions) {
+          if (filters['type'] != null && t.type.name != filters['type'] ||
+              filters['accountId'] != null &&
+                  t.accountId != filters['accountId'] ||
+              filters['categoryId'] != null &&
+                  t.categoryId != filters['categoryId']) {
+            continue;
+          }
+          if (start != null &&
+              (t.date.isBefore(start) || !t.date.isBefore(end!))) {
+            continue;
+          }
           yield {
             ...t.toJson(),
             'occurredAt': t.date.toIso8601String(),
