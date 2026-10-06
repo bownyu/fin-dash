@@ -10,8 +10,8 @@
 
 1. 按 Agent.md 同步应用版本与递增构建号，完成测试。
 2. 本机 android/key.properties 指向现有私有签名；更新必须使用相同证书。仅首次开发构建可用本机 debug 签名。
-3. 构建 release APK；运行 scripts/prepare-github-release.ps1 -Repository owner/repo，生成白名单源码快照、隐私扫描和安装包更新清单。
-4. 检查 output/github-publication 中的文件，将 source 目录提交到 GitHub。它是独立的公开仓库，不包含本地旧提交。
+3. 构建 release APK；运行 scripts/prepare-github-release.ps1 -Repository owner/repo，扫描全部受版本控制的文件并在 output/github-publication/assets 生成安装包、更新清单和校验文件。
+4. 提交本次版本并推送到 GitHub 的 main 分支。
 5. 运行 scripts/publish-github-release.ps1 -Repository owner/repo，上传已经准备的附件并发布版本。脚本验证 APK 和更新清单哈希，拒绝覆盖已有发布版本。
 
 ## 更新清单

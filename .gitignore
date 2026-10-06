@@ -39,7 +39,6 @@ migrate_working_dir/
 .playwright-cli/
 **/local.properties
 **/.kotlin/
-legacy_android/idea_before_flutter/
 .env
 .env.*
 *.keystore
@@ -67,9 +66,7 @@ key.properties
 *.pem
 *backup*.json
 findash_ledger*
-/legacy_android/.gradle/
-/legacy_android/build/
-/legacy_android/app/build/
+/legacy_android/
 
 # Symbolication related
 app.*.symbols
